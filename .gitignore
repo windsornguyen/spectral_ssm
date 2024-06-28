@@ -1,0 +1,52 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+deepmind/
+dm_env/
+ssm_env/
+
+# Linter cache
+.ruff_cache/
+
+# Data to test Transformer with
+transformer/data/
+
+# Results
+transformer/data/results
+
+# Training artifacts
+*.slurm
+checkpoints/
+*.python
+*.npy
+*.pt
+*.pth
+training_details.txt
+*.out
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+data/
+develop-eggs/
+spectral_ssm.egg-info/
+.installed.cfg

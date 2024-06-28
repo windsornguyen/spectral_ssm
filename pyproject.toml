@@ -1,0 +1,100 @@
+[tool.poetry]
+name = "spectral_ssm"
+version = "1.0"
+description = "Dependency manager Google DeepMind's Spectral State Space Model"
+license = "Apache 2.0"
+homepage = "https://arxiv.org/abs/2312.06837"
+repository = "https://github.com/windsornguyen/spectral_ssm"
+authors = [
+    # In alphabetical order, by last name:
+    "Yagiz Devre",
+    "Evan Dogariu",
+    "Chiara von Gerlach",
+    "Isabel Liu",
+    "Windsor Nguyen",
+    "Dwaipayan Saha",
+]
+keywords = [
+    "pytorch",
+    "state space model",
+    "spectral filtering",
+    "state space model",
+    "deep learning",
+    "machine learning",
+    "time series",
+    "dynamical systems",
+]
+
+
+[tool.poetry.dependencies]
+python = "^3.8"
+torch = "^2.0.0"
+
+[tool.poetry.dev-dependencies]
+# See `ruff help` for more on Ruff's top-level commands.
+ruff = "^0.4.8"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29.4"
+
+[tool.ruff]
+# Exclude a variety of commonly ignored directories.
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+line-length = 88
+indent-width = 4
+
+target-version = "py311"
+
+[tool.ruff.lint]
+# Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
+# Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
+# McCabe complexity (`C901`) by default.
+select = ["E4", "E7", "E9", "F", "B", "Q"]
+ignore = []
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double" # Enforce double quotes for docstrings
+inline-quotes = "double"    # Enforce double quotes for inline strings
+
+[tool.ruff.format]
+quote-style = "double" # Default to double quotes for auto-formatting
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
