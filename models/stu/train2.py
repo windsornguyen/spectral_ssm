@@ -29,7 +29,9 @@ from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
 
-def save_results(task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None):
+def save_results(
+    task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None
+):
     """
     Save data to a file with enhanced flexibility and metadata support.
 
@@ -134,14 +136,15 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 2
+    n_layers: int = 4
     scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 24
-    k_u: int = 3
     k_y: int = 2
+    k_u: int = 3
     learnable_m_y: bool = True
+    alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -157,16 +160,16 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        d_in: int = 24 if controller != "Ant-v1" else 37
-        d_out: int = 18 if controller != "Ant-v1" else 29
         n_embd: int = 24 if controller != "Ant-v1" else 37
+        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
+        d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1_000
 
         configs = SSSMConfigs(
-            d_in=d_in,
-            d_out=d_out,
             n_layers=n_layers,
             n_embd=n_embd,
+            d_in=d_in,
+            d_out=d_out,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -175,19 +178,21 @@ def main() -> None:
             k_u=k_u,
             k_y=k_y,
             learnable_m_y=learnable_m_y,
+            alpha=alpha,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
         )
 
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
+        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
         sl: int = 1_000
         configs = SSSMConfigs(
-            d_in=d_in,
-            d_out=d_out,
             n_layers=n_layers,
             n_embd=n_embd,
+            d_in=d_in,
+            d_out=d_out,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -196,6 +201,7 @@ def main() -> None:
             k_u=k_u,
             k_y=k_y,
             learnable_m_y=learnable_m_y,
+            alpha=alpha,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
         )
@@ -205,13 +211,14 @@ def main() -> None:
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_embd = d_out
+        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         sl: int = 300
 
         configs = SSSMConfigs(
-            d_in=d_in,
-            d_out=d_out,
             n_layers=n_layers,
             n_embd=n_embd,
+            d_in=d_in,
+            d_out=d_out,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -220,6 +227,7 @@ def main() -> None:
             k_u=k_u,
             k_y=k_y,
             learnable_m_y=learnable_m_y,
+            alpha=alpha,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v3", "controller": controller},
         )
@@ -231,7 +239,7 @@ def main() -> None:
     stu_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 2
+    bsz: int = 80
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -242,7 +250,7 @@ def main() -> None:
     # Initialize dataset variable
     dataset = None
 
-    # Handle mujoco-v1 and mujoco-v2 tasks  
+    # Handle mujoco-v1 and mujoco-v2 tasks
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = mujoco_v1_base if args.task == "mujoco-v1" else mujoco_v2_base
         train_data = {
@@ -319,6 +327,8 @@ def main() -> None:
     weight_decay: float = 1e-1
     max_lr: float = 6e-4
     min_lr: float = max_lr * 0.1
+    
+    # Adam hyperparameters, per the GPT-3 paper
     betas = (0.9, 0.95)
     eps = 1e-8
     use_amsgrad = False
@@ -393,7 +403,7 @@ def main() -> None:
             if relative_step % (eval_period // dilation) == 0 or last_step:
                 if main_process:
                     colored_print(
-                        f"\nLyla: Evaluating the SSSM model on step {relative_step}.",
+                        f"\nLyla: Evaluating the SSSM model at step {relative_step}.",
                         Colors.OKCYAN,
                     )
                 val_metrics = training_run.evaluate(val_loader)
@@ -464,11 +474,11 @@ def main() -> None:
                     break
 
             # Logging
-            if main_process and relative_step % (eval_period // 2) == 0:
+            if main_process and relative_step % 5 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
                 colored_print(
                     f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
-                    f"Step Time: {train_results['step_time']*1000:.4f}ms | Tokens/sec: {train_results['tokens_per_sec']:.4f}",
+                    f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f}",
                     Colors.OKBLUE,
                 )
 
@@ -549,7 +559,9 @@ def main() -> None:
                 "val_losses",
                 timestamp,
             )
-            save_results(args.task, controller, val_time_steps, "val_time_steps", timestamp)
+            save_results(
+                args.task, controller, val_time_steps, "val_time_steps", timestamp
+            )
             save_results(args.task, controller, grad_norms, "grad_norms", timestamp)
 
             if not task["mujoco-v3"]:
@@ -560,6 +572,7 @@ def main() -> None:
                 "Lyla: It was a pleasure assisting you. Until next time!",
                 Colors.OKGREEN,
             )
+
 
 if __name__ == "__main__":
     main()

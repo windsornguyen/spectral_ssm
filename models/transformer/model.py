@@ -25,6 +25,7 @@ from einops import rearrange
 from torch.nn import functional as F
 from tqdm import tqdm
 from utils.squared_relu import SquaredReLU
+from utils.rms_norm import RMSNorm # TODO: Remove the bias config since we don't use LN
 
 class CausalSelfAttention(nn.Module):
     """
@@ -152,9 +153,9 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
-        self.ln_1 = nn.LayerNorm(configs.n_embd, bias=configs.bias)
+        self.rn_1 = RMSNorm(configs.n_embd)
         self.attn = self._get_attn_type(configs)
-        self.ln_2 = nn.LayerNorm(configs.n_embd, bias=configs.bias)
+        self.rn_2 = RMSNorm(configs.n_embd)
         self.ffn = FFN(configs)
 
     def _get_attn_type(self, configs):
@@ -164,10 +165,10 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        # x = x + self.ffn(self.ln_2(x))
-        x = x + self.ffn(x)
-        return x
+        z = x
+        x = x + self.attn(self.rn_1(x))
+        x = x + self.ffn(self.rn_2(x))
+        return x + z
 
 
 @dataclass
@@ -196,7 +197,8 @@ class Transformer(nn.Module):
         assert configs.sl is not None
         self.configs = configs
         self.controls = configs.controls
-        self.d_in = nn.Linear(configs.n_embd, configs.n_embd)
+        self.n_embd = configs.n_embd
+        self.d_in = nn.Linear(self.n_embd, self.n_embd)
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
@@ -221,7 +223,7 @@ class Transformer(nn.Module):
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = 0.02
+        self.std = self.n_embd ** -0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -292,9 +294,6 @@ class Transformer(nn.Module):
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:
             x = block(x)
-
-        # Apply layer norm to output of the last transformer block
-        x = self.transformer.ln_f(x)
 
         # Output model predictions!
         preds = self.task_head(x)  # -> (bsz, sl, d_out)
@@ -394,7 +393,7 @@ class Transformer(nn.Module):
 
         # Initialize the predicted sequences and losses
         ar_sequences = inputs.clone()
-        preds = torch.zeros(num_trajectories, steps, self.configs.d_out, device=device)
+        preds = torch.zeros(num_trajectories, steps, self.configs.n_embd, device=device)
         trajectory_losses = torch.zeros(num_trajectories, steps, device=device)
         metrics = {
             key: torch.zeros(num_trajectories, steps, device=device)
@@ -409,7 +408,7 @@ class Transformer(nn.Module):
 
         # Initialize the predicted sequences and losses
         ar_sequences = inputs.clone()
-        preds = torch.zeros(num_trajectories, steps, self.configs.d_out, device=device)
+        preds = torch.zeros(num_trajectories, steps, self.configs.n_embd, device=device)
         trajectory_losses = torch.zeros(num_trajectories, steps, device=device)
         metrics = {
             key: torch.zeros(num_trajectories, steps, device=device)

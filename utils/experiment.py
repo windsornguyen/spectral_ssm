@@ -198,8 +198,8 @@ class Experiment:
 
         inputs, targets = inputs.to(self.device), targets.to(self.device)
 
-        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            preds, loss_info = self.model(inputs, targets)
+         #with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+        preds, loss_info = self.model(inputs, targets)
 
         if isinstance(loss_info, tuple):
             loss, *step_metrics = loss_info
@@ -211,6 +211,7 @@ class Experiment:
         if self.world_size > 1:
             dist.all_reduce(loss, op=dist.ReduceOp.AVG)
 
+        # Clip global norm of gradient at 1.0, per the GPT-3 paper
         norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
         self.optimizer.step()
@@ -288,8 +289,8 @@ class Experiment:
                 t0 = time()
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
 
-                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    preds, loss_info = self.model(inputs, targets)
+                # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                preds, loss_info = self.model(inputs, targets)
 
                 if isinstance(loss_info, tuple):
                     loss, *step_metrics = loss_info

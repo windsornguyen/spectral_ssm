@@ -75,10 +75,11 @@ class Dataloader(Dataset):
         elif self.task == "mujoco-v3":
             features = torch.cat(self.data, dim=0)
 
-        # Mean over frames and features, for each sample
-        self.mean = features.mean(dim=(1, 2), keepdim=True)
-        # Std over frames and features, for each sample
-        self.std = features.std(dim=(1, 2), keepdim=True)
+        # Mean over frames and samples, for each feature
+        self.mean = features.mean(dim=(0, 1), keepdim=True)
+
+        # Std over frames and samples, for each feature
+        self.std = features.std(dim=(0, 1), keepdim=True)
 
     def _normalize_data(self):
         self.inputs = (self.inputs - self.mean.numpy()) / (self.std.numpy() + self.eps)

@@ -1,0 +1,5 @@
+Training completed for SSSM on mujoco-v2 with HalfCheetah-v1 at: 2024-06-28 15:52:01.429320
+Best model step: 92
+Best model validation loss: 49.1515
+Best model checkpoint saved at: checkpoints/sssm-HalfCheetah-v1-model_step-92-2024-06-28-15-48-39-48l.pt
+Best model's extra info data saved at: checkpoints/sssm-HalfCheetah-v1-other_step-92-2024-06-28-15-48-39-48l.pt

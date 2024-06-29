@@ -17,6 +17,7 @@ from models.stu.stu_utils import (
 )
 from time import time
 from utils.swiglu import SwiGLU
+from utils.rms_norm import RMSNorm
 from tqdm import tqdm
 
 
@@ -24,7 +25,7 @@ from tqdm import tqdm
 class SSSMConfigs:
     d_in: int = 29
     d_out: int = 29
-    n_layers: int = 6
+    n_layers: int = 4
     n_embd: int = 512
     sl: int = 300
     scale: int = 4
@@ -77,17 +78,8 @@ class STU(nn.Module):
             )
         )
 
-    def apply_stu(self, inputs):
-        eig_vals, eig_vecs = self.eigh
-        x_tilde = compute_x_tilde(inputs, (eig_vals, eig_vecs))
-        delta_phi = x_tilde @ self.m_phi
-        delta_ar_u = compute_ar_x_preds(self.m_u, inputs)
-        y_t = compute_y_t(self.m_y, delta_phi + delta_ar_u)
-        return y_t
-
     def forward(self, inputs):
-        eig_vals, eig_vecs = self.eigh
-        x_tilde = compute_x_tilde(inputs, (eig_vals, eig_vecs))
+        x_tilde = compute_x_tilde(inputs, self.eigh)
         delta_phi = x_tilde @ self.m_phi
         delta_ar_u = compute_ar_x_preds(self.m_u, inputs)
         y_t = compute_y_t(self.m_y, delta_phi + delta_ar_u)
@@ -102,7 +94,6 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.h_dim = (configs.scale * configs.n_embd * 2) // 3
-        # TODO: Consider implementing Squared ReLU from https://arxiv.org/pdf/2109.08668 ??
         self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -111,94 +102,19 @@ class FFN(nn.Module):
         return self.dropout(x)
 
 
-class SequentialBlock(nn.Module):
+class Block(nn.Module):
     def __init__(self, configs):
-        super(SequentialBlock, self).__init__()
-        self.n_embd = configs.n_embd
-        self.d_out = configs.d_out
-        self.n_layers = configs.n_layers
-        self.dropout = configs.dropout
-        self.sl = configs.sl
-        self.num_eigh = configs.num_eigh
-        self.k_u = configs.k_u
-        self.k_y = configs.k_y
-        self.learnable_m_y = configs.learnable_m_y
-        self.ln_1 = nn.LayerNorm(self.n_embd, bias=configs.bias)
+        super(Block, self).__init__()
+        self.rn_1 = RMSNorm(configs.n_embd)
         self.stu = STU(configs)
-        self.ln_2 = nn.LayerNorm(self.n_embd, bias=configs.bias)
-        self.bn = nn.BatchNorm1d(self.sl)
+        self.rn_2 = RMSNorm(configs.n_embd)
         self.ffn = FFN(configs)
-    #     self.m_ffn = nn.Parameter(torch.empty(self.n_embd))
-    #     self.m_stu = nn.Parameter(torch.empty(self.n_embd))
-    #     self._init_m_()
 
-    # def _init_m_(self):
-    #     nn.init.ones_(self.m_ffn) # TODO: 
-    #     nn.init.ones_(self.m_stu)
-
-    # TODO: Do last: try squared relu instead of FFN_SwiGLU
-    # TODO: Normalize STU outputs (at all outputs)?
-    # TODO: Gated residual connection post MLPs (does SiLU handle this?)
     def forward(self, x):
-        z = x
-        # x = self.stu(self.ln_1(x))
-        # print(f"m_stu: {self.m_stu}")
-        # x = self.ffn(self.m_stu(x))
-        # print(f"m_ffn: {self.m_ffn}")
-        # x = self.m_ffn * z + x
-        # return x
-        # z = x
-        # x = self.stu(self.ln_1(x))
-        # y = self.ffn(self.ln_2(z)) # TODO: Try concat and project back down
-        # return x + y
-        x = self.stu(self.ln_1(x))
-        x = self.ffn(x)
-        x = z + x
-        return x
-        
-
-class SplitBlock(nn.Module):
-    def __init__(self, configs):
-        super(SequentialBlock, self).__init__()
-        self.n_embd = configs.n_embd
-        self.d_out = configs.d_out
-        self.n_layers = configs.n_layers
-        self.dropout = configs.dropout
-        self.sl = configs.sl
-        self.num_eigh = configs.num_eigh
-        self.k_u = configs.k_u
-        self.k_y = configs.k_y
-        self.learnable_m_y = configs.learnable_m_y
-        self.ln_1 = nn.LayerNorm(self.n_embd, bias=configs.bias)
-        self.stu = STU(configs)
-        self.ln_2 = nn.LayerNorm(self.n_embd, bias=configs.bias)
-        self.bn = nn.BatchNorm1d(self.sl)
-        self.ffn = FFN(configs)
-    #     self.m_ffn = nn.Parameter(torch.empty(self.n_embd))
-    #     self.m_stu = nn.Parameter(torch.empty(self.n_embd))
-    #     self._init_m_()
-
-    # def _init_m_(self):
-    #     nn.init.ones_(self.m_ffn) # TODO: 
-    #     nn.init.ones_(self.m_stu)
-
-    # TODO: Do last: try squared relu instead of FFN_SwiGLU
-    # TODO: Normalize STU outputs (at all outputs)?
-    # TODO: Gated residual connection post MLPs (does SiLU handle this?)
-    def forward(self, x):
-        # TODO: Potential for MoE architecture here! Make it flaggable.
-        # z = x
-        # x = self.stu(self.ln_1(x))
-        # print(f"m_stu: {self.m_stu}")
-        # x = self.ffn(self.m_stu(x))
-        # print(f"m_ffn: {self.m_ffn}")
-        # x = self.m_ffn * z + x
-        # return x
-        z = x
-        x = self.stu(self.ln_1(x))
-        y = self.ffn(self.ln_2(z)) # TODO: Try concat and project back down
-        return x + y
-
+        z = self.rn_1(x)
+        x = self.stu(self.rn_2(x))
+        x = x + self.ffn(x)
+        return x + z
 
 class SSSM(nn.Module):
     """
@@ -218,19 +134,17 @@ class SSSM(nn.Module):
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
 
-        self.emb = nn.Linear(self.n_embd, self.n_embd)
+        self.emb = nn.Linear(self.n_embd, self.n_embd, bias=self.bias)
         self.stu = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
                 wpe=nn.Embedding(self.sl, self.n_embd),
                 dropout=nn.Dropout(self.dropout),
-                hidden=nn.ModuleList([SequentialBlock(configs) for _ in range(self.n_layers)]),
-                ln_f=nn.LayerNorm(self.n_embd, bias=self.bias),
+                hidden=nn.ModuleList([Block(configs) for _ in range(self.n_layers)]),
             )
         )
-        self.projection = nn.Linear(self.d_in, self.d_out)
+        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
 
         if self.controls["task"] == "mujoco-v1":
             if self.controls["controller"] == "Ant-v1":
@@ -239,8 +153,8 @@ class SSSM(nn.Module):
                 self.d_out = 18
 
         # Initialize weights
-        self.m_x = float(self.d_out) ** -0.5
-        self.std = float(self.n_embd) ** -0.5
+        self.m_x = self.d_out**-0.5
+        self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -251,7 +165,7 @@ class SSSM(nn.Module):
             self.std *= (2 * self.n_layers) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
             if module.bias is not None:
-                torch.nn.init.normal_(module.bias, mean=0.0, std=self.std)
+                torch.nn.init.zeros_(module.bias, mean=0.0, std=self.std)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
         elif isinstance(module, STU):
@@ -282,8 +196,10 @@ class SSSM(nn.Module):
         return num_params
 
     def forward(self, inputs, targets):
-        x = self.emb(inputs)
         bsz, sl, n_embd = inputs.size()
+
+        # Pass inputs through the embedding layer
+        x = self.emb(inputs)
 
         # Generate positional embeddings for the sequence
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
@@ -296,7 +212,8 @@ class SSSM(nn.Module):
         for block in self.stu.hidden:
             x = block(x)
 
-        preds = self.projection(x)
+        preds = self.task_head(x)
+
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (
                 self.loss_fn(preds, targets) if targets is not None else (None, None)

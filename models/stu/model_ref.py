@@ -9,10 +9,16 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from models.stu.stu_utils import apply_stu, compute_ar_x_preds, compute_x_tilde, compute_y_t
+from models.stu.stu_utils import (
+    compute_ar_x_preds,
+    compute_x_tilde,
+    compute_y_t,
+    get_top_hankel_eigh,
+)
 from time import time
 from utils.swiglu import SwiGLU
 from utils.squared_relu import SquaredReLU
+from utils.rms_norm import RMSNorm
 from tqdm import tqdm
 
 
@@ -56,31 +62,38 @@ class STU(nn.Module):
         self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.n_embd = configs.n_embd
-
-        self.k = configs.num_eigh
+        self.sl, self.k = configs.sl, configs.num_eigh
+        self.eigh = get_top_hankel_eigh(self.sl, self.k, self.device)
         self.k_y = configs.k_y
         self.k_u = configs.k_u
         self.learnable_m_y = configs.learnable_m_y
         self.alpha = configs.alpha
         self.dropout = configs.dropout
 
+        self.m_u = nn.Parameter(torch.empty(self.d_out, self.d_out, self.k_u))
+        self.m_phi = nn.Parameter(torch.empty(self.d_out * self.k, self.d_out))
+
+        if self.learnable_m_y:
+            self.m_y = nn.Parameter(torch.empty(self.d_out, self.k_y, self.d_out))
+        else:
+            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
+
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.m_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
-        self.m_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
-        self.m_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
+        # self.m_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
+        # self.m_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
+        # self.m_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
-        if self.learnable_m_y:
-            self.m_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
-        else:
-            self.register_buffer("m_y", torch.zeros(self.k_y, self.d_out, self.d_out))
+        # if self.learnable_m_y:
+        #     self.m_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
+        # else:
+        #     self.register_buffer("m_y", torch.zeros(self.k_y, self.d_out, self.d_out))
 
         # TODO: Init c_proj like buildGPT somewhere
         self.resid_dropout = nn.Dropout(self.dropout)
 
     def forward(self, inputs):
-        eig_vals, eig_vecs = self.eigh
-        x_tilde = compute_x_tilde(inputs, (eig_vals, eig_vecs))
+        x_tilde = compute_x_tilde(inputs, self.eigh)
         delta_phi = x_tilde @ self.m_phi
         delta_ar_u = compute_ar_x_preds(self.m_u, inputs)
         y_t = compute_y_t(self.m_y, delta_phi + delta_ar_u)
@@ -136,7 +149,6 @@ class SSSM(nn.Module):
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
 
         self.emb = nn.Linear(self.n_embd, self.n_embd)
         self.stu = nn.ModuleDict(
@@ -148,7 +160,8 @@ class SSSM(nn.Module):
                 ln_f=nn.LayerNorm(self.n_embd, bias=self.bias),
             )
         )
-
+        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
+        
         if self.controls["task"] == "mujoco-v1":
             if self.controls["controller"] == "Ant-v1":
                 self.d_out = 29
@@ -156,8 +169,9 @@ class SSSM(nn.Module):
                 self.d_out = 18
 
         # Initialize all weights
-        self.m_x = float(self.d_out) ** -0.5
-        self.std = self.n_embd**-0.5
+        self.rn = RMSNorm(self.n_embd)
+        self.m_x = self.d_out ** -0.5
+        self.std = self.n_embd ** -0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -180,8 +194,7 @@ class SSSM(nn.Module):
         for stu_block in self.stu.hidden:
             x = stu_block(x)
 
-        # TODO: Consider time-pooling after this like the paper said.
-        x = self.stu.ln_f(x)
+        # x = self.stu.ln_f(x) # <-- This is the bug! --Windsor, June 27th 10:30 PM.
 
         preds = self.task_head(x)
 
@@ -191,10 +204,7 @@ class SSSM(nn.Module):
             )
             return preds, (loss, metrics)
         else:
-            # print("Is targets none?", targets is None)
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            # print("loss is", loss)
-            # print('preds are', preds[:10])
             return preds, (loss,)
 
     def _init_weights(self, module):
@@ -205,19 +215,23 @@ class SSSM(nn.Module):
             module (nn.Module): The module to initialize.
         """
         if isinstance(module, nn.Linear):
+            self.std *= (2 * self.n_layers) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
             if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
+                torch.nn.init.normal_(module.bias, mean=0.0, std=self.std)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
         elif isinstance(module, STU):
             torch.nn.init.uniform_(module.m_u, -self.m_x, self.m_x)
-            torch.nn.init.xavier_normal_(module.m_phi_plus)
-            torch.nn.init.xavier_normal_(module.m_phi_minus)
+            torch.nn.init.xavier_normal_(module.m_phi)
+            # torch.nn.init.xavier_normal_(module.m_phi_plus)
+            # torch.nn.init.xavier_normal_(module.m_phi_minus)
 
+            if module.learnable_m_y:
+                torch.nn.init.xavier_normal_(module.m_y)
             # Initialize Mʸ₂ = α * I, page 8.
-            if module.k_y > 1:
-                module.m_y[:, 1] = module.alpha * torch.eye(module.d_out)
+            # if module.k_y > 1:
+            #     module.m_y[:, 1] = module.alpha * torch.eye(module.d_out)
 
     def get_num_params(self, non_embedding=True):
         """

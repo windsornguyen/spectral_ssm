@@ -5,13 +5,15 @@
 
 """Spectral temporal unit (STU) block."""
 
+import math
+
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from models.stu.stu_utils2 import apply_stu
-from time import time
+from models.stu.stu_utils2 import compute_ar, compute_spectral, get_top_eigh
 from utils.swiglu import SwiGLU
+from utils.rms_norm import RMSNorm
 from tqdm import tqdm
 
 
@@ -26,10 +28,10 @@ class SSSMConfigs:
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 32
-    k_u: int = 3 # Number of parametrizable, autoregressive matrices Mᵘ
-    k_y: int = 2 # Number of parametrizable, autoregressive matrices Mʸ
+    k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
+    k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
     learnable_m_y: bool = True
-    alpha: float = 0.9 # 0.9 deemed "uniformly optimal" in the paper
+    alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -44,8 +46,8 @@ class STU(nn.Module):
         d_out (int): Output dimension.
         sl (int): Input sequence length.
         num_eigh (int): Number of eigenvalues and eigenvectors to use.
-        ar_k_u (int): Auto-regressive depth on the input sequence.
-        ar_k_y (int): Auto-regressive depth on the output sequence.
+        k_u (int): Auto-regressive depth on the input sequence.
+        k_y (int): Auto-regressive depth on the output sequence.
         learnable_m_y (bool): Whether the m_y matrix is learnable.
     """
 
@@ -54,13 +56,11 @@ class STU(nn.Module):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.d_in = configs.d_in
         self.d_out = configs.d_out
-        self.n_embd = configs.n_embd
-        self.k = configs.num_eigh
-        self.k_y = configs.k_y
+        self.l, self.k = configs.sl, configs.num_eigh
+        self.eigh = get_top_eigh(self.l, self.k, self.device)
         self.k_u = configs.k_u
+        self.k_y = configs.k_y
         self.learnable_m_y = configs.learnable_m_y
-        self.alpha = configs.alpha
-        self.dropout = configs.dropout
 
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
         self.m_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
@@ -68,28 +68,30 @@ class STU(nn.Module):
         self.m_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
+        # Potential optimization: Can fuse 1st, 2nd dims here since we repeat
+        # them anyway in compute_ar.
         if self.learnable_m_y:
             self.m_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
         else:
             self.register_buffer("m_y", torch.zeros(self.k_y, self.d_out, self.d_out))
 
-        # TODO: Init c_proj like buildGPT somewhere
-        self.resid_dropout = nn.Dropout(self.dropout)
+        self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, inputs):
-        ys = apply_stu(inputs, self.eigh, self.m_y, self.m_u, self.m_phi_plus, self.m_phi_minus, self.ar_k_y)
-        return self.resid_dropout(ys)
+        ar = compute_ar(self.m_y, self.m_u, torch.zeros_like(inputs), inputs)
+        spectral = compute_spectral(inputs, self.eigh, self.m_phi_plus, self.m_phi_minus, self.k_y)
+        y_t = ar + spectral
+        return self.dropout(y_t)
 
 
-class FFN(nn.Module):
+class MLP(nn.Module):
     """
-    Simple feed-forward network.
+    Simple multi-layer perceptron network using SwiGLU activation.
     """
 
     def __init__(self, configs):
-        super(FFN, self).__init__()
-        self.h_dim = (configs.scale * configs.n_embd * 2) // 3
-        # TODO: Consider implementing Squared ReLU from https://arxiv.org/pdf/2109.08668 ??
+        super(MLP, self).__init__()
+        self.h_dim = configs.scale * configs.n_embd
         self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -98,17 +100,16 @@ class FFN(nn.Module):
         return self.dropout(x)
 
 
-class STUBlock(nn.Module):
+class Block(nn.Module):
     def __init__(self, configs):
-        super(STUBlock, self).__init__()
-        self.ln_1 = nn.LayerNorm(configs.n_embd, bias=configs.bias)
+        super(Block, self).__init__()
         self.stu = STU(configs)
-        self.ln_2 = nn.LayerNorm(configs.n_embd, bias=configs.bias)
-        self.ffn = FFN(configs)
+        self.mlp = MLP(configs)
+
 
     def forward(self, x):
-        x = x + self.stu(self.ln_1(x))
-        x = x + self.ffn(self.ln_2(x))
+        x = x + self.stu(x)
+        x = x + self.mlp(x)
         return x
 
 
@@ -123,24 +124,25 @@ class SSSM(nn.Module):
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
         self.d_out = configs.d_out
-        self.sl, self.k = configs.sl, configs.num_eigh
+        self.sl = configs.sl
+        self.learnable_m_y = configs.learnable_m_y
+        self.alpha = configs.alpha
 
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
 
         self.emb = nn.Linear(self.n_embd, self.n_embd)
         self.stu = nn.ModuleDict(
             dict(
-                # Since our tasks are continuous, we do not use token embeddings.
-                wpe=nn.Embedding(self.sl, self.n_embd),
                 dropout=nn.Dropout(self.dropout),
-                hidden=nn.ModuleList([STUBlock(configs) for _ in range(self.n_layers)]),
-                ln_f=nn.LayerNorm(self.n_embd, bias=self.bias),
+                hidden=nn.ModuleList(
+                    [Block(configs) for _ in range(self.n_layers)]
+                    ),
             )
         )
+        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
 
         if self.controls["task"] == "mujoco-v1":
             if self.controls["controller"] == "Ant-v1":
@@ -149,8 +151,8 @@ class SSSM(nn.Module):
                 self.d_out = 18
 
         # Initialize all weights
-        self.m_x = float(self.d_out) ** -0.5
-        self.std = self.n_embd ** -0.5
+        self.m_x = self.d_out**-0.5
+        self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -158,23 +160,14 @@ class SSSM(nn.Module):
 
     def forward(self, inputs, targets):
         # TODO: Add docstrings to this and shape annotate each line
-        device = inputs.device
-        bsz, sl, n_embd = inputs.size()
+        _, sl, n_embd = inputs.size()
+
         x = self.emb(inputs)
-
-        # Generate positional embeddings for the sequence
-        pos = torch.arange(0, sl, dtype=torch.long, device=device)  # -> (sl)
-        pos_emb = self.stu.wpe(pos)
-
-        # Add positional embeddings to input
-        x = x + pos_emb.unsqueeze(0)
+        x /= math.log(self.sl) # <-- From Evan
         x = self.stu.dropout(x)
 
-        for stu_block in self.stu.hidden:
-            x = stu_block(x)
-            
-        # TODO: Consider time-pooling after this like the paper said.
-        x = self.stu.ln_f(x)
+        for block in self.stu.hidden:
+            x = block(x)
 
         preds = self.task_head(x)
 
@@ -184,10 +177,7 @@ class SSSM(nn.Module):
             )
             return preds, (loss, metrics)
         else:
-            # print("Is targets none?", targets is None)
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            # print("loss is", loss)
-            # print('preds are', preds[:10])
             return preds, (loss,)
 
     def _init_weights(self, module):
@@ -198,6 +188,7 @@ class SSSM(nn.Module):
             module (nn.Module): The module to initialize.
         """
         if isinstance(module, nn.Linear):
+            self.std *= (2 * self.n_layers) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -209,8 +200,9 @@ class SSSM(nn.Module):
             torch.nn.init.xavier_normal_(module.m_phi_minus)
 
             # Initialize Mʸ₂ = α * I, page 8.
-            if module.ar_k_y > 1:
-                module.m_y[:, 1] = module.alpha * torch.eye(module.d_out)
+            if self.learnable_m_y and module.k_y > 1:
+                with torch.no_grad():
+                    module.m_y[1] = self.alpha * torch.eye(module.d_out)
 
     def get_num_params(self, non_embedding=True):
         """
@@ -250,7 +242,7 @@ class SSSM(nn.Module):
             stu_block_flops += 2 * E * D * T  # Compute x_tilde
             stu_block_flops += 2 * D * E * D  # Apply m_phi matrix
 
-            # FFN layer
+            # MLP layer
             stu_block_flops += 2 * D * cfg.scale * D  # c_fc
             stu_block_flops += cfg.scale * D  # GELU activation
             stu_block_flops += 2 * cfg.scale * D * D  # c_proj
@@ -288,7 +280,7 @@ class SSSM(nn.Module):
             flops += 2 * cfg.num_eigh * cfg.n_embd * cfg.block_size  # Compute x_tilde
             flops += 2 * cfg.n_embd * cfg.num_eigh * cfg.n_embd  # Apply m_phi matrix
 
-            # FFN layer
+            # MLP layer
             flops += 2 * cfg.n_embd * cfg.scale * cfg.n_embd  # c_fc
             flops += cfg.scale * cfg.n_embd  # GELU activation
             flops += 2 * cfg.scale * cfg.n_embd * cfg.n_embd  # c_proj
@@ -343,7 +335,7 @@ class SSSM(nn.Module):
             key: torch.zeros(num_trajectories, steps, device=device)
             for key in [
                 "coordinate_loss",
-                'orientation_loss',
+                "orientation_loss",
                 "angle_loss",
                 "coordinate_velocity_loss",
                 "angular_velocity_loss",
@@ -357,7 +349,9 @@ class SSSM(nn.Module):
 
                 input_window = ar_sequences[:, window_start : i + 1, :]
                 target_window = targets[:, window_start : i + 1, :]
-                preds_step, (step_loss, step_metrics) = self.forward(input_window, target_window)
+                preds_step, (step_loss, step_metrics) = self.forward(
+                    input_window, target_window
+                )
 
                 preds[:, i - init, :] = preds_step[:, -1, :]
                 trajectory_losses[:, i - init] = step_loss
@@ -433,7 +427,7 @@ class SSSM(nn.Module):
         i = init
         with tqdm(total=steps, desc="Predicting", unit="step") as pbar:
             while i < init + steps:
-                window_start = max(0, i - self.configs.sl + 1) # TODO: fixed window?
+                window_start = max(0, i - self.configs.sl + 1)  # TODO: fixed window?
 
                 input_window = ar_sequences[:, window_start : i + 1, :]
                 target_window = targets[:, window_start : i + 1, :]

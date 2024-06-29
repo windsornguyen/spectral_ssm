@@ -134,7 +134,7 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 2
+    n_layers: int = 4
     scale: int = 16
     bias: bool = False
     dropout: float = 0.10

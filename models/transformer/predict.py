@@ -16,6 +16,10 @@ from safetensors.torch import load_file
 from models.transformer.model import Transformer, TransformerConfigs
 from torch.nn import MSELoss
 
+from losses.loss_ant import AntLoss
+from losses.loss_cheetah import HalfCheetahLoss
+from losses.loss_walker import Walker2DLoss
+
 
 def smooth_curve(points, sigma=2):
     return gaussian_filter1d(points, sigma=sigma)
@@ -55,33 +59,46 @@ def main():
 
     # Load the trained model
     # model_path = f"best_{args.controller}.safetensors"
-    model_path = "transformer_6l.pt"
+    model_path = "transformer_Ant-v1.pt"
+    
+    if args.task in ["mujoco-v1", "mujoco-v2"]:
+        if args.controller == "Ant-v1":
+            loss_fn = AntLoss()
+        elif args.controller == "HalfCheetah-v1":
+            loss_fn = HalfCheetahLoss()
+        elif args.controller == "Walker2D-v1":
+            loss_fn = Walker2DLoss()
+        else:
+            loss_fn = None
+    else:
+        loss_fn = MSELoss()
 
     configs = TransformerConfigs(
-        n_layers=6,
-        n_embd=512,
-        n_head=16,
-        sl=300,
-        scale=4,
+        n_layers=4,
+        n_embd=29,
+        n_head=1,
+        sl=1000,
+        scale=16,
         bias=False,
         dropout=0.10,
         use_dilated_attn=False,
-        loss_fn=MSELoss(),
+        loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
     )
 
     # Initialize and load the model
     model = Transformer(configs).to(device)
-    model = torch.compile(model)
+    # model = torch.compile(model)
     state_dict = load_file(model_path, device="cuda:0")
+    # state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 
     # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = f"data/{args.task}/{args.controller}/"
-        test_inputs = np.load(f"{base_path}/test_inputs.npy")
-        test_targets = np.load(f"{base_path}/test_targets.npy")
+        test_inputs = np.load(f"{base_path}/val_inputs.npy")
+        test_targets = np.load(f"{base_path}/val_targets.npy")
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
         test_targets = torch.from_numpy(test_targets).float().to(device)
     elif args.task == "mujoco-v3":
@@ -127,7 +144,7 @@ def main():
                 )
 
                 for key in metrics:
-                    metrics[key][i] = torch.cat((metrics[key][i], metric[key]), dim=0)
+                    metrics[key].append(metric[key])
 
             elif args.task == "mujoco-v3":
                 pred_states, (avg_loss, loss) = model.predict_frames(
@@ -144,6 +161,10 @@ def main():
 
     predicted_states = torch.cat(predicted_states, dim=0)
     losses = torch.cat(losses, dim=0)
+    print(f"metrics before concatenation: {metrics}")
+    metrics = {key: torch.cat(value, dim=0) for key, value in metrics.items()}
+    print(f"metrics after concatenation: {metrics}")
+    # metrics = {key: torch.cat(value, dim=0) for key, value in metrics.items()}
 
     print(f"Shape of predicted states: {predicted_states.shape}")
     print(f"Shape of losses: {losses.shape}")
@@ -180,9 +201,9 @@ def main():
         "saved ground truth shape",
         test_targets[:num_preds, : predicted_states.shape[1], :].shape,
     )
-    np.save("transformer_predictions_6l", predicted_states.cpu().numpy())
+    np.save("transformer_predictions_Ant-v1", predicted_states.cpu().numpy())
     np.save(
-        "transformer_ground_truths_6l",
+        "transformer_ground_truths_Ant-v1",
         test_targets[:num_preds, : predicted_states.shape[1], :].cpu().numpy(),
     )
     print(
@@ -226,7 +247,7 @@ def main():
         axs[pred_idx, 0].grid(True)
 
         # Plot the losses (scaled up by 100)
-        scaled_losses = smooth_curve(losses[pred_idx].cpu().numpy()) * 100
+        scaled_losses = smooth_curve(losses[pred_idx].cpu().numpy())
         axs[pred_idx, 1].plot(
             range(time_steps),
             scaled_losses,
@@ -252,7 +273,7 @@ def main():
 
     plt.tight_layout()
     plt.savefig(
-        f"results/{args.controller}_{args.task}_predictions_tr_6l.png",
+        f"results/{args.controller}_{args.task}_predictions_tr.png",
         dpi=300,
         bbox_inches="tight",
     )
