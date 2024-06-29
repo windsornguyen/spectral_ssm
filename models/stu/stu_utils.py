@@ -9,7 +9,7 @@ import torch
 
 
 # TODO: Moved to models/stu class defn
-def get_hankel_matrix(n: int) -> torch.Tensor:
+def get_hankel(n: int) -> torch.Tensor:
     """
     Generate a spectral Hankel matrix.
 
@@ -23,6 +23,32 @@ def get_hankel_matrix(n: int) -> torch.Tensor:
     sums = indices[:, None] + indices[None, :]  # -> [n, n]
     z = 2.0 / (sums**3 - sums)  # -> [n, n]
     return z
+
+def get_hankel_L(n: int, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Generates the special Hankel matrix Z_L, as defined in the appendix.
+    Offers negative featurization.
+
+    Args:
+        n (int): Size of the square Hankel matrix.
+        eps (float): Small value to avoid division by zero.
+
+    Returns:
+        torch.Tensor: Hankel matrix Z of shape [n, n].
+    """
+    # TODO: Not yet vectorized or broadcastable.
+    i, j = torch.meshgrid(torch.arange(n), torch.arange(n), indexing="ij")
+
+    # Calculate (-1)^(i+j-2) + 1
+    sgn = (-1) ** (i + j - 2) + 1
+
+    # Calculate the denominator
+    denom = (i + j + 3) * (i + j - 1) * (i + j + 1)
+
+    # Combine all terms
+    Z_L = sgn * (8 / (denom + eps))
+
+    return Z_L
 
 
 def get_top_hankel_eigh(
@@ -39,7 +65,7 @@ def get_top_hankel_eigh(
         tuple[torch.Tensor, torch.Tensor]: A tuple of eigenvalues of shape [k,] and
             eigenvectors of shape [n, k].
     """
-    hankel_matrix = get_hankel_matrix(n).to(device)  # -> [n, n]
+    hankel_matrix = get_hankel(n).to(device)  # -> [n, n]
     eig_vals, eig_vecs = torch.linalg.eigh(hankel_matrix)  # -> [n], [n, n]
     return eig_vals[-k:], eig_vecs[:, -k:]  # -> [k, (n, k)]
 

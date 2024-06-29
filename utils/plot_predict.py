@@ -32,11 +32,11 @@ args = parser.parse_args()
 
 
 # Load data
-sssm = np.load("ssm_predictions_6l_huber.npy")
-transformer = np.load("transformer_predictions_6l.npy")
+sssm = np.load(f"sssm_{args.controller}_{args.task}_predictions.npy")
+transformer = np.load(f"transformer_{args.controller}_{args.task}_predictions.npy")
 
-ground_truth = np.load("ssm_ground_truths_6l_huber.npy")
-transformer_ground_truth = np.load("transformer_ground_truths_6l.npy")
+ground_truth = np.load(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
+transformer_ground_truth = np.load(f"transformer_{args.controller}_{args.task}_ground_truths.npy")
 
 # Check if they are the same to ensure we are comparing the right data
 if np.array_equal(ground_truth, transformer_ground_truth):
@@ -91,7 +91,7 @@ for pred_idx in range(num_preds):
     )
     ax.legend()
     # Save the mean loss figures
-    plt.savefig(f"Mean_Losses_Prediction_{pred_idx+1}_6l_huber.png")
+    plt.savefig(f"Mean_Losses_Prediction_{pred_idx+1}_{args.controller}.png")
     plt.close(fig) 
 
 # Perform PCA
@@ -163,5 +163,5 @@ for pred_idx in range(num_preds):
         ax.legend()
     
     # Save the figures
-    plt.savefig(f"Predictions_{pred_idx+1}_6l_huber.png")
+    plt.savefig(f"Predictions_{pred_idx+1}_{args.controller}.png")
     plt.close(fig)

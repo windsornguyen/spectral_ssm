@@ -35,21 +35,21 @@ class Dataloader(Dataset):
             else:
                 raise ValueError("Invalid data format for mujoco-v1 or mujoco-v2 tasks")
             self.data = None
-        else:
+        elif task == "mujoco-v3":
             self.data = data
-            self.inputs = None
-            self.targets = None
-
-        if self.preprocess and self.task == "mujoco-v3":
-            colored_print("Calculating data statistics...", Colors.OKBLUE)
-            self._calculate_statistics()
-            colored_print("Normalizing data...", Colors.OKBLUE)
-            self._normalize_data()
-            colored_print("Validating data normalization...", Colors.OKBLUE)
-            self._validate_normalization()
+            if self.preprocess:
+                colored_print("Calculating data statistics...", Colors.OKBLUE)
+                self._calculate_statistics()
+                colored_print("Normalizing data...", Colors.OKBLUE)
+                self._normalize_data()
+                colored_print("Validating data normalization...", Colors.OKBLUE)
+                self._validate_normalization()
 
     def __len__(self):
-        return len(self.inputs) if self.inputs is not None else len(self.data)
+        if self.task == "mujoco-v3":
+            return len(self.data)
+        else:
+            return len(self.inputs)
 
     def __getitem__(self, index):
         if self.task in ["mujoco-v1", "mujoco-v2"]:
@@ -70,59 +70,40 @@ class Dataloader(Dataset):
         return input_frames, target_frames
 
     def _calculate_statistics(self):
-        if self.task in ["mujoco-v1", "mujoco-v2"]:
-            features = np.concatenate((self.inputs, self.targets), axis=-1)
-        elif self.task == "mujoco-v3":
+        if self.task == "mujoco-v3":
             features = torch.cat(self.data, dim=0)
-
-        # Mean over frames and samples, for each feature
-        self.mean = features.mean(dim=(0, 1), keepdim=True)
-
-        # Std over frames and samples, for each feature
-        self.std = features.std(dim=(0, 1), keepdim=True)
+            # Mean over frames and samples, for each feature
+            self.mean = features.mean(dim=(0, 1), keepdim=True)
+            # Std over frames and samples, for each feature
+            self.std = features.std(dim=(0, 1), keepdim=True)
 
     def _normalize_data(self):
-        self.inputs = (self.inputs - self.mean.numpy()) / (self.std.numpy() + self.eps)
-        self.targets = (self.targets - self.mean.numpy()) / (
-            self.std.numpy() + self.eps
-        )
+        if self.task == "mujoco-v3":
+            self.data = [
+                (item - self.mean) / (self.std + self.eps) for item in self.data
+            ]
 
     def _validate_normalization(self):
-        if self.task in ["mujoco-v1", "mujoco-v2"]:
-            features = np.concatenate((self.inputs, self.targets), axis=-1)
-            features = torch.tensor(features)
-        elif self.task == "mujoco-v3":
+        if self.task == "mujoco-v3":
             features = torch.cat(self.data, dim=0)
-        else:
-            features = torch.cat(
-                [
-                    torch.cat(
-                        (self.data[i]["x_t"], self.data[i]["x_t_plus_1"]),
-                        dim=-1,
-                    )
-                    for i in range(len(self.data))
-                ],
-                dim=0,
+            normalized_mean = features.mean(dim=(0, 1))
+            normalized_std = features.std(dim=(0, 1))
+
+            assert torch.allclose(
+                normalized_mean, torch.zeros_like(normalized_mean), atol=self.eps
+            ), f"Normalized mean is not close to zero: {normalized_mean}"
+            assert torch.allclose(
+                normalized_std, torch.ones_like(normalized_std), atol=self.eps
+            ), f"Normalized standard deviation is not close to one: {normalized_std}"
+
+            colored_print(f"\nNormalized mean: {normalized_mean}", Colors.OKGREEN)
+            colored_print(
+                f"Normalized standard deviation: {normalized_std}", Colors.OKGREEN
             )
-
-        normalized_mean = features.mean(dim=(0, 1))
-        normalized_std = features.std(dim=(0, 1))
-
-        assert torch.allclose(
-            normalized_mean, torch.zeros_like(normalized_mean), atol=self.eps
-        ), f"Normalized mean is not close to zero: {normalized_mean}"
-        assert torch.allclose(
-            normalized_std, torch.ones_like(normalized_std), atol=self.eps
-        ), f"Normalized standard deviation is not close to one: {normalized_std}"
-
-        colored_print(f"\nNormalized mean: {normalized_mean}", Colors.OKGREEN)
-        colored_print(
-            f"Normalized standard deviation: {normalized_std}", Colors.OKGREEN
-        )
-        colored_print(
-            "Data normalization validated successfully.",
-            Colors.BOLD + Colors.OKGREEN,
-        )
+            colored_print(
+                "Data normalization validated successfully.",
+                Colors.BOLD + Colors.OKGREEN,
+            )
 
 
 def get_dataloader(

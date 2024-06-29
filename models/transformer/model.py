@@ -399,21 +399,6 @@ class Transformer(nn.Module):
             key: torch.zeros(num_trajectories, steps, device=device)
             for key in [
                 "coordinate_loss",
-                #  'orientation_loss',
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
-
-        # Initialize the predicted sequences and losses
-        ar_sequences = inputs.clone()
-        preds = torch.zeros(num_trajectories, steps, self.configs.n_embd, device=device)
-        trajectory_losses = torch.zeros(num_trajectories, steps, device=device)
-        metrics = {
-            key: torch.zeros(num_trajectories, steps, device=device)
-            for key in [
-                "coordinate_loss",
                 "orientation_loss",
                 "angle_loss",
                 "coordinate_velocity_loss",
@@ -435,8 +420,8 @@ class Transformer(nn.Module):
                 preds[:, i - init, :] = preds_step[:, -1, :]
                 trajectory_losses[:, i - init] = step_loss
 
-                for key in metrics:
-                    metrics[key][:, i] = step_metrics[key]
+                # for key in metrics:
+                #     metrics[key][:, i] = step_metrics[key]
 
                 # Update autoregressive sequences for the next step
                 if i < init + steps - 1:

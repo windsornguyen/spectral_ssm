@@ -63,7 +63,7 @@ def compute_ar_opt(
 
 def compute_y_t(M_y, y):
     bsz, sl, d_out = y.shape
-    k_y = M_y.shape[0]
+    k_y = M_y.shape[0] # (k_y, d_out, d_out)
     expanded_y = y.unsqueeze(1).expand(bsz, k_y, sl, d_out)
     reshaped_y = expanded_y.reshape(bsz * k_y, sl, d_out)
     repeated_M_y = M_y.transpose(-1, -2).repeat(bsz, 1, 1) # TODO: Why is this transpose necessary?
@@ -71,8 +71,8 @@ def compute_y_t(M_y, y):
     o = torch.bmm(reshaped_y, repeated_M_y)
     o = o.view(bsz, k_y, sl, d_out)
     yt = torch.zeros_like(y)
-    for k in range(k_y):
-        yt[:, k + 1 :] += o[:, k, : sl - k - 1]
+    for t in range(k_y):
+        yt[:, t+1:] += o[:, t, : sl - t - 1]
     return yt
 
 
@@ -86,8 +86,8 @@ def compute_u_t(M_u, u):
     o = torch.bmm(reshaped_u, repeated_M_u)
     o = o.view(bsz, k_u, sl, -1)
     ut = torch.zeros(bsz, sl, o.shape[-1], device=u.device)
-    for k in range(k_u):
-        ut[:, k:] += o[:, k, : sl - k]
+    for t in range(k_u):
+        ut[:, t:] += o[:, t, : sl - t]
     return ut
 
 

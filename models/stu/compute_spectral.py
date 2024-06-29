@@ -74,7 +74,7 @@ def compute_spectral_opt(
     
     bsz, sl, K, d_in = U_weighted_plus.shape
     d_out = m_phi_plus.shape[-1]
-    
+
     # Add bsz dim to m_phi
     m_phi_plus = m_phi_plus.unsqueeze(0).expand(bsz, -1, d_out, d_out)
     m_phi_minus = m_phi_minus.unsqueeze(0).expand(bsz, -1, d_out, d_out)
