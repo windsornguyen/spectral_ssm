@@ -108,14 +108,18 @@ class FFN(nn.Module):
 class Block(nn.Module):
     def __init__(self, configs):
         super(Block, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
+        # self.rn_1 = RMSNorm(configs.n_embd)
         self.stu = STU(configs)
-        self.rn_2 = RMSNorm(configs.n_embd)
+        # self.rn_2 = RMSNorm(configs.n_embd)
         self.ffn = FFN(configs)
 
     def forward(self, x):
-        z = self.rn_1(x)
-        x = self.stu(self.rn_2(x))
+        # z = self.rn_1(x)
+        # x = self.stu(self.rn_2(x))
+        # x = x + self.ffn(x)
+        # return x + z
+        z = x
+        x = self.stu(x)
         x = x + self.ffn(x)
         return x + z
 

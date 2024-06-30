@@ -59,7 +59,7 @@ def main():
 
     # Load the trained model
     # model_path = f"_sssm-{args.controller}-model_step-239-2024-06-24-14-23-16.pt"
-    model_path = f"sssm_{args.controller}.pt"
+    model_path = f"sssm_{args.controller}_no_norm.pt"
 
     # Important indices (TODO: double check these are the right ones):
     # 0 - z-coordinate of the torso (centre)
@@ -227,13 +227,13 @@ def main():
         "saved ground truth shape",
         test_targets[:num_preds, : predicted_states.shape[1], :].shape,
     )
-    np.save(f"sssm_{args.controller}_{args.task}_predictions.npy", predicted_states.cpu().numpy())
+    np.save(f"sssm_no-norm_{args.controller}_{args.task}_predictions.npy", predicted_states.cpu().numpy())
     np.save(
-        f"sssm_{args.controller}_{args.task}_ground_truths.npy",
+        f"sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy",
         test_targets[:num_preds, : predicted_states.shape[1], :].cpu().numpy(),
     )
     print(
-        f"Predictions and ground truths saved to 'sssm_{args.controller}_{args.task}_predictions.npy' and 'sssm_{args.controller}_{args.task}_ground_truths.npy' respectively."
+        f"Predictions and ground truths saved to 'sssm_no-norm_{args.controller}_{args.task}_predictions.npy' and 'sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy' respectively."
     )
 
     # Plotting

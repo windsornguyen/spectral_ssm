@@ -32,10 +32,10 @@ args = parser.parse_args()
 
 
 # Load data
-sssm = np.load(f"sssm_{args.controller}_{args.task}_predictions.npy")
+sssm = np.load(f"sssm_no-norm_{args.controller}_{args.task}_predictions.npy")
 transformer = np.load(f"transformer_{args.controller}_{args.task}_predictions.npy")
 
-ground_truth = np.load(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
+ground_truth = np.load(f"sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy")
 transformer_ground_truth = np.load(f"transformer_{args.controller}_{args.task}_ground_truths.npy")
 
 # Check if they are the same to ensure we are comparing the right data

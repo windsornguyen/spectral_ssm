@@ -32,6 +32,7 @@ class SSSMConfigs:
     k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
+    use_hankel_L: bool = False
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -57,7 +58,8 @@ class STU(nn.Module):
         self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.l, self.k = configs.sl, configs.num_eigh
-        self.eigh = get_top_eigh(self.l, self.k, self.device)
+        self.use_hankel_L = configs.use_hankel_L
+        self.eigh = get_top_eigh(self.l, self.k, self.use_hankel_L, self.device)
         self.k_u = configs.k_u
         self.k_y = configs.k_y
         self.learnable_m_y = configs.learnable_m_y
@@ -78,7 +80,7 @@ class STU(nn.Module):
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, inputs):
-        ar = compute_ar(self.m_y, self.m_u, torch.zeros_like(inputs), inputs)
+        ar = compute_ar(self.m_y, torch.zeros_like(inputs), self.m_u, inputs)
         spectral = compute_spectral(inputs, self.eigh, self.m_phi_plus, self.m_phi_minus, self.k_y)
         y_t = ar + spectral
         return self.dropout(y_t)
