@@ -134,7 +134,7 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.c_fc = nn.Linear(configs.n_embd, configs.scale * configs.n_embd, bias=configs.bias)
-        self.squared_relu = SquaredReLU()
+        self.squared_relu = SquaredReLU() # TODO: Make act fns configurable
         self.c_proj = nn.Linear(configs.scale * configs.n_embd, configs.n_embd, bias=configs.bias)
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -289,7 +289,7 @@ class Transformer(nn.Module):
         x = self.d_in(inputs)  # -> (bsz, sl, n_embd)
 
         # Apply dropout
-        x = self.transformer.dropout(x) + self.transformer.dropout(pos_emb)
+        x = self.transformer.dropout(x + pos_emb)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:

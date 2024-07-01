@@ -26,9 +26,11 @@ class RMSNorm(torch.nn.Module):
         self.eps = eps
         self.wt = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x):
-        # Calculate the root mean square
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Compute root mean square
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
+    
         # Normalize and scale
         x_norm = x / rms
+
         return self.wt * x_norm
