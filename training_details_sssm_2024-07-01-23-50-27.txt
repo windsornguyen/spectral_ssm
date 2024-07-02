@@ -1,0 +1,5 @@
+Training completed for SSSM on mujoco-v2 with Ant-v1 at: 2024-07-01 23:51:30.050512
+Best model step: 105
+Best model validation loss: 9.3034
+Best model checkpoint saved at: checkpoints/sssm-Ant-v1-model_step-105-2024-07-01-23-50-27-48l.pt
+Best model's extra info data saved at: checkpoints/sssm-Ant-v1-other_step-105-2024-07-01-23-50-27-48l.pt

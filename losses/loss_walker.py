@@ -1,5 +1,5 @@
 # ==============================================================================#
-# Authors: Isabel Liu
+# Authors: Isabel Liu, Windsor Nguyen
 # File: loss_walker.py
 # ==============================================================================#
 
@@ -12,59 +12,41 @@ import torch.nn as nn
 class Walker2DLoss(nn.Module):
     def __init__(self):
         super(Walker2DLoss, self).__init__()
+        self.mse_loss = nn.MSELoss(reduction="mean")
 
     def forward(
-        self,
-        outputs: torch.Tensor, 
-        targets: torch.Tensor
+        self, outputs: torch.Tensor, targets: torch.Tensor
     ) -> tuple[torch.Tensor, dict[str, float]]:
-            """
-            Compute the loss and metrics for a batch of data.
+        """
+        Compute the MSE loss and custom metrics for a batch of data.
 
-            Args:
-                outputs (torch.Tensor): The model outputs.
-                targets (torch.Tensor): The target labels.
+        Args:
+            outputs (torch.Tensor): The model outputs of shape (batch_size, seq_len, d_xt)
+            targets (torch.Tensor): The target labels of shape (batch_size, seq_len, d_xt)
 
-            Returns:
-                tuple[torch.Tensor, Dict[str, float]]: 
-                A tuple of the loss and a Dictionary of metrics.
-            """
-            total_loss = torch.tensor(0.0, device=outputs.device)
-            coordinate_loss = torch.tensor(0.0, device=outputs.device)
-            angle_loss = torch.tensor(0.0, device=outputs.device)
-            coordinate_velocity_loss = torch.tensor(0.0, device=outputs.device)
-            angular_velocity_loss = torch.tensor(0.0, device=outputs.device)
+        Returns:
+            tuple[torch.Tensor, Dict[str, float]]:
+            A tuple of the MSE loss and a dictionary of custom metrics.
+        """
+        # Compute overall MSE loss
+        total_loss = self.mse_loss(outputs, targets)
 
-            for i in range(outputs.shape[1]):
-                loss = (outputs[:, i] - targets[:, i]) ** 2
+        # Compute custom metrics
+        feature_groups = {
+            "coordinate_loss": (0, 1),
+            "angle_loss": (2, 3, 4, 5, 6, 7, 8),
+            "coordinate_velocity_loss": (9, 10),
+            "angular_velocity_loss": (11, 12, 13, 14, 15, 16, 17),
+        }
 
-                # TODO: Write a more sophisticated loss function?
-                if i in (0, 1):  # coordinates of the front tip
-                    loss /= 2.5
-                    coordinate_loss += loss.mean()
-                elif i in (2, 3, 4, 5, 6, 7, 8):  # angles of the front tip and limbs
-                    loss /= 0.5
-                    angle_loss += loss.mean()
-                elif i in (9, 10):  # coordinate velocities of the front tip
-                    loss /= 2
-                    coordinate_velocity_loss += loss.mean()
-                elif i in (11, 12, 13, 14, 15, 16, 17):  # angular velocities of the front tip and limbs
-                    loss /= 2.5
-                    angular_velocity_loss += loss.mean()
+        metrics = {
+            metric_name: self.mse_loss(
+                outputs[:, :, indices], targets[:, :, indices]
+            ).item()
+            for metric_name, indices in feature_groups.items()
+        }
 
-                total_loss += loss.mean()
+        # N/A for orientation_loss as it's not applicable for Walker2D
+        metrics["orientation_loss"] = "N/A for Walker2D-v1"
 
-            total_loss /= outputs.shape[1]
-            coordinate_loss /= 2
-            orientation_loss = 'N/A for Walker2D-v1'
-            angle_loss /= 7
-            coordinate_velocity_loss /= 2
-            angular_velocity_loss /= 7
-            metrics = {
-                'coordinate_loss': coordinate_loss.item(), 
-                'orientation_loss': orientation_loss,
-                'angle_loss': angle_loss.item(), 
-                'coordinate_velocity_loss': coordinate_velocity_loss.item(), 
-                'angular_velocity_loss': angular_velocity_loss.item()
-            }
-            return total_loss, metrics
+        return total_loss, metrics

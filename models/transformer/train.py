@@ -217,7 +217,7 @@ def main() -> None:
     # TODO: Add accumulated gradients to this
     # TODO: Make data loader better
     # TODO: Add print statement reporting our batch size and accumulated batch size
-    bsz: int = 4 // world_size
+    bsz: int = 80 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

@@ -145,7 +145,7 @@ def main() -> None:
     k_u: int = 3
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
-    use_hankel_L: bool = True
+    use_hankel_L: bool = False
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -243,7 +243,7 @@ def main() -> None:
     stu_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 8
+    bsz: int = 80
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

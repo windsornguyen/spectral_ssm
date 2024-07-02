@@ -22,9 +22,9 @@ def get_hankel(n: int) -> torch.Tensor:
     Returns:
         torch.Tensor: Hankel matrix Z of shape [n, n].
     """
-    i = torch.arange(1, n + 1)         # -> [n]
-    s = i[:, None] + i[None, :]        # -> [n, n]
-    Z = 2.0 / (s**3 - s)               # -> [n, n]
+    i = torch.arange(1, n + 1)  # -> [n]
+    s = i[:, None] + i[None, :]  # -> [n, n]
+    Z = 2.0 / (s**3 - s)  # -> [n, n]
     return Z
 
 
@@ -41,7 +41,7 @@ def get_hankel_L(n: int) -> torch.Tensor:
         torch.Tensor: Hankel matrix Z of shape [n, n].
     """
     i = torch.arange(1, n + 1)
-    s = i[:, None] + i[None, :]        # s = i + j
+    s = i[:, None] + i[None, :]  # s = i + j
     sgn = (-1) ** (s - 2) + 1
     denom = (s + 3) * (s - 1) * (s + 1)
     Z_L = sgn * (8 / denom)
@@ -67,7 +67,7 @@ def get_top_eigh(
     """
     Z = get_hankel_L(n).to(device) if use_hankel_L else get_hankel(n).to(device)
     sigma, phi = torch.linalg.eigh(Z)  # -> [n], [n, n]
-    return sigma[-K:], phi[:, -K:]     # -> [K], [n, K]
+    return sigma[-K:], phi[:, -K:]  # -> [K], [n, K]
 
 
 @torch.jit.script
@@ -82,7 +82,7 @@ def shift(u: torch.Tensor, k: int = 1) -> torch.Tensor:
     Args:
         u (torch.Tensor): An input tensor of shape [bsz, sl, K, d],
         where bsz is the batch size, sl is the sequence length,
-        K is the number of spectral filters, and d is the feature dimension.
+        K is the number of spectral filters, andp d is the feature dimension.
         k (int): Number of time steps to shift. Defaults to 1.
 
     Returns:
@@ -96,9 +96,7 @@ def shift(u: torch.Tensor, k: int = 1) -> torch.Tensor:
 
 
 @torch.jit.script
-def compute_ar(
-    M_y: torch.Tensor, y: torch.Tensor, M_u: torch.Tensor, u: torch.Tensor
-) -> torch.Tensor:
+def compute_ar_u(M_u: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
     """
     Computes the full AR-STU (Auto-Regressive Spectral Transform Unit) model output.
 
@@ -106,11 +104,8 @@ def compute_ar(
     to produce the final output of the AR-STU model.
 
     Args:
-        y (torch.Tensor): Past output tensor of shape (bsz, sl, d_out)
-        u (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
-        M_y (torch.Tensor): Output weight matrices of shape (k_y, d_out, d_out)
         M_u (torch.Tensor): Input weight matrices of shape (k_u, d_in, d_out)
-        k_y (int): Number of past outputs to consider
+        u (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
 
     Returns:
         torch.Tensor: Full AR-STU model output of shape (bsz, sl, d_out)
@@ -122,24 +117,39 @@ def compute_ar(
         d_out: Output dimension
         k_u: Number of past inputs to consider (inferred from M_u shape)
     """
-    k_y, k_u = M_y.shape[0], M_u.shape[0]
-
-    # Sum M^y_i \hat_{y}_{t-i} from i=1 to i=k_y
-    # TODO: If we batch outputs, how are we supposed to give the prediction of t-1, etc?
-    y_shifts = torch.stack([shift(y, i + 1) for i in range(k_y)], dim=1)
-    ar_y = torch.einsum("bksd,kod->bso", y_shifts, M_y)
+    k_u = M_u.shape[0]
 
     # Sum M^u_i \hat_{u}_{t+1-i} from i=1 to i=k_u
-    u_shifts = torch.stack([shift(u, i) for i in range(k_u)], dim=1)
-    ar_u = torch.einsum("bksd,kdi->bsi", u_shifts, M_u)
+    u_shifted = torch.stack([shift(u, i) for i in range(k_u)], dim=1)
+    ar_u = torch.einsum("bksd,kdi->bsi", u_shifted, M_u)
 
-    return ar_y + ar_u
+    return ar_u
+
+
+@torch.jit.script
+def compute_ar_y(M_y: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the auto-regressive component of spectral SSM.
+
+    Args:
+        M_y: Output weight matrices of shape (k_y, d_out, d_out)
+        y: Predictions (bsz, sl, d_out)
+
+    Returns:
+        torch.Tensor: AR component of shape (bsz, sl, d_out)
+    """
+    k_y = M_y.shape[0]
+
+    # Sum M^y_i \hat_{y}_{t-i} from i=1 to i=k_y
+    y_shifted = torch.stack([shift(y, i + 1) for i in range(k_y)], dim=1)
+    ar_y = torch.einsum("bksd,kod->bso", y_shifted, M_y)
+    return ar_y
 
 
 @torch.jit.script
 def nearest_power_of_2(x: int) -> int:
     """
-    Returns the smallest power of 2 that is greater than or equal to x. 
+    Returns the smallest power of 2 that is greater than or equal to x.
     If x is already a power of 2, it returns x itself.
     Otherwise, it returns the next higher power of 2.
 
@@ -204,7 +214,7 @@ def compute_spectral(
     eigh: tuple[torch.Tensor, torch.Tensor],
     M_phi_plus: torch.Tensor,
     M_phi_minus: torch.Tensor,
-    k_y: int
+    M_y: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Computes the spectral component of AR-STU U feature vectors by projecting the input
@@ -225,19 +235,17 @@ def compute_spectral(
     _, K = phi.shape
 
     # Compute U⁺ and U⁻
-    U_plus, U_minus = conv(inputs, phi) # -> tuple of [bsz, sl, K, d_in]
+    U_plus, U_minus = conv(inputs, phi)  # -> tuple of [bsz, sl, K, d_in]
 
-    # FIXME: shift bug 1
-    # Shift U⁺ and U⁻ k_y time steps # TODO: Handle case where learnable_m_y=False
-    # _U_plus = shift(U_plus, k_y)
-    # _U_minus = shift(U_minus, k_y)
-    _U_plus = U_plus
-    _U_minus = U_minus
+    # Shift U⁺ and U⁻ k_y time steps
+    if M_y is not None:
+        k_y = M_y.shape[0]
+        U_plus, U_minus = shift(U_plus, k_y), shift(U_minus, k_y)
 
     # Perform spectral filter on U⁺ and U⁻ w/ sigma
-    sigma_root = (sigma ** 0.25).view(1, 1, K, 1)
-    U_plus_filtered, U_minus_filtered = _U_plus * sigma_root, _U_minus * sigma_root
-    
+    sigma_root = (sigma**0.25).view(1, 1, K, 1)
+    U_plus_filtered, U_minus_filtered = U_plus * sigma_root, U_minus * sigma_root
+
     # Sum M^{\phi +}_k \cdot U_plus_filtered across K filters
     spectral_plus = torch.einsum("bsKd,Kdo->bso", U_plus_filtered, M_phi_plus)
 
