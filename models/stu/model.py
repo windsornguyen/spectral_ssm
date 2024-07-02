@@ -89,13 +89,13 @@ class STU(nn.Module):
         return self.dropout(y_t)
 
 
-class FFN(nn.Module):
+class MLP(nn.Module):
     """
     Simple feed-forward network.
     """
 
     def __init__(self, configs):
-        super(FFN, self).__init__()
+        super(MLP, self).__init__()
         self.h_dim = (configs.scale * configs.n_embd * 2) // 3
         self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
         self.dropout = nn.Dropout(configs.dropout)
@@ -108,19 +108,15 @@ class FFN(nn.Module):
 class Block(nn.Module):
     def __init__(self, configs):
         super(Block, self).__init__()
-        # self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_1 = RMSNorm(configs.n_embd)
         self.stu = STU(configs)
-        # self.rn_2 = RMSNorm(configs.n_embd)
-        self.ffn = FFN(configs)
+        self.rn_2 = RMSNorm(configs.n_embd)
+        self.mlp = MLP(configs)
 
     def forward(self, x):
-        # z = self.rn_1(x)
-        # x = self.stu(self.rn_2(x))
-        # x = x + self.ffn(x)
-        # return x + z
-        z = x
-        x = self.stu(x)
-        x = x + self.ffn(x)
+        z = self.rn_1(x)
+        x = self.stu(self.rn_2(x))
+        x = x + self.mlp(x)
         return x + z
 
 
@@ -229,106 +225,118 @@ class SSSM(nn.Module):
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
-        init: int = 0,
-        steps: int = 100,
-        ar_steps: int = 1000,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor]]]:
+        init: int,
+        steps: int,
+        truth: int = 0,
+    ) -> tuple[
+        torch.Tensor,
+        tuple[
+            torch.Tensor, dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]
+        ],
+    ]:
         """
-        Predicts the next states for a given set of input trajectories using vectorized operations.
+        Perform autoregressive prediction with optional periodic grounding to true targets.
 
         Args:
-            inputs (torch.Tensor): A tensor of input trajectories with shape [num_trajectories, seq_len, d_in].
-            targets (torch.Tensor): A tensor of target trajectories with shape [num_trajectories, seq_len, d_out].
-            init (int): The index of the initial state to start the prediction from. Defaults to 0.
-            steps (int): The number of time steps to predict. Defaults to 100.
-            ar_steps (int): The number of autoregressive steps to take before using the ground truth state.
-                Defaults to 1, which means the model always uses the ground truth state to predict the next state.
+            inputs (torch.Tensor): Input tensor of shape (num_traj, total_steps, d_in)
+            targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
+            init (int): Index of the initial state to start the prediction
+            steps (int): Number of steps to predict
+            truth (int): Interval at which to ground predictions to true targets.
+                         If 0, no grounding is performed.
 
         Returns:
-            tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]]:
-                - preds (torch.Tensor): A tensor of predicted states for each trajectory after `steps` time steps,
-                    with shape [num_trajectories, steps, d_out].
-                - loss (tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]): A tuple containing:
-                    - avg_loss (torch.Tensor): The mean loss over time steps and trajectories.
-                    - avg_metrics (dict[str, torch.Tensor]): A dictionary of mean losses for each metric.
-                    - trajectory_losses (torch.Tensor): A tensor of losses for each trajectory at each time step,
-                        with shape [num_trajectories, steps].
+        tuple: Contains the following elements:
+            - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
+            - tuple:
+                - avg_loss (torch.Tensor): Scalar tensor with the average loss
+                - avg_metrics (dict[str, torch.Tensor]): Dictionary of average metrics, each a scalar tensor
+                - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
+                - metrics (dict[str, torch.Tensor]): Detailed metrics for each trajectory and step, each of shape (num_traj, steps)
         """
-
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_trajectories, sl, d_in = inputs.size()
+        num_traj, total_steps, d_in = inputs.size()
+        _, _, d_out = targets.size()
+        
+        assert (init + steps <= total_steps), f"init ({init}) + steps ({steps}) must be <= total_steps ({total_steps})"
+        assert truth >= 0, "The 'truth' parameter must be non-negative."
+        assert total_steps % truth == 0, "The total number of steps must be divisible by the 'truth' parameter."
 
-        # Initialize the predicted sequences and losses
-        ar_sequences = inputs.clone()
-        preds = torch.zeros(num_trajectories, steps, self.configs.n_embd, device=device)
-        trajectory_losses = torch.zeros(num_trajectories, steps, device=device)
-        metrics = {
-            key: torch.zeros(num_trajectories, steps, device=device)
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
-
-        # Initialize the predicted sequences and losses
-        ar_sequences = inputs.clone()
-        preds = torch.zeros(num_trajectories, steps, self.configs.n_embd, device=device)
-        trajectory_losses = torch.zeros(num_trajectories, steps, device=device)
-        metrics = {
-            key: torch.zeros(num_trajectories, steps, device=device)
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
-
-        i = init
-        with tqdm(total=steps, desc="Predicting", unit="step") as pbar:
-            while i < init + steps:
-                window_start = max(0, i - self.configs.sl + 1)
-
-                input_window = ar_sequences[:, window_start : i + 1, :]
-                target_window = targets[:, window_start : i + 1, :]
-                preds_step, (step_loss, step_metrics) = self.forward(
-                    input_window, target_window
+        # Optimization for truth == 1 case
+        if truth == 1:
+            preds = targets.clone()
+            traj_losses = torch.zeros(num_traj, steps, device=device)
+            metrics = {
+                key: torch.zeros(num_traj, steps, device=device)
+                for key in [
+                    "coordinate_loss",
+                    "orientation_loss",
+                    "angle_loss",
+                    "coordinate_velocity_loss",
+                    "angular_velocity_loss",
+                ]
+            }
+            for step in range(steps):
+                _, (step_loss, step_metrics) = self.forward(
+                    inputs[:, :init+step], targets[:, :init+step]
                 )
+                traj_losses[:, step] = step_loss.squeeze()
+                for key in metrics:
+                    metrics[key][:, step] = step_metrics[key]
+            
+            avg_loss = traj_losses.mean()
+            avg_metrics = {key: metrics[key].mean() for key in metrics}
+            return preds, (avg_loss, avg_metrics, traj_losses, metrics)
 
-                preds[:, i - init, :] = preds_step[:, -1, :]
-                trajectory_losses[:, i - init] = step_loss
+        metrics = {
+            key: torch.zeros(num_traj, steps, device=device)
+            for key in [
+                "coordinate_loss",
+                "orientation_loss",
+                "angle_loss",
+                "coordinate_velocity_loss",
+                "angular_velocity_loss",
+            ]
+        }
 
-                # for key in metrics:
-                #     metrics[key][:, i] = step_metrics[key]
+        # Initialize predictions tensor
+        preds = torch.zeros(num_traj, total_steps, d_out, device=device)
+        traj_losses = torch.zeros(num_traj, steps, device=device)
 
-                # Update autoregressive sequences for the next step
-                if i < init + steps - 1:
-                    next_step = i + 1
-                    if next_step < sl:
-                        next_input = (
-                            preds[:, i - init, :]
-                            if (i - init + 1) % ar_steps != 0
-                            else inputs[:, next_step, :]
-                        )
-                        ar_sequences[:, next_step, :] = next_input
-                    else:
-                        ar_sequences = torch.cat(
-                            [
-                                ar_sequences[:, 1:, :],
-                                preds[:, i - init : i - init + 1, :],
-                            ],
-                            dim=1,
-                        )
+        # Copy over ground truth values up to init for context
+        preds[:, :init] = targets[:, :init]
 
-                i += 1
-                pbar.update(1)
+        # Initialize autoregressive inputs with all available context
+        ar_inputs = inputs[:, :init].clone()
 
-        avg_loss = trajectory_losses.mean()
+        for step in tqdm(range(steps), desc="Predicting", unit="step"):
+            current_step = init + step
+
+            # Predict the next state using all available autoregressive inputs
+            step_preds, (step_loss, step_metrics) = self.forward(
+                ar_inputs, targets[:, :current_step]
+            )
+
+            # Decide whether to use the prediction or ground truth as the next input
+            if truth > 0 and (step + 1) % truth == 0:
+                next_input = inputs[:, current_step].unsqueeze(1)
+                preds[:, current_step] = targets[:, current_step]
+            else:
+                next_input = step_preds[:, -1:].detach()
+                preds[:, current_step] = step_preds[:, -1].squeeze(1)
+
+            # Append the next input to ar_inputs, maintaining full history
+            ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+
+            # Track the loss for current prediction
+            traj_losses[:, step] = step_loss.squeeze()
+
+            # Track the metrics for current prediction
+            for key in metrics:
+                metrics[key][:, step] = step_metrics[key]
+
+        avg_loss = traj_losses.mean()
         avg_metrics = {key: metrics[key].mean() for key in metrics}
 
-        return preds, (avg_loss, avg_metrics, trajectory_losses, metrics)
+        return preds, (avg_loss, avg_metrics, traj_losses, metrics)

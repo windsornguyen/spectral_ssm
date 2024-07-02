@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import random
 from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
 
 from models.stu.model import SSSM, SSSMConfigs
 
@@ -53,13 +55,19 @@ def main():
         choices=["mujoco-v1", "mujoco-v2", "mujoco-v3"],
         help="Task to run inference on.",
     )
+    parser.add_argument(
+        "--truth",
+        type=int,
+        default=0,
+        help="Interval at which to ground predictions to true targets. If 0, no grounding is performed.",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
     # model_path = f"_sssm-{args.controller}-model_step-239-2024-06-24-14-23-16.pt"
-    model_path = f"sssm_{args.controller}_no_norm.pt"
+    model_path = "/scratch/gpfs/mn4560/ssm/sssm_Ant-v1_mujoco-v2.pt"
 
     # Important indices (TODO: double check these are the right ones):
     # 0 - z-coordinate of the torso (centre)
@@ -73,7 +81,11 @@ def main():
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
             n_embd, d_out = 24, 18
-            loss_fn = HalfCheetahLoss() if args.controller == "HalfCheetah-v1" else Walker2DLoss()
+            loss_fn = (
+                HalfCheetahLoss()
+                if args.controller == "HalfCheetah-v1"
+                else Walker2DLoss()
+            )
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v2":
@@ -83,7 +95,11 @@ def main():
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
             n_embd, d_out = 18, 18
-            loss_fn = HalfCheetahLoss() if args.controller == "HalfCheetah-v1" else Walker2DLoss()
+            loss_fn = (
+                HalfCheetahLoss()
+                if args.controller == "HalfCheetah-v1"
+                else Walker2DLoss()
+            )
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v3":
@@ -115,9 +131,9 @@ def main():
     model.load_state_dict(state_dict)
     model.eval()
 
-    # Load the test datas
+    # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
-        base_path = f"data/{args.task}/{args.controller}"
+        base_path = f"data/{args.task}/{args.controller}/"
         test_inputs = np.load(f"{base_path}/val_inputs.npy")
         test_targets = np.load(f"{base_path}/val_targets.npy")
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
@@ -137,8 +153,10 @@ def main():
     predicted_states = []
     losses = []
     metrics = {}
+    init = 250 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
+    steps = len(test_inputs[1]) - init
+
     if args.task in ["mujoco-v1", "mujoco-v2"]:
-        steps = 100  # number of steps to predict
         metrics = {
             key: [torch.zeros(steps, device=device) for _ in range(num_preds)]
             for key in [
@@ -156,39 +174,45 @@ def main():
             targets = test_targets[i : i + 1]
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
-                pred_states, (avg_loss, avg_metric, loss, metric) = (
-                    model.predict_states(
-                        inputs=inputs,
-                        targets=targets,
-                        init=0,
-                        steps=100,
-                        ar_steps=1000,
-                    )
+                (
+                    pred_states,
+                    (avg_loss, avg_metrics, trajectory_losses, detailed_metrics),
+                ) = model.predict_states(
+                    inputs=inputs,
+                    targets=targets,
+                    init=init,  # Use the first 100 steps as context
+                    steps=steps,  # Predict the next steps
+                    truth=args.truth,
                 )
 
                 for key in metrics:
-                    metrics[key].append(metric[key])
+                    metrics[key][i] = detailed_metrics[key].squeeze()
 
             elif args.task == "mujoco-v3":
-                pred_states, (avg_loss, loss) = model.predict_frames(
+                (
+                    pred_states,
+                    (avg_loss, avg_metrics, trajectory_losses, detailed_metrics),
+                ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=140,
-                    steps=5,
-                    ar_steps=300,
+                    init=init,  # Use the first 295 steps as context
+                    steps=steps,  # Predict the next 5 steps
+                    truth=args.truth,
                 )
 
             predicted_states.append(pred_states)
-            losses.append(loss)
+            losses.append(trajectory_losses)
 
     predicted_states = torch.cat(predicted_states, dim=0)
     losses = torch.cat(losses, dim=0)
 
-    # # Before concatenation, ensure all tensors have the same number of dimensions
+    # Before concatenation, ensure all tensors have the same number of dimensions
     for key in metrics:
         for i in range(len(metrics[key])):
             if len(metrics[key][i].shape) == 1:
-                metrics[key][i] = metrics[key][i].unsqueeze(0)  # Add the extra dimension
+                metrics[key][i] = metrics[key][i].unsqueeze(
+                    0
+                )  # Add the extra dimension
 
     metrics = {key: torch.cat(value, dim=0) for key, value in metrics.items()}
 
@@ -221,89 +245,128 @@ def main():
     else:
         print("Predictions differ, which is expected for different inputs.")
 
-    # TODO: Save predictions and ground truths
-    print("saved prediction shape", predicted_states.shape)
+    # Save predictions and ground truths
+    print("Saved prediction shape:", predicted_states.shape)
     print(
-        "saved ground truth shape",
-        test_targets[:num_preds, : predicted_states.shape[1], :].shape,
+        "Saved ground truth shape:",
+        test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
-    np.save(f"sssm_no-norm_{args.controller}_{args.task}_predictions.npy", predicted_states.cpu().numpy())
+
     np.save(
-        f"sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy",
-        test_targets[:num_preds, : predicted_states.shape[1], :].cpu().numpy(),
+        f"sssm_{args.controller}_{args.task}_predictions.npy",
+        predicted_states.cpu().numpy(),
+    )
+    np.save(
+        f"sssm_{args.controller}_{args.task}_ground_truths.npy",
+        test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
     print(
-        f"Predictions and ground truths saved to 'sssm_no-norm_{args.controller}_{args.task}_predictions.npy' and 'sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy' respectively."
+        f"Predictions and ground truths saved to 'sssm_{args.controller}_{args.task}_predictions.npy' and 'sssm_{args.controller}_{args.task}_ground_truths.npy' respectively."
     )
 
     # Plotting
     plt.style.use("seaborn-v0_8-whitegrid")
-    num_rows = num_preds
-    num_cols = 2
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(8 * num_cols, 4 * num_rows))
+    sns.set_context("paper", font_scale=1.5)
+    colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
 
-    colors = [f"#{random.randint(0, 0xFFFFFF):06x}" for _ in range(num_preds)]
+    fig = plt.figure(figsize=(20, 8 * num_preds))
+    gs = GridSpec(
+        num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
+    )
 
     for pred_idx in range(num_preds):
-        time_steps = predicted_states.shape[1]
-        print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
+        print(f"Plotting prediction {pred_idx + 1}")
 
-        # Plot the predicted states and ground truth states
-        feature_idx = 2
-        axs[pred_idx, 0].plot(
-            range(time_steps),
-            test_targets[pred_idx, :time_steps, feature_idx].cpu().numpy(),
-            label=f"Ground Truth {pred_idx+1}, Feature {feature_idx+1}",
-            color=colors[pred_idx],
+        # Plot predicted states vs ground truth
+        ax1 = fig.add_subplot(gs[pred_idx, 0])
+        feature_idx = 0  # You can change this to plot different features
+
+        # Plot ground truth
+        ax1.plot(
+            range(init, init + steps),
+            test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
+            label="Ground Truth",
+            color="black",
             linewidth=2,
             linestyle="--",
         )
-        axs[pred_idx, 0].plot(
-            range(time_steps),
-            predicted_states[pred_idx, :, feature_idx].cpu().numpy(),
-            label=f"Predicted {pred_idx+1}, Feature {feature_idx+1}",
+
+        # Plot prediction
+        ax1.plot(
+            range(init, init + steps),
+            predicted_states[pred_idx, init:, feature_idx].cpu().numpy(),
+            label="Predicted",
             color=colors[pred_idx],
             linewidth=2,
         )
 
-        axs[pred_idx, 0].set_title(
-            f"Prediction {pred_idx+1}: Predicted vs Ground Truth"
-        )
-        axs[pred_idx, 0].set_xlabel("Time Step")
-        axs[pred_idx, 0].set_ylabel("State")
-        axs[pred_idx, 0].legend()
-        axs[pred_idx, 0].grid(True)
+        # Visualize grounding points
+        if args.truth > 0:
+            grounding_points = range(
+                init + args.truth - 1,
+                init + steps,
+                args.truth,
+            )
+            ax1.scatter(
+                grounding_points,
+                test_targets[pred_idx, grounding_points, feature_idx].cpu().numpy(),
+                color="red",
+                s=50,
+                zorder=3,
+                label="Grounding Points",
+            )
 
-        # Plot the losses (scaled up by 100)
-        scaled_losses = smooth_curve(losses[pred_idx].cpu().numpy())
-        axs[pred_idx, 1].plot(
-            range(time_steps),
-            scaled_losses,
-            color=colors[pred_idx],
+        ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
+        ax1.set_xlabel("Time Step")
+        ax1.set_ylabel("State Value")
+        ax1.legend()
+
+        # Plot losses and metrics
+        ax2 = fig.add_subplot(gs[pred_idx, 1])
+
+        # Plot losses
+        ax2.plot(
+            range(steps),
+            smooth_curve(losses[pred_idx].cpu().numpy()),
+            label="Total Loss",
+            color="black",
             linewidth=2,
         )
-        axs[pred_idx, 1].set_title(f"Prediction {pred_idx+1}: Loss")
-        axs[pred_idx, 1].set_xlabel("Time Step")
-        axs[pred_idx, 1].set_ylabel("Loss")
-        axs[pred_idx, 1].grid(True)
 
         if args.task in ["mujoco-v1", "mujoco-v2"]:
-            # Plot the metrics
             for key in metrics:
                 metric_values = metrics[key][pred_idx].cpu().numpy()
-                if metric_values.size > 0:  # Check that metric_values is not empty
-                    axs[pred_idx, 1].plot(
-                        range(time_steps),
+                if metric_values.size > 0:
+                    ax2.plot(
+                        range(steps),
                         smooth_curve(metric_values),
-                        label=f"{key}",
+                        label=key,
                         linewidth=2,
+                        alpha=0.7,
                     )
                 else:
                     print(f"Warning: {key} for prediction {pred_idx} is empty")
 
-    plt.tight_layout()
+        ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
+        ax2.set_xlabel("Time Step")
+        ax2.set_ylabel("Value")
+        ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+        ax2.set_yscale("log")  # Use log scale for better visibility of all metrics
+
+        # Add vertical lines for grounding points in the loss plot
+        if args.truth > 0:
+            for ground_step in range(args.truth - 1, steps, args.truth):
+                ax2.axvline(x=ground_step, color="red", linestyle="--", alpha=0.5)
+
+    plt.suptitle(
+        f"SSSM Predictions for {args.controller} on {args.task}\n"
+        f"Grounding Interval: {args.truth if args.truth > 0 else 'None'}",
+        fontsize=16,
+    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # TODO: Add existok / make if non-existent (results/) directory
     plt.savefig(
-        f"results/{args.controller}_{args.task}_predictions_sssm.png",
+        f"results/sssm_{args.controller}_{args.task}_predictions.png",
         dpi=300,
         bbox_inches="tight",
     )

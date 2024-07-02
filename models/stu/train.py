@@ -233,7 +233,7 @@ def main() -> None:
     stu_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 80
+    bsz: int = 8
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

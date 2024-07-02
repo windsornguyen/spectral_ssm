@@ -9,6 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 import argparse
+import os
 
 # Process command line flags
 parser = argparse.ArgumentParser(
@@ -31,12 +32,25 @@ parser.add_argument(
 args = parser.parse_args()
 
 
-# Load data
-sssm = np.load(f"sssm_no-norm_{args.controller}_{args.task}_predictions.npy")
-transformer = np.load(f"transformer_{args.controller}_{args.task}_predictions.npy")
+def load_data(filename):
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"The file {filename} does not exist.")
+    return np.load(filename)
 
-ground_truth = np.load(f"sssm_no-norm_{args.controller}_{args.task}_ground_truths.npy")
-transformer_ground_truth = np.load(f"transformer_{args.controller}_{args.task}_ground_truths.npy")
+
+# Load data
+try:
+    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions.npy")
+    transformer = load_data(
+        f"transformer_{args.controller}_{args.task}_predictions.npy"
+    )
+    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
+    transformer_ground_truth = load_data(
+        f"transformer_{args.controller}_{args.task}_ground_truths.npy"
+    )
+except FileNotFoundError as e:
+    print(f"Error loading data: {e}")
+    exit(1)
 
 # Check if they are the same to ensure we are comparing the right data
 if np.array_equal(ground_truth, transformer_ground_truth):
@@ -47,19 +61,21 @@ else:
 num_preds, time_steps, num_features = sssm.shape
 
 # Assert if they are not of the same shape
+print(sssm.shape, transformer.shape, ground_truth.shape)
 assert (
     sssm.shape == transformer.shape == ground_truth.shape
 ), "The shapes of SSSM, Transformer, and Ground Truth are not the same."
 
-
 # Choose features to plot the predicted states (embeddings) v. ground truth states
 if args.task in ["mujoco-v1", "mujoco-v2"]:
     if args.controller == "Ant-v1":
-        n_components = 3    # Ant-v1 coordinate features (in order): x-, y-, z-
+        n_components = 3  # Ant-v1 coordinate features (in order): x-, y-, z-
     if args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-        n_components = 2    # HalfCheetah-v1/Walker2D-v1 coordinate features (in order): x-, z-
+        n_components = (
+            2  # HalfCheetah-v1/Walker2D-v1 coordinate features (in order): x-, z-
+        )
 elif args.task == "mujoco-v3":
-    n_components = 3 # to perform PCA
+    n_components = 3  # to perform PCA
 else:
     raise ValueError("Invalid task")
 
@@ -73,7 +89,9 @@ for pred_idx in range(num_preds):
     fig, ax = plt.subplots(figsize=(7, 5))
 
     sssm_mean_loss = np.mean(np.abs(ground_truth[pred_idx] - sssm[pred_idx]), axis=1)
-    transformer_mean_loss = np.mean(np.abs(ground_truth[pred_idx] - transformer[pred_idx]), axis=1)
+    transformer_mean_loss = np.mean(
+        np.abs(ground_truth[pred_idx] - transformer[pred_idx]), axis=1
+    )
 
     ax.plot(
         range(time_steps),
@@ -90,9 +108,12 @@ for pred_idx in range(num_preds):
         linewidth=2,
     )
     ax.legend()
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel("Mean Absolute Error")
+    ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
     # Save the mean loss figures
-    plt.savefig(f"Mean_Losses_Prediction_{pred_idx+1}_{args.controller}.png")
-    plt.close(fig) 
+    plt.savefig(f"mean_losses_preds_{pred_idx+1}_{args.controller}.png")
+    plt.close(fig)
 
 # Perform PCA
 if args.task == "mujoco-v3":
@@ -108,7 +129,6 @@ if args.task == "mujoco-v3":
         num_preds, time_steps, -1
     )
 
-
 for pred_idx in range(num_preds):
     print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
     # One figure for each prediction
@@ -119,7 +139,7 @@ for pred_idx in range(num_preds):
         axs[feature_idx, 0].plot(
             range(time_steps),
             ground_truth[pred_idx, :time_steps, feature_idx],
-            label=f"Prediction {pred_idx+1} Ground Truth, Feature {feature_idx+1}",
+            label="Ground Truth",
             color=colors[2],
             linewidth=2,
             linestyle="--",
@@ -127,41 +147,58 @@ for pred_idx in range(num_preds):
         axs[feature_idx, 0].plot(
             range(time_steps),
             sssm[pred_idx, :, feature_idx],
-            label=f"Prediction {pred_idx+1} SSSM, Feature {feature_idx+1}",
+            label="SSSM",
             color=colors[0],
             linewidth=2,
         )
         axs[feature_idx, 0].plot(
             range(time_steps),
             transformer[pred_idx, :, feature_idx],
-            label=f"Prediction {pred_idx+1} Transformer, Feature {feature_idx+1}",
+            label="Transformer",
             color=colors[1],
             linewidth=2,
         )
+        axs[feature_idx, 0].set_xlabel("Time Step")
+        axs[feature_idx, 0].set_ylabel(f"Feature {feature_idx+1} Value")
+        axs[feature_idx, 0].set_title(
+            f"Prediction {pred_idx+1}, Feature {feature_idx+1}"
+        )
+        axs[feature_idx, 0].legend()
 
         # Plot the Feature losses
-        sssm_loss = np.abs(ground_truth[pred_idx, :, feature_idx] - sssm[pred_idx, :, feature_idx])
-        transformer_loss = np.abs(ground_truth[pred_idx, :, feature_idx] - transformer[pred_idx, :, feature_idx])
+        sssm_loss = np.abs(
+            ground_truth[pred_idx, :, feature_idx] - sssm[pred_idx, :, feature_idx]
+        )
+        transformer_loss = np.abs(
+            ground_truth[pred_idx, :, feature_idx]
+            - transformer[pred_idx, :, feature_idx]
+        )
 
         axs[feature_idx, 1].plot(
             range(time_steps),
             sssm_loss,
-            label=f"Prediction {pred_idx+1} SSSM Loss, Feature {feature_idx+1}",
+            label="SSSM Loss",
             color=colors[0],
             linewidth=2,
         )
         axs[feature_idx, 1].plot(
             range(time_steps),
             transformer_loss,
-            label=f"Prediction {pred_idx+1} Transformer Loss, Feature {feature_idx+1}",
+            label="Transformer Loss",
             color=colors[1],
             linewidth=2,
         )
+        axs[feature_idx, 1].set_xlabel("Time Step")
+        axs[feature_idx, 1].set_ylabel("Absolute Error")
+        axs[feature_idx, 1].set_title(
+            f"Loss for Prediction {pred_idx+1}, Feature {feature_idx+1}"
+        )
+        axs[feature_idx, 1].legend()
 
-    # Show the plots
-    for ax in axs.flat:
-        ax.legend()
-    
+    plt.suptitle(
+        f"Predictions and Losses for {args.controller} on {args.task}", fontsize=16
+    )
+    plt.tight_layout()
     # Save the figures
-    plt.savefig(f"Predictions_{pred_idx+1}_{args.controller}.png")
+    plt.savefig(f"preds_{pred_idx+1}_{args.controller}.png")
     plt.close(fig)
