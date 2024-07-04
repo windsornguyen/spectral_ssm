@@ -115,6 +115,7 @@ def load_video_frame(video_dir, size=(480, 480)):
             CenterCrop(size),
         ]
     )
+    frame = frame.permute(2, 0, 1)
     frame = transform(frame)
     print(f"Frame shape after transform: {frame.shape}")
 
@@ -143,7 +144,7 @@ if __name__ == "__main__":
     model.eval()
     print("Model loaded and set to eval mode")
 
-    video_dir = "/scratch/gpfs/mn4560/ssm/models/vae/data/val"
+    video_dir = "../../data/mujoco-v3/Ant-v1/val"
     print(f"Loading frame from: {video_dir}")
     frame = load_video_frame(video_dir).to(device)
     print(f"Frame loaded, shape: {frame.shape}, device: {frame.device}")

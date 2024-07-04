@@ -156,7 +156,7 @@ def main() -> None:
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
         n_head: int = 8 if controller != "Ant-v1" else 1
-        sl: int = 1_000
+        sl: int = 900
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -173,7 +173,7 @@ def main() -> None:
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
         n_head: int = 9 if controller != "Ant-v1" else 1
-        sl: int = 1_000
+        sl: int = 900
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -217,7 +217,7 @@ def main() -> None:
     # TODO: Add accumulated gradients to this
     # TODO: Make data loader better
     # TODO: Add print statement reporting our batch size and accumulated batch size
-    bsz: int = 80 // world_size
+    bsz: int = 4 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

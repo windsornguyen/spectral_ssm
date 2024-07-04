@@ -163,14 +163,16 @@ def main() -> None:
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 1_000
+        d_out = d_in    # before projection d_in = d_out
+        d_proj: int = 18 if controller != "Ant-v1" else 29
+        sl: int = 900
 
         configs = SSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -189,12 +191,14 @@ def main() -> None:
         n_embd: int = 18 if controller != "Ant-v1" else 29
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
-        sl: int = 1_000
+        d_proj = n_embd
+        sl: int = 900
         configs = SSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -215,6 +219,7 @@ def main() -> None:
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_embd = d_out
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
+        d_proj = n_embd
         sl: int = 300
 
         configs = SSSMConfigs(
@@ -222,6 +227,7 @@ def main() -> None:
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -243,7 +249,7 @@ def main() -> None:
     stu_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 80
+    bsz: int = 4
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

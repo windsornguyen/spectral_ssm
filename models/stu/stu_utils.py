@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen
+# Authors: Windsor Nguyen, Isabel Liu
 # File: stu_utils.py
 # =============================================================================#
 
@@ -104,7 +104,7 @@ def compute_ar_u(M_u: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
     to produce the final output of the AR-STU model.
 
     Args:
-        M_u (torch.Tensor): Input weight matrices of shape (k_u, d_in, d_out)
+        M_u (torch.Tensor): Input weight matrices of shape (k_u, d_out, d_in)
         u (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
 
     Returns:
@@ -121,7 +121,7 @@ def compute_ar_u(M_u: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
 
     # Sum M^u_i \hat_{u}_{t+1-i} from i=1 to i=k_u
     u_shifted = torch.stack([shift(u, i) for i in range(k_u)], dim=1)
-    ar_u = torch.einsum("bksd,kdi->bsi", u_shifted, M_u)
+    ar_u = torch.einsum("bksd,kod->bso", u_shifted, M_u)
 
     return ar_u
 
@@ -138,11 +138,33 @@ def compute_ar_y(M_y: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: AR component of shape (bsz, sl, d_out)
     """
-    k_y = M_y.shape[0]
+    k_y, d_out, _ = M_y.shape
+    bsz, sl, _ = y.shape
 
-    # Sum M^y_i \hat_{y}_{t-i} from i=1 to i=k_y
-    y_shifted = torch.stack([shift(y, i + 1) for i in range(k_y)], dim=1)
-    ar_y = torch.einsum("bksd,kod->bso", y_shifted, M_y)
+    # Define the transition matrix A, and add bsz for bmm
+    A = M_y.reshape(k_y * d_out, d_out)    # Reshape M_y to [k * d_out, d_out] for concat
+    eye = torch.eye(k_y * d_out, (k_y - 1) * d_out, dtype=y.dtype, device=y.device)
+    A = torch.cat([A, eye], dim=1)
+    A = A.unsqueeze(0).expand(bsz, k_y * d_out, k_y * d_out)
+
+    # Add (k_y - 1) rows of padding to y
+    padding = torch.zeros(bsz, sl, (k_y - 1) * d_out, dtype=y.dtype, device=y.device)   # -> [bsz, sl, (k_y - 1) * d_out]
+
+    carry = torch.cat([y, padding], dim=2)  # -> [bsz, sl, k_y * d_out]
+
+    # Reshape for sequential processing
+    carry = carry.view(bsz, sl, k_y * d_out, 1) # -> [bsz, sl, k_y * d_out, 1]
+
+    # Initialize y and the output list of y's
+    y_t = carry[:, 0] # -> [bsz, k_y * d_out, 1]
+    ar_y = [y_t[:, :d_out, 0]]  # ->[bsz, d_out]
+
+    # Iterate through the sequence
+    for i in range(1, sl):
+        y_t = torch.bmm(A, y_t) + carry[:, i]
+        ar_y.append(y_t[:, :d_out, 0])
+    ar_y = torch.stack(ar_y, dim=1) # -> [bsz, sl, d_out]
+
     return ar_y
 
 
@@ -224,8 +246,8 @@ def compute_spectral(
         inputs (torch.Tensor): A tensor of shape [bsz, sl, d_in].
         eigh (tuple[torch.Tensor, torch.Tensor]): A tuple of eigenvalues of shape [K,] and
             eigenvectors of shape [sl, K].
-        m_phi_plus (torch.Tensor): A tensor of shape [K, d_in, d_out].
-        m_phi_minus (torch.Tensor): A tensor of shape [K, d_in, d_out].
+        m_phi_plus (torch.Tensor): A tensor of shape [K, d_out, d_in].
+        m_phi_minus (torch.Tensor): A tensor of shape [K, d_out, d_in].
         k_y (int): Number of time steps to shift.
 
     Returns:
@@ -247,9 +269,9 @@ def compute_spectral(
     U_plus_filtered, U_minus_filtered = U_plus * sigma_root, U_minus * sigma_root
 
     # Sum M^{\phi +}_k \cdot U_plus_filtered across K filters
-    spectral_plus = torch.einsum("bsKd,Kdo->bso", U_plus_filtered, M_phi_plus)
+    spectral_plus = torch.einsum("bsKd,Kod->bso", U_plus_filtered, M_phi_plus)
 
     # Sum M^{\phi -}_k \cdot U_minus_filtered across K filters
-    spectral_minus = torch.einsum("bsKd,Kdo->bso", U_minus_filtered, M_phi_minus)
+    spectral_minus = torch.einsum("bsKd,Kod->bso", U_minus_filtered, M_phi_minus)
 
     return spectral_plus + spectral_minus

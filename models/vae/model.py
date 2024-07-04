@@ -7,6 +7,7 @@ from torchvision.io import read_video
 import os
 import numpy as np
 from tqdm import tqdm
+from pytorch_ssim import SSIM
 
 
 class ResBlock(nn.Module):
@@ -93,11 +94,16 @@ class VAE(nn.Module):
 
 
 class VideoDataset(Dataset):
-    def __init__(self, video_dir, sequence_length, transform=None):
-        self.video_dir = video_dir
+    def __init__(self, video_dirs, sequence_length, transform=None):
         self.sequence_length = sequence_length
         self.transform = transform
-        self.video_files = [f for f in os.listdir(video_dir) if f.endswith(".mp4")]
+        self.video_files = []
+        for video_dir in video_dirs:
+            self.video_files += [
+                os.path.join(video_dir, f)
+                for f in os.listdir(video_dir)
+                if f.endswith(".mp4")
+            ]
 
     def __len__(self):
         return len(self.video_files)
@@ -149,6 +155,7 @@ def train_vae(model, train_loader, val_loader, num_epochs, learning_rate, beta, 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     def loss_function(recon_x, x, mu, logvar):
+        # recon_loss = 1 - SSIM(recon_x, x)
         recon_loss = F.mse_loss(recon_x, x, reduction="sum")
         kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
         return recon_loss + beta * kld_loss
@@ -189,8 +196,8 @@ def train_vae(model, train_loader, val_loader, num_epochs, learning_rate, beta, 
 if __name__ == "__main__":
     # Hyperparameters
     latent_dim = 128
-    num_epochs = 100
-    batch_size = 32
+    num_epochs = 3
+    batch_size = 1
     learning_rate = 1e-4
     beta = 4.0  # Beta-VAE hyperparameter
     sequence_length = 30
@@ -206,12 +213,12 @@ if __name__ == "__main__":
 
     # Create datasets
     train_dataset = VideoDataset(
-        video_dir="/scratch/gpfs/mn4560/ssm/models/vae/data/train",
+        video_dirs=["../../data/vae/Ant-v1", "../../data/vae/HalfCheetah-v1", "../../data/vae/Walker2D-v1"],
         sequence_length=sequence_length,
         transform=transform,
     )
     val_dataset = VideoDataset(
-        video_dir="/scratch/gpfs/mn4560/ssm/models/vae/data/val",
+        video_dirs=["../../data/vae/Ant-v1/val", "../../data/vae/HalfCheetah-v1/val", "../../data/vae/Walker2D-v1/val"],
         sequence_length=sequence_length,
         transform=transform,
     )
