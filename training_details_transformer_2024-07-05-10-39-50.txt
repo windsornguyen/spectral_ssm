@@ -1,0 +1,5 @@
+Training completed for Transformer on mujoco-v1 with HalfCheetah-v1 at: 2024-07-05 10:40:23.994272
+Best model step: 805
+Best model validation loss: 38.2864
+Best model checkpoint saved at: checkpoints/transformer-HalfCheetah-v1-model_step-805-2024-07-05-10-39-50.pt
+Best model's extra info data saved at: checkpoints/transformer-HalfCheetah-v1-other_step-805-2024-07-05-10-39-50.pt

@@ -26,6 +26,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 from utils.squared_relu import SquaredReLU
 from utils.rms_norm import RMSNorm # TODO: Remove the bias config since we don't use LN
+from torch.nn import MSELoss
 
 class CausalSelfAttention(nn.Module):
     """
@@ -280,16 +281,16 @@ class Transformer(nn.Module):
         pos = torch.arange(0, sl, dtype=torch.long, device=device)  # -> (sl)
 
         # Position embeddings of shape (sl, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # -> (sl, n_embd)
+        # pos_emb = self.transformer.wpe(pos)  # -> (sl, n_embd)
 
         # Add bsz dim to pos_emb
-        pos_emb = pos_emb.unsqueeze(0).expand(bsz, -1, -1)
+        # pos_emb = pos_emb.unsqueeze(0).expand(bsz, -1, -1)
 
         # Project input to lower-dimensional space
         x = self.d_in(inputs)  # -> (bsz, sl, n_embd)
 
         # Apply dropout
-        x = self.transformer.dropout(x + pos_emb)
+        # x = self.transformer.dropout(x + pos_emb)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:
@@ -361,75 +362,70 @@ class Transformer(nn.Module):
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
-        init: int = 900,
-        steps: int = 100,
-        ar_steps: int = 1000,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor]]]:
+        init: int = 950,
+        steps: int = 50,
+        rollout_steps: int = 20,
+        window_size: int = 900,
+    ) -> tuple[
+        torch.Tensor,
+        tuple[
+            torch.Tensor, dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]
+        ],
+    ]:
         """
-        Predicts the next states for a given set of input trajectories using vectorized operations.
+        Perform autoregressive prediction with optional periodic grounding to true targets.
 
         Args:
-            inputs (torch.Tensor): A tensor of input trajectories with shape [num_trajectories, seq_len, d_in].
-            targets (torch.Tensor): A tensor of target trajectories with shape [num_trajectories, seq_len, d_out].
-            init (int): The index of the initial state to start the prediction from. Defaults to 1000.
-            steps (int): The number of time steps to predict. Defaults to 100.
-            ar_steps (int): The number of autoregressive steps to take before using the ground truth state.
-                Defaults to 1, which means the model always uses the ground truth state to predict the next state.
+            inputs (torch.Tensor): Input tensor of shape (num_traj, total_steps, d_in)
+            targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
+            init (int): Index of the initial state to start the prediction
+            steps (int): Number of steps to predict
 
         Returns:
-            tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]]:
-                - preds (torch.Tensor): A tensor of predicted states for each trajectory after `steps` time steps,
-                    with shape [num_trajectories, steps, d_out].
-                - loss (tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]): A tuple containing:
-                    - avg_loss (torch.Tensor): The mean loss over time steps and trajectories.
-                    - avg_metrics (dict[str, torch.Tensor]): A dictionary of mean losses for each metric.
-                    - trajectory_losses (torch.Tensor): A tensor of losses for each trajectory at each time step,
-                        with shape [num_trajectories, steps].
+        tuple: Contains the following elements:
+            - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
+            - tuple:
+                - avg_loss (torch.Tensor): Scalar tensor with the average loss
+                - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
         num_traj, _, d_in = inputs.size()
         _, _, d_out = targets.size()
-        sl = init   # default
 
-        # Initialize the predicted sequences and losses
-        preds = torch.zeros(num_traj, steps, d_out, device=device)
-        trajectory_losses = torch.zeros(num_traj, steps, device=device)
-        ar_sequences = inputs.clone()
+        # To track what the model hallucinates
+        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        metrics = {
-            key: torch.zeros(num_traj, steps, device=device)
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
-        
+        # To track the MSE loss between rollout vs ground truth for each trajectory
+        traj_losses = torch.zeros(num_traj, steps, device=device)
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            window_start = max(0, init + step - sl)
-            pred, losses = self.forward(ar_sequences[:, window_start : (init + step)], targets[:, window_start : (init + step)])
-            loss, step_metrics = losses
+            current_step = init + step # Start at init
+            window_start = current_step - window_size
 
-            # Store preds and losses
-            preds[:, step, :] = pred[:, -1, :]
-            trajectory_losses[:, step] = loss
+            # Predict the next state using a fixed window size of inputs
+            step_preds, (_, _) = self.forward(
+                inputs[:, window_start:current_step], targets[:, window_start:current_step]
+            )
 
-            for key in metrics:
-                metrics[key][:, step] = step_metrics[key]
+            # Calculate the mean loss of the last rollout_steps predictions
+            rollout_preds = step_preds[:, -rollout_steps:, :]
+            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
 
-            # Update autoregressive sequences for the next step
-            next_step = init + step
-            if (init + step) % ar_steps != 0:
-                ar_sequences[:, next_step, :d_out] = preds[:, step, :]
+            mse_loss = MSELoss()
+            traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
-        avg_loss = trajectory_losses.mean()
-        avg_metrics = {key: metrics[key].mean() for key in metrics}
+            # Store the last prediction step for plotting
+            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-        return preds, (avg_loss, avg_metrics, trajectory_losses, metrics)
+            # Concatenate the autoregressive predictions of states and the ground truth actions
+            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+            # next_input = torch.cat([next_input, next_action], dim=2)
+            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
+        avg_loss = traj_losses.mean()
+
+        return hallucinated_steps, (avg_loss, traj_losses)
 
 class DilatedCausalSelfAttention(CausalSelfAttention):
     """

@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Isabel Liu
+# Authors: Isabel Liu, Windsor Nguyen
 # File: predict.py
 # =============================================================================#
 
@@ -9,9 +9,10 @@ import argparse
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import random
 from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
 
 from models.transformer.model import Transformer, TransformerConfigs
 from torch.nn import MSELoss
@@ -43,7 +44,7 @@ def main():
         "--controller",
         type=str,
         default="Ant-v1",
-        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1", "Cartpole-v1"],
+        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1"],
         help="Controller to use for the MuJoCo environment.",
     )
     parser.add_argument(
@@ -58,17 +59,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
-    # model_path = f"best_{args.controller}.safetensors"
     model_path = f"transformer_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
-        sl, init = 900, 900
-        n_head = 1
+        sl = 900
         if args.controller == "Ant-v1":
             n_embd, d_out = 37, 29
+            n_head = 1
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
             n_embd, d_out = 24, 18
+            n_head = 8
             loss_fn = (
                 HalfCheetahLoss()
                 if args.controller == "HalfCheetah-v1"
@@ -77,7 +78,7 @@ def main():
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v2":
-        sl, init = 900, 900 if controller != "Cartpole-v1" else 450, 450
+        sl = 900
         n_head = 1
         if args.controller == "Ant-v1":
             n_embd, d_out = 29, 29
@@ -89,14 +90,11 @@ def main():
                 if args.controller == "HalfCheetah-v1"
                 else Walker2DLoss()
             )
-        elif args.controller == "Cartpole-v1":
-            n_embd, d_out = 4, 4
-            loss_fn = CartpoleLoss()
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v3":
         n_head = 8
-        sl, init, n_embd, d_out = 300, 300, 512, 512
+        sl, n_embd, d_out = 300, 512, 512
         loss_fn = MSELoss()
     else:
         raise ValueError("Invalid task")
@@ -131,7 +129,7 @@ def main():
         test_targets = torch.from_numpy(test_targets).float().to(device)
     elif args.task == "mujoco-v3":
         test_data = torch.load(
-            f"data/{args.task}/{args.controller}/{args.controller}_ResNet-18.pt",
+            f"data/{args.task}/{args.controller}/{args.controller}_ResNet-18_test.pt",
             map_location=device,
         )
         test_inputs = test_data
@@ -144,18 +142,8 @@ def main():
     predicted_states = []
     losses = []
     metrics = {}
-    if args.task in ["mujoco-v1", "mujoco-v2"]:
-        steps = 50  # number of steps to predict
-        metrics = {
-            key: [torch.zeros(steps, device=device) for _ in range(num_preds)]
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
+    init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
+    steps = len(test_inputs[1]) - init
 
     with torch.no_grad():
         for i in range(num_preds):
@@ -163,51 +151,39 @@ def main():
             targets = test_targets[i : i + 1]
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
-                pred_states, (avg_loss, avg_metric, loss, metric) = (
-                    model.predict_states(
-                        inputs=inputs,
-                        targets=targets,
-                        init=init,
-                        steps=50,
-                        ar_steps=1000,
-                    )
-                )
-
-                for key in metrics:
-                    metrics[key].append(metric[key])
-
-            elif args.task == "mujoco-v3":
-                pred_states, (avg_loss, loss) = model.predict_frames(
+                (
+                    pred_states,
+                    (avg_loss, trajectory_losses),
+                ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=140,
-                    steps=10,
-                    ar_steps=300,
+                    init=init,  # Use the first 100 steps as context
+                    steps=steps,  # Predict the next steps
+                    rollout_steps=20,
+                    window_size=sl,
+                )
+
+            elif args.task == "mujoco-v3":
+                (
+                    pred_states,
+                    (avg_loss, trajectory_losses),
+                ) = model.predict_states(
+                    inputs=inputs,
+                    targets=targets,
+                    init=init,
+                    steps=steps,  # Predict the next 5 steps
+                    rollout_steps=1,
+                    window_size=sl,
                 )
 
             predicted_states.append(pred_states)
-            losses.append(loss)
+            losses.append(trajectory_losses)
 
     predicted_states = torch.cat(predicted_states, dim=0)
     losses = torch.cat(losses, dim=0)
 
-    # Before concatenation, ensure all tensors have the same number of dimensions
-    for key in metrics:
-        for i in range(len(metrics[key])):
-            if len(metrics[key][i].shape) == 1:
-                metrics[key][i] = metrics[key][i].unsqueeze(
-                    0
-                )  # Add the extra dimension
-
-    metrics = {key: torch.cat(value, dim=0) for key, value in metrics.items()}
-
     print(f"Shape of predicted states: {predicted_states.shape}")
     print(f"Shape of losses: {losses.shape}")
-    for key, value in metrics.items():
-        for i, tensor in enumerate(value):
-            print(
-                f"The shape of {key} for prediction {i} is: {tensor.shape}"
-            )  # empty if mujoco-v1/v2
 
     # Print out predictions and check if they're all the same
     for i in range(num_preds):
@@ -230,92 +206,92 @@ def main():
     else:
         print("Predictions differ, which is expected for different inputs.")
 
-    # TODO: Save predictions and ground truths
-    print("saved prediction shape", predicted_states.shape)
+    # Save predictions and ground truths
+    print("Saved prediction shape:", predicted_states.shape)
     print(
-        "saved ground truth shape",
-        test_targets[:num_preds, -predicted_states.shape[1]:, :].shape,
+        "Saved ground truth shape:",
+        test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
+
     np.save(
         f"transformer_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
         f"transformer_{args.controller}_{args.task}_ground_truths.npy",
-        test_targets[:num_preds, -predicted_states.shape[1]:, :].cpu().numpy(),
+        test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
     print(
         f"Predictions and ground truths saved to 'transformer_{args.controller}_{args.task}_predictions.npy' and 'transformer_{args.controller}_{args.task}_ground_truths.npy' respectively."
     )
+
     # Plotting
     plt.style.use("seaborn-v0_8-whitegrid")
-    num_rows = num_preds
-    num_cols = 2
-    fig, axs = plt.subplots(num_rows, num_cols, figsize=(8 * num_cols, 4 * num_rows))
+    sns.set_context("paper", font_scale=1.5)
+    colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
 
-    colors = [f"#{random.randint(0, 0xFFFFFF):06x}" for _ in range(num_preds)]
+    fig = plt.figure(figsize=(20, 8 * num_preds))
+    gs = GridSpec(
+        num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
+    )
 
     for pred_idx in range(num_preds):
-        time_steps = predicted_states.shape[1]
-        print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
+        print(f"Plotting prediction {pred_idx + 1}")
 
-        # # Plot the predicted states and ground truth states
-        # for feature_idx in range(3):  # Plot first three features
-        feature_idx = 1
-        axs[pred_idx, 0].plot(
-            range(time_steps),
-            test_targets[pred_idx, -time_steps:, feature_idx].cpu().numpy(),
-            label=f"Ground Truth {pred_idx+1}, Feature {feature_idx+1}",
-            color=colors[pred_idx],
+        # Plot predicted states vs ground truth
+        ax1 = fig.add_subplot(gs[pred_idx, 0])
+        feature_idx = 0
+
+        # Plot ground truth
+        ax1.plot(
+            range(init, init + steps - 1),
+            test_targets[pred_idx, init : init + steps - 1, feature_idx].cpu().numpy(),
+            label="Ground Truth",
+            color="black",
             linewidth=2,
             linestyle="--",
         )
-        axs[pred_idx, 0].plot(
-            range(time_steps),
-            predicted_states[pred_idx, :, feature_idx].cpu().numpy(),
-            label=f"Predicted {pred_idx+1}, Feature {feature_idx+1}",
+
+        # Plot prediction
+        ax1.plot(
+            range(init, init + steps - 1),
+            predicted_states[pred_idx, : steps - 1, feature_idx].cpu().numpy(),
+            label="Predicted",
             color=colors[pred_idx],
             linewidth=2,
         )
 
-        axs[pred_idx, 0].set_title(
-            f"Prediction {pred_idx+1}: Predicted vs Ground Truth"
-        )
-        axs[pred_idx, 0].set_xlabel("Time Step")
-        axs[pred_idx, 0].set_ylabel("State")
-        axs[pred_idx, 0].legend()
-        axs[pred_idx, 0].grid(True)
+        ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
+        ax1.set_xlabel("Time Step")
+        ax1.set_ylabel("State Value")
+        ax1.legend()
 
-        # Plot the losses (scaled up by 100)
-        scaled_losses = smooth_curve(losses[pred_idx].cpu().numpy())
-        axs[pred_idx, 1].plot(
-            range(time_steps),
-            scaled_losses,
-            color=colors[pred_idx],
+        # Plot losses and metrics
+        ax2 = fig.add_subplot(gs[pred_idx, 1])
+
+        # Plot losses
+        ax2.plot(
+            range(steps - 1),
+            smooth_curve(losses[pred_idx, : steps - 1].cpu().numpy()),
+            label="Total Loss",
+            color="black",
             linewidth=2,
         )
-        axs[pred_idx, 1].set_title(f"Prediction {pred_idx+1}: Loss")
-        axs[pred_idx, 1].set_xlabel("Time Step")
-        axs[pred_idx, 1].set_ylabel("Loss")
-        axs[pred_idx, 1].grid(True)
 
-        if args.task in ["mujoco-v1", "mujoco-v2"]:
-            # Plot the metrics
-            for key in metrics:
-                metric_values = metrics[key][pred_idx].cpu().numpy()
-                if metric_values.size > 0:  # Check that metric_values is not empty
-                    axs[pred_idx, 1].plot(
-                        range(time_steps),
-                        smooth_curve(metric_values),
-                        label=f"{key}",
-                        linewidth=2,
-                    )
-                else:
-                    print(f"Warning: {key} for prediction {pred_idx} is empty")
+        ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
+        ax2.set_xlabel("Time Step")
+        ax2.set_ylabel("Value")
+        ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+        ax2.set_yscale("log")  # Use log scale for better visibility
 
-    plt.tight_layout()
+    plt.suptitle(
+        f"Transformer Predictions for {args.controller} on {args.task}\n",
+        fontsize=16,
+    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # TODO: Add existok / make if non-existent (results/) directory
     plt.savefig(
-        f"results/{args.controller}_{args.task}_predictions_tr.png",
+        f"results/transformer_{args.controller}_{args.task}_predictions.png",
         dpi=300,
         bbox_inches="tight",
     )

@@ -94,15 +94,15 @@ for pred_idx in range(num_preds):
     )
 
     ax.plot(
-        range(time_steps),
-        sssm_mean_loss,
+        range(time_steps - 1),
+        sssm_mean_loss[: time_steps - 1],
         label=f"Prediction {pred_idx+1} SSSM Mean Loss",
         color=colors[0],
         linewidth=2,
     )
     ax.plot(
-        range(time_steps),
-        transformer_mean_loss,
+        range(time_steps - 1),
+        transformer_mean_loss[: time_steps - 1],
         label=f"Prediction {pred_idx+1} Transformer Mean Loss",
         color=colors[1],
         linewidth=2,
@@ -137,23 +137,23 @@ for pred_idx in range(num_preds):
     # Plot the predicted states (embeddings) and ground truth states
     for feature_idx in range(n_components):
         axs[feature_idx, 0].plot(
-            range(time_steps),
-            ground_truth[pred_idx, :time_steps, feature_idx],
+            range(time_steps - 1),
+            ground_truth[pred_idx, : time_steps - 1, feature_idx],
             label="Ground Truth",
             color=colors[2],
             linewidth=2,
             linestyle="--",
         )
         axs[feature_idx, 0].plot(
-            range(time_steps),
-            sssm[pred_idx, :, feature_idx],
+            range(time_steps - 1),
+            sssm[pred_idx, : time_steps - 1, feature_idx],
             label="SSSM",
             color=colors[0],
             linewidth=2,
         )
         axs[feature_idx, 0].plot(
-            range(time_steps),
-            transformer[pred_idx, :, feature_idx],
+            range(time_steps - 1),
+            transformer[pred_idx, : time_steps - 1, feature_idx],
             label="Transformer",
             color=colors[1],
             linewidth=2,
@@ -175,15 +175,15 @@ for pred_idx in range(num_preds):
         )
 
         axs[feature_idx, 1].plot(
-            range(time_steps),
-            sssm_loss,
+            range(time_steps - 1),
+            sssm_loss[: time_steps - 1],
             label="SSSM Loss",
             color=colors[0],
             linewidth=2,
         )
         axs[feature_idx, 1].plot(
-            range(time_steps),
-            transformer_loss,
+            range(time_steps - 1),
+            transformer_loss[: time_steps - 1],
             label="Transformer Loss",
             color=colors[1],
             linewidth=2,
