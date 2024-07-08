@@ -74,7 +74,7 @@ def save_results(
     return fpath
 
 
-# Example: `torchrun -m --nproc_per_node=1 models.stu.train_stu --controller Ant-v1 --task mujoco-v3`
+# Example: `torchrun -m --nproc_per_node=1 models.stu.train --controller Ant-v1 --task mujoco-v3`
 def main() -> None:
     torch.set_float32_matmul_precision("high")  # Enable CUDA TensorFloat-32
 
