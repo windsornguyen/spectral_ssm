@@ -55,66 +55,55 @@ def main():
         choices=["mujoco-v1", "mujoco-v2", "mujoco-v3"],
         help="Task to run inference on.",
     )
-    parser.add_argument(
-        "--truth",
-        type=int,
-        default=0,
-        help="Interval at which to ground predictions to true targets. If 0, no grounding is performed.",
-    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
-    # model_path = f"_sssm-{args.controller}-model_step-239-2024-06-24-14-23-16.pt"
-    model_path = "/scratch/gpfs/mn4560/ssm/sssm_Ant-v1_mujoco-v2.pt"
-
-    # Important indices (TODO: double check these are the right ones):
-    # 0 - z-coordinate of the torso (centre)
-    # 1, 2, 3, 4 - orientation of the torso (x, y, z, w quaternion)
-    # 13, 14, 15 - velocity of the torso (x, y, z)
+    model_path = f"sssm_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
-        sl = 1_000
+        sl = 900
         if args.controller == "Ant-v1":
-            n_embd, d_out = 37, 29
+            n_embd, d_out, d_proj = 37, 37, 29
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            n_embd, d_out = 24, 18
+            n_embd, d_out, d_proj = 24, 24, 18
             loss_fn = (
                 HalfCheetahLoss()
                 if args.controller == "HalfCheetah-v1"
                 else Walker2DLoss()
             )
         else:
-            n_embd, d_out, loss_fn = None, None, None
+            n_embd, d_out, d_proj, loss_fn = None, None, None, None
     elif args.task == "mujoco-v2":
-        sl = 1_000
+        sl = 900
         if args.controller == "Ant-v1":
-            n_embd, d_out = 29, 29
+            n_embd, d_out, d_proj = 29, 29, 29
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            n_embd, d_out = 18, 18
+            n_embd, d_out, d_proj = 18, 18, 18
             loss_fn = (
                 HalfCheetahLoss()
                 if args.controller == "HalfCheetah-v1"
                 else Walker2DLoss()
             )
         else:
-            n_embd, d_out, loss_fn = None, None, None
+            n_embd, d_out, d_proj, loss_fn = None, None, None, None
     elif args.task == "mujoco-v3":
-        sl, n_embd, d_out = 300, 512, 512
+        sl, n_embd, d_out, d_proj = 300, 512, 512, 512
         loss_fn = MSELoss()
     else:
         raise ValueError("Invalid task")
 
     configs = SSSMConfigs(
-        n_layers=6,
+        n_layers=4,
         n_embd=n_embd,
-        d_in=n_embd, # TODO: Fix later, d_in \neq n_embd
+        d_in=n_embd,  # TODO: Fix later, d_in \neq n_embd
         d_out=d_out,
+        d_proj=d_proj,
         sl=sl,
-        scale=2,
+        scale=4,
         bias=False,
         dropout=0.10,
         num_eigh=24,
@@ -135,8 +124,8 @@ def main():
     # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = f"data/{args.task}/{args.controller}/"
-        test_inputs = np.load(f"{base_path}/val_inputs.npy")
-        test_targets = np.load(f"{base_path}/val_targets.npy")
+        test_inputs = np.load(f"{base_path}/val_inputs_orig.npy")
+        test_targets = np.load(f"{base_path}/val_targets_orig.npy")
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
         test_targets = torch.from_numpy(test_targets).float().to(device)
     elif args.task == "mujoco-v3":
@@ -153,21 +142,8 @@ def main():
     num_preds = 5
     predicted_states = []
     losses = []
-    metrics = {}
-    init = 250 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
+    init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
     steps = len(test_inputs[1]) - init
-
-    if args.task in ["mujoco-v1", "mujoco-v2"]:
-        metrics = {
-            key: [torch.zeros(steps, device=device) for _ in range(num_preds)]
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
 
     with torch.no_grad():
         for i in range(num_preds):
@@ -177,28 +153,27 @@ def main():
             if args.task in ["mujoco-v1", "mujoco-v2"]:
                 (
                     pred_states,
-                    (avg_loss, avg_metrics, trajectory_losses, detailed_metrics),
+                    (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,  # Use the first 100 steps as context
+                    init=init,
                     steps=steps,  # Predict the next steps
-                    truth=args.truth,
+                    rollout_steps=20,
+                    window_size=sl,
                 )
-
-                for key in metrics:
-                    metrics[key][i] = detailed_metrics[key].squeeze()
 
             elif args.task == "mujoco-v3":
                 (
                     pred_states,
-                    (avg_loss, avg_metrics, trajectory_losses, detailed_metrics),
+                    (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
                     init=init,  # Use the first 295 steps as context
                     steps=steps,  # Predict the next 5 steps
-                    truth=args.truth,
+                    rollout_steps=1,
+                    window_size=sl,
                 )
 
             predicted_states.append(pred_states)
@@ -207,23 +182,8 @@ def main():
     predicted_states = torch.cat(predicted_states, dim=0)
     losses = torch.cat(losses, dim=0)
 
-    # Before concatenation, ensure all tensors have the same number of dimensions
-    for key in metrics:
-        for i in range(len(metrics[key])):
-            if len(metrics[key][i].shape) == 1:
-                metrics[key][i] = metrics[key][i].unsqueeze(
-                    0
-                )  # Add the extra dimension
-
-    metrics = {key: torch.cat(value, dim=0) for key, value in metrics.items()}
-
     print(f"Shape of predicted states: {predicted_states.shape}")
     print(f"Shape of losses: {losses.shape}")
-    for key, value in metrics.items():
-        for i, tensor in enumerate(value):
-            print(
-                f"The shape of {key} for prediction {i} is: {tensor.shape}"
-            )  # empty if mujoco-v1/v2
 
     # Print out predictions and check if they're all the same
     for i in range(num_preds):
@@ -284,8 +244,8 @@ def main():
 
         # Plot ground truth
         ax1.plot(
-            range(init, init + steps),
-            test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
+            range(init, init + steps - 1),
+            test_targets[pred_idx, init : init + steps - 1, feature_idx].cpu().numpy(),
             label="Ground Truth",
             color="black",
             linewidth=2,
@@ -294,74 +254,37 @@ def main():
 
         # Plot prediction
         ax1.plot(
-            range(init, init + steps),
-            predicted_states[pred_idx, init:, feature_idx].cpu().numpy(),
+            range(init, init + steps - 1),
+            predicted_states[pred_idx, : steps - 1, feature_idx].cpu().numpy(),
             label="Predicted",
             color=colors[pred_idx],
             linewidth=2,
         )
-
-        # Visualize grounding points
-        if args.truth > 0:
-            grounding_points = range(
-                init + args.truth - 1,
-                init + steps,
-                args.truth,
-            )
-            ax1.scatter(
-                grounding_points,
-                test_targets[pred_idx, grounding_points, feature_idx].cpu().numpy(),
-                color="red",
-                s=50,
-                zorder=3,
-                label="Grounding Points",
-            )
 
         ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
         ax1.set_xlabel("Time Step")
         ax1.set_ylabel("State Value")
         ax1.legend()
 
-        # Plot losses and metrics
+        # Plot losses
         ax2 = fig.add_subplot(gs[pred_idx, 1])
 
-        # Plot losses
         ax2.plot(
-            range(steps),
-            smooth_curve(losses[pred_idx].cpu().numpy()),
+            range(steps - 1),
+            smooth_curve(losses[pred_idx, : steps - 1].cpu().numpy()),
             label="Total Loss",
             color="black",
             linewidth=2,
         )
 
-        if args.task in ["mujoco-v1", "mujoco-v2"]:
-            for key in metrics:
-                metric_values = metrics[key][pred_idx].cpu().numpy()
-                if metric_values.size > 0:
-                    ax2.plot(
-                        range(steps),
-                        smooth_curve(metric_values),
-                        label=key,
-                        linewidth=2,
-                        alpha=0.7,
-                    )
-                else:
-                    print(f"Warning: {key} for prediction {pred_idx} is empty")
-
-        ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
+        ax2.set_title(f"Prediction {pred_idx+1}: Losses")
         ax2.set_xlabel("Time Step")
         ax2.set_ylabel("Value")
         ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-        ax2.set_yscale("log")  # Use log scale for better visibility of all metrics
-
-        # Add vertical lines for grounding points in the loss plot
-        if args.truth > 0:
-            for ground_step in range(args.truth - 1, steps, args.truth):
-                ax2.axvline(x=ground_step, color="red", linestyle="--", alpha=0.5)
+        ax2.set_yscale("log")  # Use log scale for better visibility
 
     plt.suptitle(
-        f"SSSM Predictions for {args.controller} on {args.task}\n"
-        f"Grounding Interval: {args.truth if args.truth > 0 else 'None'}",
+        f"SSSM Predictions for {args.controller} on {args.task}\n",
         fontsize=16,
     )
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])

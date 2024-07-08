@@ -11,7 +11,7 @@ from einops import rearrange
 from torch.nn import functional as F
 from tqdm import tqdm
 from utils.squared_relu import SquaredReLU
-from utils.rms_norm import RMSNorm # TODO: Remove the bias config since we don't use LN
+
 
 class CausalSelfAttention(nn.Module):
     """
@@ -139,9 +139,7 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
         self.attn = self._get_attn_type(configs)
-        self.rn_2 = RMSNorm(configs.n_embd)
         self.ffn = FFN(configs)
 
     def _get_attn_type(self, configs):
@@ -192,7 +190,6 @@ class Transformer(nn.Module):
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
                 ),
-                ln_f=nn.LayerNorm(configs.n_embd, bias=configs.bias),
             )
         )
 
@@ -208,7 +205,7 @@ class Transformer(nn.Module):
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = self.n_embd ** -0.5
+        self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -346,9 +343,10 @@ class Transformer(nn.Module):
         self,
         inputs: torch.Tensor,
         targets: torch.Tensor,
-        init: int,
-        steps: int,
-        truth: int = 0,
+        init: int = 950,
+        steps: int = 50,
+        rollout_steps: int = 20,
+        window_size: int = 900,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -363,200 +361,52 @@ class Transformer(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
-            truth (int): Interval at which to ground predictions to true targets.
-                         If 0, no grounding is performed.
 
         Returns:
         tuple: Contains the following elements:
             - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
             - tuple:
                 - avg_loss (torch.Tensor): Scalar tensor with the average loss
-                - avg_metrics (dict[str, torch.Tensor]): Dictionary of average metrics, each a scalar tensor
                 - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
-                - metrics (dict[str, torch.Tensor]): Detailed metrics for each trajectory and step, each of shape (num_traj, steps)
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, total_steps, d_in = inputs.size()
+        num_traj, _, d_in = inputs.size()
         _, _, d_out = targets.size()
-        
-        assert (init + steps <= total_steps), f"init ({init}) + steps ({steps}) must be <= total_steps ({total_steps})"
-        assert truth >= 0, "The 'truth' parameter must be non-negative."
-        assert total_steps % truth == 0, "The total number of steps must be divisible by the 'truth' parameter."
 
-        # Optimization for truth == 1 case
-        if truth == 1:
-            preds = targets.clone()
-            traj_losses = torch.zeros(num_traj, steps, device=device)
-            metrics = {
-                key: torch.zeros(num_traj, steps, device=device)
-                for key in [
-                    "coordinate_loss",
-                    "orientation_loss",
-                    "angle_loss",
-                    "coordinate_velocity_loss",
-                    "angular_velocity_loss",
-                ]
-            }
-            for step in range(steps):
-                _, (step_loss, step_metrics) = self.forward(
-                    inputs[:, :init+step], targets[:, :init+step]
-                )
-                traj_losses[:, step] = step_loss.squeeze()
-                for key in metrics:
-                    metrics[key][:, step] = step_metrics[key]
-            
-            avg_loss = traj_losses.mean()
-            avg_metrics = {key: metrics[key].mean() for key in metrics}
-            return preds, (avg_loss, avg_metrics, traj_losses, metrics)
+        # To track what the model hallucinates
+        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        metrics = {
-            key: torch.zeros(num_traj, steps, device=device)
-            for key in [
-                "coordinate_loss",
-                "orientation_loss",
-                "angle_loss",
-                "coordinate_velocity_loss",
-                "angular_velocity_loss",
-            ]
-        }
-
-        # Initialize predictions tensor
-        preds = torch.zeros(num_traj, total_steps, d_out, device=device)
+        # To track the MSE loss between rollout vs ground truth for each trajectory
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
-        # Copy over ground truth values up to init for context
-        preds[:, :init] = targets[:, :init]
-
-        # Initialize autoregressive inputs with all available context
-        ar_inputs = inputs[:, :init].clone()
-
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step
+            current_step = init + step # Start at init
+            window_start = current_step - window_size
 
-            # Predict the next state using all available autoregressive inputs
-            step_preds, (step_loss, step_metrics) = self.forward(
-                ar_inputs, targets[:, :current_step]
+            # Predict the next state using a fixed window size of inputs
+            step_preds, (_, _) = self.forward(
+                inputs[:, window_start:current_step], targets[:, window_start:current_step]
             )
 
-            # Decide whether to use the prediction or ground truth as the next input
-            if truth > 0 and (step + 1) % truth == 0:
-                next_input = inputs[:, current_step].unsqueeze(1)
-                preds[:, current_step] = targets[:, current_step]
-            else:
-                next_input = step_preds[:, -1:].detach()
-                preds[:, current_step] = step_preds[:, -1].squeeze(1)
+            # Calculate the mean loss of the last rollout_steps predictions
+            rollout_preds = step_preds[:, -rollout_steps:, :]
+            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
 
-            # Append the next input to ar_inputs, maintaining full history
-            ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            mse_loss = MSELoss()
+            traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
-            # Track the loss for current prediction
-            traj_losses[:, step] = step_loss.squeeze()
+            # Store the last prediction step for plotting
+            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # Track the metrics for current prediction
-            for key in metrics:
-                metrics[key][:, step] = step_metrics[key]
+            # Concatenate the autoregressive predictions of states and the ground truth actions
+            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+            # next_input = torch.cat([next_input, next_action], dim=2)
+            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-        avg_metrics = {key: metrics[key].mean() for key in metrics}
 
-        return preds, (avg_loss, avg_metrics, traj_losses, metrics)
-
-    def predict_frames(
-        self,
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        init: int = 140,
-        steps: int = 5,
-        ar_steps: int = 300,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor]]]:
-        """
-        Predicts the video frame.
-
-        Args:
-            inputs (torch.Tensor): A tensor of input videos with shape [num_videos, sl, d_in].
-            targets (torch.Tensor): A tensor of target videos with shape [num_videos, sl, d_in].
-            init (int): The index of the initial state to start the prediction from. Defaults to 0.
-            steps (int): The number of time steps to predict. Defaults to 50.
-            ar_steps (int): The number of autoregressive steps to take before using the ground truth state.
-                Defaults to 1, which means the model always uses the ground truth state to predict the next state.
-                If set to sl, the model always uses the last predicted state to predict the next state.
-
-        Returns:
-            tuple[torch.Tensor, tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]]:
-                - preds (torch.Tensor): A tensor of predicted states for each video after `steps` time steps,
-                    with shape [num_videos, steps, d_out].
-                - loss (tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]): A tuple containing:
-                    - avg_loss (torch.Tensor): The mean loss over time steps and videos.
-                    - video_losses (torch.Tensor): A tensor of losses for each video at each time step,
-                        with shape [num_videos, steps].
-        """
-        device = next(self.parameters()).device
-        print(f"Predicting on {device}.")
-        num_videos, sl, d_in = inputs.size()
-
-        # Initialize the predicted sequences and losses
-        ar_sequences = inputs.clone()
-        preds = torch.zeros(num_videos, steps, d_in, device=device)
-        video_losses = torch.zeros(num_videos, steps, device=device)
-
-        i = init
-        with tqdm(total=steps, desc="Predicting", unit="step") as pbar:
-            while i < init + steps:
-                window_start = max(0, i - self.configs.sl + 1)
-
-                input_window = ar_sequences[:, window_start : i + 1, :]
-                target_window = targets[:, window_start : i + 1, :]
-                preds_step, (step_loss,) = self.forward(input_window, target_window)
-
-                preds[:, i - init, :] = preds_step[:, -1, :]
-                video_losses[:, i - init] = step_loss
-
-                # Update autoregressive sequences for the next step
-                if i < init + steps - 1:
-                    next_step = i + 1
-                    if next_step < sl:
-                        next_input = (
-                            preds[:, i - init, :]
-                            if (i - init + 1) % ar_steps != 0
-                            else inputs[:, next_step, :]
-                        )
-                        ar_sequences[:, next_step, :] = next_input
-                    else:
-                        ar_sequences = torch.cat(
-                            [
-                                ar_sequences[:, 1:, :],
-                                preds[:, i - init : i - init + 1, :],
-                            ],
-                            dim=1,
-                        )
-
-                i += 1
-                pbar.update(1)
-
-        # # If we've reached the end of the input sequence but still have steps to predict,
-        # # use the last predicted state as input (we need to hallucinate and autoregressively predict)
-        # for step in range(sl - init, steps):
-        #     xs = ar_sequences[:, -1, :].unsqueeze(1)
-        #     ys = None
-
-        #     preds_step, step_loss = self.forward(xs, ys)
-
-        #     preds[:, i, :] = preds_step[:, -1, :]
-
-        #     # Update autoregressive sequences for each video independently
-        #     if step < steps - 1:
-        #         for video_idx in range(num_videos):
-        #             next_input = ar_sequences[video_idx, -1, :].clone()
-        #             next_input = preds[video_idx, i, :]
-        #             ar_sequences[video_idx] = ar_sequences[video_idx, step + 1 + init, :] = next_input
-
-        #     video_losses[:, i] = step_loss
-
-        # Calculate average losses and metrics across videos
-        avg_loss = video_losses.mean()
-
-        return preds, (avg_loss, video_losses)
+        return hallucinated_steps, (avg_loss, traj_losses)
 
 
 class DilatedCausalSelfAttention(CausalSelfAttention):
