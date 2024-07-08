@@ -23,77 +23,75 @@ ATOL = 1e-3
 
 
 @torch.jit.script
-def compute_y_t_torch_batched(
-    m_y: torch.Tensor, deltas: torch.Tensor
-) -> torch.Tensor:
+def compute_y_t_torch_batched(M_y: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
     """
-    Compute sequence of y_t given a series of deltas and m_y via a simple scan with batch size.
+    Computes the autoregressive component of the AR-STU model with respect to
+    the output, as described in Equation (6) of Section 5.
+
+    This function implements the sum of M^y_i y_{t-i} from i=1 to i=k_y.
+    It can be optimized further by using a scanning algorithm.
 
     Args:
-        m_y (torch.Tensor): A matrix of shape [d_out, k, d_out] that acts as windowed
-            transition matrix for the linear dynamical system evolving y_t.
-        deltas (torch.Tensor): A matrix of shape [bsz, seq_len, d_out].
+        M_y: Transition weight matrices of shape (d_out, k_y, d_out)
+        y_t: Predictions at current time step (bsz, sl, d_out)
 
     Returns:
-        torch.Tensor: A matrix of shape [bsz, seq_len, d_out].
+        torch.Tensor: Autoregressive component w.r.t. output of shape (bsz, sl, d_out)
+    
+    Visualization:
+
+    (1). Transition matrix A and its effect:
+    Matrix A                      Input y_t           Output y_t+1
+    +---------------------+       +---------+         +---------+
+    | M_y1   M_y2   M_y3  |       | y_t     |         | y_t+1   |
+    |  I      0      0    |   ×   | y_t-1   |    =    | y_t     |
+    |  0      I      0    |       | y_t-2   |         | y_t-1   |
+    |  0      0      I    |       | y_t-3   |         | y_t-2   |
+    +---------------------+       +---------+         +---------+
+    
+    (2). State structure with padding:
+    +---------+
+    | y_t     | Current input.
+    |  0      |
+    |  0      | Preallocated (k - 1) rows for previous states.
+    |  0      |
+    +---------+
+    
+    (3). Computation for each time step:
+    Matrix A                    Current state y_t    New input y_next    Output y_{t+1}
+    +---------------------+     +--------------+     +---------------+   +--------------+
+    | M_y1   M_y2   M_y3  |     | y_t          |     | y_{t+1}       |   | y_{t+1}      |
+    |  I      0      0    |  ×  | y_{t-1}      |  ⊕  | 0             | = | y_t          |
+    |  0      I      0    |     | y_{t-2}      |     | 0             |   | y_{t-1}      |
+    |  0      0      I    |     | y_{t-3}      |     | 0             |   | y_{t-2}      |
+    +---------------------+     +--------------+     +---------------+   +--------------+
     """
-    # d_out, k, _ = m_y.shape
-    # bsz, seq_len, _ = deltas.shape
-    # carry = torch.zeros((bsz, d_out, k), device=deltas.device)
-    # ys = torch.zeros((bsz, seq_len, d_out), device=deltas.device)
+    d_out, k_y, _ = M_y.shape
+    bsz, sl, _ = y_t.shape
 
-    # for i in range(seq_len):
-    #     output = torch.einsum('ijk,bkj->bi', m_y, carry) + deltas[:, i, :]
-    #     ys[:, i, :] = output
-    #     carry = torch.roll(carry, shifts=1, dims=2)
-    #     carry[:, :, 0] = output
+    # (1). Construct transition matrix A:
+    #      Identity has (k - 1) rows => [(k - 1) * d_out, k * d_out]
+    eye = torch.eye((k_y - 1) * d_out, k_y * d_out, dtype=y_t.dtype, device=y_t.device)
+    A = M_y.view(d_out, k_y * d_out) # <-- Ensure matmul-compatible with eye
+    A = torch.cat([A, eye], dim=0) # <-- Stack A atop the identity matrices
+    A = A.unsqueeze(0).expand(bsz, k_y * d_out, k_y * d_out) # <-- Add bsz dim for bmm
 
-    # return ys
-    # d_out, k, _ = m_y.shape
-    # bsz, seq_len, _ = deltas.shape
-    
-    # # Create a tensor of shape (bsz, seq_len, d_out, k) with shifted deltas
-    # shifted_deltas = torch.cat([
-    #     torch.zeros((bsz, 1, d_out, k), device=deltas.device),
-    #     deltas.unfold(1, k, 1)
-    # ], dim=1)
-    
-    # # Compute the output using broadcasting and einsum
-    # ys = torch.einsum('ijk,bljk->bli', m_y, shifted_deltas).sum(dim=-1)
+    # (2). Prepare state with padding
+    padding = torch.zeros(bsz, sl, (k_y - 1) * d_out, dtype=y_t.dtype, device=y_t.device)
+    state = torch.cat([y_t, padding], dim=2)  # -> [bsz, sl, k * d_out]
+    state = state.view(bsz, sl, k_y * d_out, 1) # Reshape for sequential processing
 
-    # return ys
-    d_out, k, _ = m_y.shape
-    bsz, sl, _ = deltas.shape
+    # Initialize the first y_t and list of outputs
+    y = state[:, 0]  # -> [bsz, k * d_out, 1]
+    ys = [y[:, :d_out, 0]]  # -> [bsz, d_out]
 
-    # Define the transition matrix A, and add bsz for bmm
-    A = m_y.view(d_out, k * d_out)  # Reshape m_y to [d_out, k * d_out] for concat
-    eye = torch.eye((k - 1) * d_out, k * d_out, dtype=deltas.dtype, device=deltas.device)
-    A = torch.cat([A, eye], dim=0)
-    A = A.unsqueeze(0).expand(bsz, k * d_out, k * d_out) # -> [bsz, k * d_out, k * d_out]
-
-    # Add (k - 1) rows of padding to deltas
-    padding = torch.zeros(
-        bsz, sl, (k - 1) * d_out, dtype=deltas.dtype, device=deltas.device
-    ) # -> [bsz, sl, (k - 1) * d_out]
-
-    carry = torch.cat([deltas, padding], dim=2)  # -> [bsz, sl, k * d_out]
-
-    # Reshape for sequential processing
-    carry = carry.view(bsz, sl, k * d_out, 1) # -> [bsz, sl, k * d_out, 1]
-
-    # Initialize y and the output list of y's
-    y = carry[:, 0]  # -> [bsz, k * d_out, 1]
-    ys = [y[:, :d_out, 0]] # -> [bsz, d_out]
-
-    # Iterate through the sequence
-    # TODO: Unsure of how to further vectorize/optimize this given its sequential nature.
-    # This loop takes up __98%__ of this function.
+    # (3). Iterate through the sequence length (starting from the 2nd time step)
     for i in range(1, sl):
-        y = torch.bmm(A, y) + carry[:, i]
+        y_next = state[:, i]
+        y = torch.bmm(A, y) + y_next
         ys.append(y[:, :d_out, 0])
-    ys = torch.stack(ys, dim=1) # -> [bsz, sl, d_out]
-    
-    return ys
+
+    return torch.stack(ys, dim=1)
 
 
 @torch.jit.script

@@ -111,7 +111,7 @@ def main():
         n_embd=n_embd,
         n_head=n_head,
         sl=sl,
-        scale=16,
+        scale=48,
         bias=False,
         dropout=0.10,
         use_dilated_attn=False,

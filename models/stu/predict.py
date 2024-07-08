@@ -109,12 +109,12 @@ def main():
         raise ValueError("Invalid task")
 
     configs = SSSMConfigs(
-        n_layers=4,
+        n_layers=6,
         n_embd=n_embd,
         d_in=n_embd, # TODO: Fix later, d_in \neq n_embd
         d_out=d_out,
         sl=sl,
-        scale=4,
+        scale=2,
         bias=False,
         dropout=0.10,
         num_eigh=24,

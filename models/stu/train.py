@@ -22,6 +22,7 @@ from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
+from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
 from models.stu.model import SSSM, SSSMConfigs
@@ -86,7 +87,7 @@ def main() -> None:
         "--controller",
         type=str,
         default="Ant-v1",
-        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1"],
+        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1", "CartPole-v1"],
         help="Controller to use for the MuJoCo environment. Defaults to Ant-v1.",
     )
     parser.add_argument(
@@ -136,8 +137,8 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 4
-    scale: int = 4
+    n_layers: int = 6
+    scale: int = 2
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 24
@@ -154,6 +155,8 @@ def main() -> None:
             loss_fn = HalfCheetahLoss()
         elif controller == "Walker2D-v1":
             loss_fn = Walker2DLoss()
+        elif controller == "CartPole-v1":
+            loss_fn = CartpoleLoss()
         else:
             loss_fn = None
     else:
@@ -186,10 +189,10 @@ def main() -> None:
         )
 
     elif task["mujoco-v2"]:
-        n_embd: int = 18 if controller != "Ant-v1" else 29
+        n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
-        sl: int = 1_000
+        sl: int = 1_000 if controller != "CartPole-v1" else 450
         configs = SSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -243,7 +246,7 @@ def main() -> None:
     stu_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 80
+    bsz: int = 8
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -427,10 +430,10 @@ def main() -> None:
                         patient_counter = 0
 
                         # Construct paths for model checkpoint and extra info
-                        model_checkpoint = f"sssm-{controller}-model_step-{relative_step}-{timestamp}-48l.pt"
+                        model_checkpoint = f"sssm-{controller}-model_step-{relative_step}-{timestamp}.pt"
                         model_path = os.path.join(checkpoint_dir, model_checkpoint)
 
-                        extra_info = f"sssm-{controller}-other_step-{relative_step}-{timestamp}-48l.pt"
+                        extra_info = f"sssm-{controller}-other_step-{relative_step}-{timestamp}.pt"
                         extra_info_path = os.path.join(checkpoint_dir, extra_info)
 
                         best_checkpoint = (model_checkpoint, extra_info)

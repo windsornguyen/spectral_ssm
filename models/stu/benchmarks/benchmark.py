@@ -5,9 +5,6 @@
 
 """Benchmarking on synthetic long-context datasets."""
 
-# TODO: This benchmarking code doesn't work quite yet because the model 
-# dimensions were designed for CIFAR-10 and needs to be restructured.
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -39,7 +36,7 @@ class Benchmark:
         """
         self.model = model
         self.device = device or torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu'
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
         self.model.to(self.device)
         self.criterion = torch.nn.CrossEntropyLoss()
@@ -62,7 +59,7 @@ class Benchmark:
 
         with torch.no_grad():
             for inputs, targets in tqdm(
-                dataloader, desc=f'Evaluating on {dataset_name}', unit='batch'
+                dataloader, desc=f"Evaluating on {dataset_name}", unit="batch"
             ):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 outputs = self.model(inputs)
@@ -81,7 +78,7 @@ class Benchmark:
         avg_loss = total_loss / total_samples
         avg_accuracy = total_correct / total_samples * 100
 
-        return {'loss': avg_loss, 'accuracy': avg_accuracy}
+        return {"loss": avg_loss, "accuracy": avg_accuracy}
 
     def benchmark(
         self, datasets: list[tuple[str, torch.utils.data.Dataset]], batch_size: int = 48
@@ -97,14 +94,14 @@ class Benchmark:
             dataloader = DataLoader(dataset, batch_size=batch_size)
             metrics = self.evaluate(dataset_name, dataloader)
 
-            print(f'Dataset: {dataset_name}')
+            print(f"Dataset: {dataset_name}")
             print(f"  Average Loss: {metrics['loss']:.4f}")
             print(f"  Average Accuracy: {metrics['accuracy']:.2f}%")
             print()
 
 
 def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Architecture(
         d_model=256,
         d_target=10,
@@ -116,23 +113,23 @@ def main():
         auto_reg_k_y=2,
         learnable_m_y=True,
     ).to(device)
-    checkpoint = torch.load('../checkpoint.pt', map_location=device)
+    checkpoint = torch.load("../checkpoint.pt", map_location=device)
     model.load_state_dict(checkpoint)
 
     datasets = [
         (
-            'Copy',
+            "Copy",
             generate_copy(
                 num_examples=1000, num_categories=10, copy_len=10, blank_len=5
             ),
         ),
-        ('Adding', generate_adding(num_examples=1000, sequence_len=10)),
+        ("Adding", generate_adding(num_examples=1000, sequence_len=10)),
         (
-            'Induction Heads',
+            "Induction Heads",
             generate_induction_heads(num_examples=1000, sequence_len=30, vocab_size=20),
         ),
         (
-            'Associative Recall',
+            "Associative Recall",
             generate_associative_recall(
                 num_examples=1000, sequence_len=30, vocab_size=10
             ),
@@ -143,5 +140,5 @@ def main():
     benchmark.benchmark(datasets)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

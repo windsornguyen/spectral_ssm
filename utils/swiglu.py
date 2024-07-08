@@ -15,7 +15,6 @@ From the paper:
 we attribute their success, as all else, to __divine benevolence__.'
 """
 
-import torch.nn.functional as F
 import torch.nn as nn
 
 
@@ -40,6 +39,7 @@ class SwiGLU(nn.Module):
         self.w = nn.Linear(dim, h_dim, bias=bias)
         self.v = nn.Linear(dim, h_dim, bias=bias)
         self.w2 = nn.Linear(h_dim, dim, bias=bias)
+        self.swish = nn.SiLU()
 
     def forward(self, x):
-        return self.w2(F.silu(self.w(x)) * self.v(x))
+        return self.w2(self.swish(self.w(x)) * self.v(x))

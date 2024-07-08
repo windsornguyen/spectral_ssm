@@ -134,8 +134,8 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 4
-    scale: int = 16
+    n_layers: int = 6
+    scale: int = 48
     bias: bool = False
     dropout: float = 0.10
     use_dilated_attn: bool = False  # TODO: Finish up implementation
@@ -217,7 +217,7 @@ def main() -> None:
     # TODO: Add accumulated gradients to this
     # TODO: Make data loader better
     # TODO: Add print statement reporting our batch size and accumulated batch size
-    bsz: int = 80 // world_size
+    bsz: int = 8 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)

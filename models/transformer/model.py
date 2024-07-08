@@ -1,20 +1,6 @@
 # =============================================================================#
 # Authors: Windsor Nguyen, Isabel Liu
 # File: (Transformer) model.py
-#
-# Full definition of a standard Transformer model adapted for regression
-# on physics-based trajectories with
-#
-# 1). Flash Attention,
-# 2). Memory-Efficient Attention, and
-# 3). Dilated Attention
-#
-# References:
-# 1) the official GPT-2 TensorFlow implementation released by OpenAI:
-# https://github.com/openai/gpt-2/blob/master/src/model.py
-#
-# 2) huggingface/transformers PyTorch implementation:
-# https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 # =============================================================================#
 
 import torch
@@ -165,10 +151,9 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        z = x
         x = x + self.attn(self.rn_1(x))
         x = x + self.ffn(self.rn_2(x))
-        return x + z
+        return x
 
 
 @dataclass

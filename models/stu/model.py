@@ -5,8 +5,6 @@
 
 """Spectral temporal unit (STU) block."""
 
-import math
-
 import torch
 import torch.nn as nn
 
@@ -76,10 +74,12 @@ class STU(nn.Module):
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.m_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
+            # TODO: Change this to (d_out, k_y, d_out) so that shaping in compute_ar_y is easier
+            self.M_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
         else:
-            self.register_buffer("m_y", torch.zeros(self.k_y, self.d_out, self.d_out))
-
+            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
+    
+        
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the STU layer.
@@ -91,12 +91,12 @@ class STU(nn.Module):
             torch.Tensor: Output tensor of shape (bsz, sl, d_out)
         """
         ar_u = compute_ar_u(self.M_u, inputs)
-        m_y = self.m_y if self.learnable_m_y else None
-        spectral = compute_spectral(inputs, self.eigh, self.M_phi_plus, self.M_phi_minus, m_y)
+        M_y = self.M_y if self.learnable_m_y else None
+        spectral = compute_spectral(inputs, self.eigh, self.M_phi_plus, self.M_phi_minus, M_y)
 
         y_t = ar_u + spectral
         if self.learnable_m_y:
-            y_t += compute_ar_y(self.m_y, y_t)
+            y_t += compute_ar_y(self.M_y, y_t)
 
         return self.dropout(y_t)
 
@@ -225,7 +225,6 @@ class SSSM(nn.Module):
         _, sl, n_embd = inputs.size()
 
         x = self.emb(inputs)
-        x /= math.log(self.sl)  # <-- Suggestion from Evan
         x = self.stu.dropout(x)
 
         for block in self.stu.hidden:
@@ -264,7 +263,7 @@ class SSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.m_y[1] = self.alpha * torch.eye(module.d_out)
+                    module.M_y[1, :, :] = self.alpha * torch.eye(module.d_out)
 
     def get_num_params(self, non_embedding=True):
         """
