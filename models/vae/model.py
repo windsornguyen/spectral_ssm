@@ -7,17 +7,17 @@ from torchvision.io import read_video
 import os
 import numpy as np
 from tqdm import tqdm
-from pytorch_ssim import SSIM
+from ignite.metrics import SSIM
 
 
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1, groups=in_channels) # depth-wise separable convolution
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 1)   # point-wise convolution
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
+        self.silu = nn.SiLU()   # Swish activation function
         self.downsample = (
             nn.Conv2d(in_channels, out_channels, 1)
             if in_channels != out_channels
@@ -26,15 +26,16 @@ class ResBlock(nn.Module):
 
     def forward(self, x):
         identity = self.downsample(x)
-        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.silu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        return self.relu(out + identity)
+        return self.silu(out + identity)
 
 
 class VAE(nn.Module):
     def __init__(self, input_channels=3, latent_dim=128):
         super().__init__()
         self.latent_dim = latent_dim
+        self.softplus = nn.Softplus()
 
         # Encoder
         self.encoder = nn.Sequential(
@@ -48,7 +49,7 @@ class VAE(nn.Module):
             ResBlock(256, 256),
             nn.Flatten(),
             nn.Linear(256 * 30 * 30, 512),  # Updated for 480x480 input
-            nn.ReLU(),
+            nn.SiLU(),
         )
         self.fc_mu = nn.Linear(512, latent_dim)
         self.fc_logvar = nn.Linear(512, latent_dim)
@@ -74,7 +75,7 @@ class VAE(nn.Module):
         return self.fc_mu(h), self.fc_logvar(h)
 
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
+        std = self.softplus(logvar) # Use softplus to ensure positive std
         eps = torch.randn_like(std)
         return mu + eps * std
 
@@ -109,7 +110,7 @@ class VideoDataset(Dataset):
         return len(self.video_files)
 
     def __getitem__(self, idx):
-        video_path = os.path.join(self.video_dir, self.video_files[idx])
+        video_path = self.video_files[idx]
         video, _, info = read_video(video_path, pts_unit="sec")
 
         if video.shape[0] < self.sequence_length:
@@ -155,8 +156,16 @@ def train_vae(model, train_loader, val_loader, num_epochs, learning_rate, beta, 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     def loss_function(recon_x, x, mu, logvar):
-        # recon_loss = 1 - SSIM(recon_x, x)
-        recon_loss = F.mse_loss(recon_x, x, reduction="sum")
+        ssim = SSIM(data_range=1.0)
+        ssim_values = []
+        for i in range(recon_x.size(1)):
+            ssim.update((recon_x[:, i], x[:, i]))
+            ssim_value = ssim.compute()
+            ssim_values.append(torch.tensor(ssim_value))  # Convert to tensor
+            ssim.reset()  # Reset for the next computation
+        ssim_per_frame = torch.stack(ssim_values)
+        recon_loss = 1 - ssim_per_frame.mean()
+        # recon_loss = F.mse_loss(recon_x, x, reduction="sum")
         kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
         return recon_loss + beta * kld_loss
 
@@ -213,12 +222,12 @@ if __name__ == "__main__":
 
     # Create datasets
     train_dataset = VideoDataset(
-        video_dirs=["../../data/vae/Ant-v1", "../../data/vae/HalfCheetah-v1", "../../data/vae/Walker2D-v1"],
+        video_dirs=["../../data/vae/Ant-v1/testing", "../../data/vae/HalfCheetah-v1/testing", "../../data/vae/Walker2D-v1/testing"],
         sequence_length=sequence_length,
         transform=transform,
     )
     val_dataset = VideoDataset(
-        video_dirs=["../../data/vae/Ant-v1/val", "../../data/vae/HalfCheetah-v1/val", "../../data/vae/Walker2D-v1/val"],
+        video_dirs=["../../data/vae/Ant-v1/testing_val", "../../data/vae/HalfCheetah-v1/testing_val", "../../data/vae/Walker2D-v1/testing_val"],
         sequence_length=sequence_length,
         transform=transform,
     )
