@@ -25,7 +25,7 @@ from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
 from models.transformer.model import Transformer, TransformerConfigs
 from utils.colors import Colors, colored_print
-from utils.dist import set_seed, setup, cleanup
+from utils.dist import setup, cleanup
 
 
 def save_results(
@@ -156,7 +156,7 @@ def main() -> None:
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
         n_head: int = 8 if controller != "Ant-v1" else 1
-        sl: int = 1_000
+        sl: int = 900
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -173,7 +173,7 @@ def main() -> None:
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
         n_head: int = 9 if controller != "Ant-v1" else 1
-        sl: int = 1_000
+        sl: int = 900
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -303,7 +303,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 6e-4
+    max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
     betas = (0.9, 0.95)
     eps = 1e-8

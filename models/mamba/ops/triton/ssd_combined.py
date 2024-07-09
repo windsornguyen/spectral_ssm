@@ -2,12 +2,10 @@
 # Authors: Tri Dao, Albert Gu, Windsor Nguyen
 # File: selective_state_update.py
 # Adapted from 
-# https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/ssd_chunk_scan.py
+# https://github.com/state-spaces/mamba/blob/main/models.mamba/ops/triton/ssd_chunk_scan.py
 # =============================================================================#
 
 """Required: triton==2.1.0 or triton==2.2.0"""
-
-from typing import Optional
 
 import math
 from packaging import version
@@ -28,20 +26,21 @@ try:
 except ImportError:
     causal_conv1d_fn, causal_conv1d_cuda = None, None
 
-from mamba.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
-from mamba.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd
-from mamba.ops.triton.ssd_chunk_state import _chunk_state_fwd, _chunk_state_bwd_db
-from mamba.ops.triton.ssd_chunk_state import _chunk_state_bwd_ddAcs_stable
-from mamba.ops.triton.ssd_chunk_state import chunk_state, chunk_state_ref
-from mamba.ops.triton.ssd_state_passing import _state_passing_fwd, _state_passing_bwd
-from mamba.ops.triton.ssd_state_passing import state_passing, state_passing_ref
-from mamba.ops.triton.ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates
-from mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb
-from mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_stable
-from mamba.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref
-from mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_prev
-from mamba.ops.triton.layernorm_gated import rmsnorm_fn, _layer_norm_fwd, _layer_norm_bwd
-from mamba.ops.triton.k_activations import _swiglu_fwd, _swiglu_bwd
+from models.mamba.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
+from models.mamba.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd
+from models.mamba.ops.triton.ssd_chunk_state import _chunk_state_fwd, _chunk_state_bwd_db
+from models.mamba.ops.triton.ssd_chunk_state import _chunk_state_bwd_ddAcs_stable
+from models.mamba.ops.triton.ssd_chunk_state import chunk_state, chunk_state_ref
+from models.mamba.ops.triton.ssd_chunk_state import chunk_state_varlen
+from models.mamba.ops.triton.ssd_state_passing import _state_passing_fwd, _state_passing_bwd
+from models.mamba.ops.triton.ssd_state_passing import state_passing, state_passing_ref
+from models.mamba.ops.triton.ssd_chunk_scan import _chunk_scan_fwd, _chunk_scan_bwd_dz, _chunk_scan_bwd_dstates
+from models.mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_dC, _chunk_scan_bwd_dcb
+from models.mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_stable
+from models.mamba.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref
+from models.mamba.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_prev
+from models.mamba.ops.triton.layernorm_gated import rmsnorm_fn, _layer_norm_fwd, _layer_norm_bwd
+from models.mamba.ops.triton.k_activations import _swiglu_fwd, _swiglu_bwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
@@ -174,7 +173,11 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
         dout = tl.load(dout_ptrs, mask=(offs_k[:, None] < K_MAX - k) & (offs_n[None, :] < hdim), other=0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < K_MAX - k, other=0.0).to(tl.float32)
         cb *= tl.exp(dA_cs_k[None, :] - dA_cs_m[:, None])
-        mask = k + offs_k[None, :] >= offs_m[:, None]
+        # If we don't have the (k + offs_k[None, :] < K_MAX) mask, for indices outside this range,
+        # we might have dA_cs_m = 0.0 and dA_cs_k very negative, and tl.exp will return inf.
+        # Multiplying with cb, which is 0.0 outside the range, will make the result NaN.
+        # This will cause NaN in acc, and hence NaN in dx and ddt.
+        mask = (k + offs_k[None, :] >= offs_m[:, None]) & (k + offs_k[None, :] < K_MAX)
         cb = tl.where(mask, cb, 0.0)
         cb = cb.to(dout_ptr.dtype.element_ty)
         acc += tl.dot(cb, dout)
@@ -277,7 +280,7 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
     return dx, ddt.to(dtype=dt.dtype), dD
 
 
-def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
+def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -321,7 +324,13 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
     out, out_x = _chunk_scan_fwd(CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx)
-    return out, out_x, dt, dA_cumsum, states, final_states
+    if cu_seqlens is None:
+        return out, out_x, dt, dA_cumsum, states, final_states
+    else:
+        assert batch == 1, "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
+        varlen_states = chunk_state_varlen(B.squeeze(0), x.squeeze(0), dt.squeeze(0), dA_cumsum.squeeze(0),
+                                           cu_seqlens, states.squeeze(0))
+        return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
 
 
 def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None, z=None,
@@ -524,25 +533,35 @@ def selective_scan_bwd(dout, x, dt, A, B, C, D=None, z=None):
 class MambaChunkScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False):
+    def forward(ctx, x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False, return_varlen_states=False):
         ctx.dt_dtype = dt.dtype
-        out, out_x, dt_out, dA_cumsum, states, final_states = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx, dt_softplus=dt_softplus, dt_limit=dt_limit)
+        if not return_varlen_states:
+            cu_seqlens = None
+        else:
+            assert cu_seqlens is not None, "cu_seqlens must be provided if return_varlen_states is True"
+        out, out_x, dt_out, dA_cumsum, states, final_states, *rest = _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, seq_idx=seq_idx, cu_seqlens=cu_seqlens, dt_softplus=dt_softplus, dt_limit=dt_limit)
         ctx.save_for_backward(out if z is None else out_x, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx)
         ctx.dt_softplus = dt_softplus
         ctx.chunk_size = chunk_size
         ctx.dt_limit = dt_limit
         ctx.return_final_states = return_final_states
-        return out if not return_final_states else (out, final_states)
+        ctx.return_varlen_states = return_varlen_states
+        if not return_varlen_states:
+            return out if not return_final_states else (out, final_states)
+        else:
+            varlen_states = rest[0]
+            return (out, varlen_states) if not return_final_states else (out, final_states, varlen_states)
 
     @staticmethod
     def backward(ctx, dout, *args):
         out, x, dt, dA_cumsum, A, B, C, D, z, dt_bias, initial_states, seq_idx = ctx.saved_tensors
+        assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
         dfinal_states = args[0] if ctx.return_final_states else None
         dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
-        return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None
+        return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None
 
 
-def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False):
+def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), return_final_states=False, return_varlen_states=False):
     """
     Argument:
         x: (batch, seqlen, nheads, headdim)
@@ -556,11 +575,12 @@ def mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bia
         dt_bias: (nheads,)
         initial_states: (batch, nheads, headdim, dstate)
         seq_idx: (batch, seqlen)
+        cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
-    return MambaChunkScanCombinedFn.apply(x, dt, A, B, C, chunk_size, D, z, dt_bias, initial_states, seq_idx, dt_softplus, dt_limit, return_final_states)
+    return MambaChunkScanCombinedFn.apply(x, dt, A, B, C, chunk_size, D, z, dt_bias, initial_states, seq_idx, cu_seqlens, dt_softplus, dt_limit, return_final_states, return_varlen_states)
 
 
 def mamba_chunk_scan(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, dt_softplus=False):
@@ -655,7 +675,7 @@ def ssd_selective_scan(x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
-    from mamba.ops.selective_scan_interface import selective_scan_fn
+    from models.mamba.ops.selective_scan_interface import selective_scan_fn
 
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -757,6 +777,20 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         assert A.shape == (nheads,)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
+        
+        ## DEBUG ##
+        channel_dim = xBC.shape[-1]
+        print(f"dim: {dim}")
+        print(f"ngroups: {ngroups}")
+        print(f"dstate: {dstate}")
+        print(f"nheads: {nheads}")
+        print(f"headdim: {headdim}")
+        print(f"Channel dimension size (dim + ngroups * dstate * 2): {dim + ngroups * dstate * 2}")
+        print(f"Channel dimension size: {channel_dim}")
+        print(f"xBC shape: {xBC.shape}")
+        print(f"xBC strides: {xBC.stride()}")
+        ## DEBUG ##
+
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),

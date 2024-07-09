@@ -27,7 +27,6 @@ distlib==0.3.8
 docstring-parser==0.16
 dulwich==0.21.7
 einops==0.8.0
-etils==1.9.2
 executing==2.0.1
 farama-notifications==0.0.4
 fastjsonschema==2.19.1

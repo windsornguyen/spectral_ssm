@@ -5,8 +5,6 @@
 # https://github.com/state-spaces/mamba/blob/main/mamba_ssm/distributed/distributed_utils.py
 # =============================================================================#
 
-from typing import Optional
-
 import torch
 from torch import Tensor
 from torch.distributed import ProcessGroup

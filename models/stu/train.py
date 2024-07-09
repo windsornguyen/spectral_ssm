@@ -75,7 +75,7 @@ def save_results(
     return fpath
 
 
-# Example: `torchrun -m --nproc_per_node=1 models.stu.train_stu --controller Ant-v1 --task mujoco-v3`
+# Example: `torchrun -m --nproc_per_node=1 models.stu.train --controller Ant-v1 --task mujoco-v3`
 def main() -> None:
     torch.set_float32_matmul_precision("high")  # Enable CUDA TensorFloat-32
 
@@ -166,14 +166,16 @@ def main() -> None:
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 1_000
+        d_out = d_in    # before projection d_in = d_out
+        d_proj: int = 18 if controller != "Ant-v1" else 29
+        sl: int = 900
 
         configs = SSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -192,12 +194,14 @@ def main() -> None:
         n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
-        sl: int = 1_000 if controller != "CartPole-v1" else 450
+        d_proj = n_embd
+        sl: int = 900
         configs = SSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -218,6 +222,7 @@ def main() -> None:
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_embd = d_out
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
+        d_proj = n_embd
         sl: int = 300
 
         configs = SSSMConfigs(
@@ -225,6 +230,7 @@ def main() -> None:
             n_embd=n_embd,
             d_in=d_in,
             d_out=d_out,
+            d_proj=d_proj,
             sl=sl,
             scale=scale,
             bias=bias,
@@ -332,7 +338,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 6e-4
+    max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
     
     # Adam hyperparameters, per the GPT-3 paper

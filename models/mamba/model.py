@@ -25,14 +25,14 @@ except ImportError:
     causal_conv1d_varlen_states = None
 
 try:
-    from mamba.ops.triton.selective_state_update import selective_state_update
+    from ops.triton.selective_state_update import selective_state_update
 except ImportError:
     selective_state_update = None
 
-from mamba.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
-from mamba.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
-from mamba.distributed.distributed_utils import all_reduce, reduce_scatter
-from mamba.ops.triton.ssd_combined import (
+from models.mamba.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
+from models.mamba.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+from models.mamba.distributed.distributed_utils import all_reduce, reduce_scatter
+from models.mamba.ops.triton.ssd_combined import (
     mamba_chunk_scan_combined,
     mamba_split_conv1d_scan_combined,
 )
@@ -49,6 +49,7 @@ class Mamba2Configs:
     d_ssm: Optional[int] = None # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
     ngroups: int = 1
     A_init_range: Tuple[int, int] = (1, 16)
+    activation: str = "silu"
     D_has_hdim: bool = False
     rmsnorm: bool = True
     norm_before_gate: bool = False
@@ -67,11 +68,11 @@ class Mamba2Configs:
     sequence_parallel: bool = True
     device: Optional[Any] = None
     dtype: Optional[Any] = None
+    world_size: int = 1
 
     # TODO: Experiment-specific hyperparameters
     dropout: float = 0.10
-    loss_fn: Optional[Any] = None
-    sl: int = 900
+    loss_fn: Optional[Any] = torch.nn.SiLU()
     d_out: int = 29
 
 
@@ -87,36 +88,45 @@ class Mamba2(nn.Module):
         self.configs = configs
         self.factory_kwargs = {"device": configs.device, "dtype": configs.dtype}
 
-        self.ngroups = self.configs.ngroups // self.world_size
-        assert self.d_ssm % self.configs.headdim == 0
-
-        self.nheads = self.d_ssm // self.configs.headdim
-        self.D_has_hdim = self.configs.D_has_hdim
-        self.rmsnorm = self.configs.rmsnorm # TODO <-- May have to adjust the Triton path in configs
-        self.norm_before_gate = self.configs.norm_before_gate
-        self.dt_limit = dt_limit
-
         # Note: The Swish function with β=1 is equivalent nn.SiLU()
-        self.activation = nn.SiLU()
+        self.activation = nn.SiLU() if self.configs.activation == "silu" else nn.SiLU() # TODO: Write this better
+        self.dropout = nn.Dropout(self.configs.dropout)
 
-        self.chunk_size = chunk_size
-        self.use_mem_eff_path = use_mem_eff_path
-        self.layer_idx = layer_idx
+        self.ngroups = self.configs.ngroups // self.configs.world_size
+
+        self.chunk_size = self.configs.chunk_size
+        self.use_mem_eff_path = self.configs.use_mem_eff_path
+        self.layer_idx = self.configs.layer_idx
 
         self._init_dimensions()
+        self.d_ssm = self.d_inner if self.configs.d_ssm is None else self.configs.d_ssm // self.world_size
+        assert self.d_ssm % self.configs.headdim == 0
+        self.nheads = self.d_ssm // self.configs.headdim
+
         self._init_layers()
         self._init_parameters()
+        
+        self.D_has_hdim = self.configs.D_has_hdim
+        self.rmsnorm = self.configs.rmsnorm
+        self.norm_before_gate = self.configs.norm_before_gate
+        self.dt_limit = self.configs.dt_limit
+        
+        # Report the number of parameters
+        print(
+            "Mamba2 Model Parameter Count (excl. pos. emb.): %.2fM"
+            % (self.get_num_params() / 1e6,)
+        )
 
     def _init_dimensions(self):
-        self.d_inner = (self.configs.expand * self.configs.d_model) // self.world_size
-        assert (self.d_inner * self.world_size == self.configs.expand * self.configs.d_model)
+        self.d_inner = (self.configs.expand * self.configs.d_model) // self.configs.world_size
+        assert (self.d_inner * self.configs.world_size == self.configs.expand * self.configs.d_model)
 
         self.d_ssm = (
             self.d_inner
             if self.configs.d_ssm is None
-            else self.configs.d_ssm // self.world_size
+            else self.configs.d_ssm // self.configs.world_size
         )
-        assert self.configs.ngroups % self.world_size == 0
+        assert self.configs.ngroups % self.configs.world_size == 0
 
     def _init_layers(self):
         d_in_proj = (2 * self.d_inner + 2 * self.ngroups * self.configs.d_state + self.nheads)
@@ -131,7 +141,7 @@ class Mamba2(nn.Module):
         else:
             self.in_proj = ColumnParallelLinear(
                 self.configs.d_model,
-                d_in_proj * self.world_size,
+                d_in_proj * self.configs.world_size,
                 bias=self.configs.bias,
                 process_group=self.configs.process_group,
                 sequence_parallel=self.configs.sequence_parallel,
@@ -167,7 +177,7 @@ class Mamba2(nn.Module):
             )
         else:
             self.out_proj = RowParallelLinear(
-                self.d_inner * self.world_size,
+                self.d_inner * self.configs.world_size,
                 self.configs.d_out,
                 bias=self.configs.bias,
                 process_group=self.configs.process_group,
@@ -214,6 +224,16 @@ class Mamba2(nn.Module):
         )
         self.D._no_weight_decay = True
 
+    def get_num_params(self):
+        """
+        Return the number of parameters in the model.
+
+        Returns:
+            int: The number of parameters in the model.
+        """
+        num_params = sum(p.numel() for p in self.parameters())
+        return num_params
+    
     def forward(
         self,
         inputs: torch.Tensor,
@@ -245,14 +265,15 @@ class Mamba2(nn.Module):
             )
             if inference_params.seqlen_offset > 0:
                 # The states are updated inplace
-                out, _, _ = self.step(u, conv_state, ssm_state)
+                out, _, _ = self.step(inputs, conv_state, ssm_state)
                 return out
 
-        zxbcdt = self.in_proj(u) # (B, L, d_in_proj) or (B * L, d_in_proj)
+        inputs = self.dropout(inputs)
+        zxbcdt = self.in_proj(inputs) # (B, L, d_in_proj) or (B * L, d_in_proj)
         if sl_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=sl)
 
-        # TODO: If the model is loaded in fp16, without the .float() here, A might be -inf
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
         A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = (
             {}
@@ -271,14 +292,15 @@ class Mamba2(nn.Module):
                 seq_idx=seq_idx,
                 dt_limit_kwargs=dt_limit_kwargs,
                 conv_state=conv_state,
-                ssm_state=ssm_state
+                ssm_state=ssm_state,
+                inference_params=inference_params
             )
 
         loss = self.configs.loss_fn(out, targets) if targets is not None else None
         return out, loss
 
     def _forward_mem_efficient(
-        self, zxbcdt: torch.Tensor, A: torch.Tensor, sl_og = None, seq_idx=None, dt_limit_kwargs: dict
+        self, zxbcdt: torch.Tensor, A: torch.Tensor, sl_og: int, seq_idx: int, dt_limit_kwargs: dict
     ) -> torch.Tensor:
         out = mamba_split_conv1d_scan_combined(
             zxbcdt,
@@ -320,6 +342,7 @@ class Mamba2(nn.Module):
         dt_limit_kwargs: dict,
         conv_state: Optional[torch.Tensor],
         ssm_state: Optional[torch.Tensor],
+        inference_params,
     ) -> torch.Tensor:
         d_mlp = (
             zxbcdt.shape[-1]
@@ -349,7 +372,7 @@ class Mamba2(nn.Module):
             assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
             assert bsz == 1, "varlen inference only supports batch dimension 1"
             conv_varlen_states = causal_conv1d_varlen_states(
-                xBC.squeeze(0), cu_seqlens, state_len=conv_state.shape[-1]
+                xBC.squeeze(0), cu_sl, state_len=conv_state.shape[-1]
             )
             conv_state.copy_(conv_varlen_states)
 
@@ -364,13 +387,15 @@ class Mamba2(nn.Module):
             dim=-1,
         )
 
-        y = self._apply_ssm(x, dt, A, B, C, seq_idx, cu_sl, ssm_state, z, dt_limit_kwargs)
+        y = self._apply_ssm(x, dt, A, B, C, seq_idx, cu_sl, ssm_state, z, dt_limit_kwargs, inference_params)
+        y = self.dropout(y)
 
         if self.configs.rmsnorm:
             y = self.norm(y, z)
         if d_mlp > 0:
             y = torch.cat([F.silu(z0) * x0, y], dim=-1)
         out = self.out_proj(y)
+        out = self.dropout(out)
 
         return out
 
@@ -400,6 +425,7 @@ class Mamba2(nn.Module):
         ssm_state: Optional[torch.Tensor],
         z: torch.Tensor,
         dt_limit_kwargs: dict,
+        inference_params
     ) -> torch.Tensor:
         y = mamba_chunk_scan_combined(
             rearrange(x, "b l (h p) -> b l h p", p=self.configs.headdim),
@@ -429,7 +455,7 @@ class Mamba2(nn.Module):
             return_varlen_states=cu_sl is not None and inference_params is not None,
         )
         if ssm_state is not None:
-            y, last_state = y
+            y, last_state, *rest = y
             if cu_sl is None:
                 ssm_state.copy_(last_state)
             else:
@@ -478,7 +504,7 @@ class Mamba2(nn.Module):
         A = -torch.exp(self.A_log.float()) # (nheads,)
 
         # SSM Step
-        y = self._step_ssm(x, dt, A, B, C, ssm_state, z)
+        y = self._step_ssm(x, dt, A, B, C, ssm_state, z, dtype)
 
         if self.configs.rmsnorm:
             y = self.norm(y, z)
@@ -516,9 +542,10 @@ class Mamba2(nn.Module):
         C: torch.Tensor,
         ssm_state: torch.Tensor,
         z: torch.Tensor,
+        dtype
     ) -> torch.Tensor:
         if selective_state_update is None:
-            return self._step_ssm_default(x, dt, A, B, C, ssm_state, z)
+            return self._step_ssm_default(x, dt, A, B, C, ssm_state, z, dtype)
         else:
             return self._step_ssm_selective(x, dt, A, B, C, ssm_state, z)
 
@@ -531,6 +558,7 @@ class Mamba2(nn.Module):
         C: torch.Tensor,
         ssm_state: torch.Tensor,
         z: torch.Tensor,
+        dtype
     ) -> torch.Tensor:
         assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
 

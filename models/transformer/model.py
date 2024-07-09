@@ -3,6 +3,8 @@
 # File: (Transformer) model.py
 # =============================================================================#
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -11,7 +13,8 @@ from einops import rearrange
 from torch.nn import functional as F
 from tqdm import tqdm
 from utils.squared_relu import SquaredReLU
-
+from utils.rms_norm import RMSNorm
+from utils.dist_utils import all_gather_func, get_data_parallel_rank
 
 class CausalSelfAttention(nn.Module):
     """
@@ -139,7 +142,9 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
+        self.rn_1 = RMSNorm(configs.n_embd)
         self.attn = self._get_attn_type(configs)
+        self.rn_2 = RMSNorm(configs.n_embd)
         self.ffn = FFN(configs)
 
     def _get_attn_type(self, configs):
@@ -268,6 +273,7 @@ class Transformer(nn.Module):
         pos_emb = pos_emb.unsqueeze(0).expand(bsz, -1, -1)
 
         # Project input to lower-dimensional space
+        print(f"Input shape: {inputs.shape}")
         x = self.d_in(inputs)  # -> (bsz, sl, n_embd)
 
         # Apply dropout
@@ -393,7 +399,7 @@ class Transformer(nn.Module):
             rollout_preds = step_preds[:, -rollout_steps:, :]
             rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
 
-            mse_loss = MSELoss()
+            mse_loss = nn.MSELoss()
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
@@ -407,7 +413,6 @@ class Transformer(nn.Module):
         avg_loss = traj_losses.mean()
 
         return hallucinated_steps, (avg_loss, traj_losses)
-
 
 class DilatedCausalSelfAttention(CausalSelfAttention):
     """

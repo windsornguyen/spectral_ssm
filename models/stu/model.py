@@ -13,14 +13,16 @@ from models.stu.stu_utils import get_top_eigh, compute_ar_u, compute_spectral, c
 from utils.swiglu import SwiGLU
 from utils.rms_norm import RMSNorm
 from tqdm import tqdm
+from torch.nn import MSELoss
 
 
 @dataclass
 class SSSMConfigs:
-    d_in: int = 24
-    d_out: int = 18
+    d_in: int = 37
+    d_out: int = 37
+    d_proj: int = 29
     n_layers: int = 6
-    n_embd: int = 512
+    n_embd: int = 37
     sl: int = 300
     scale: int = 4
     bias: bool = False
@@ -177,7 +179,9 @@ class SSSM(nn.Module):
         self.configs = configs
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
+        self.d_in = configs.d_in    # TODO: d_in is not exactly the same as n_embd
         self.d_out = configs.d_out
+        self.d_proj = configs.d_proj
         self.sl = configs.sl
         self.learnable_m_y = configs.learnable_m_y
         self.alpha = configs.alpha
@@ -194,13 +198,7 @@ class SSSM(nn.Module):
                 hidden=nn.ModuleList([Block(configs) for _ in range(self.n_layers)]),
             )
         )
-        self.task_head = nn.Linear(self.n_embd, self.d_out, bias=self.bias)
-
-        if self.controls["task"] == "mujoco-v1":
-            if self.controls["controller"] == "Ant-v1":
-                self.d_out = 29
-            else:
-                self.d_out = 18
+        self.task_head = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
         self.m_x = self.d_out**-0.5
@@ -230,7 +228,7 @@ class SSSM(nn.Module):
 
         for block in self.stu.hidden:
             x = block(x)
-
+        
         preds = self.task_head(x)
 
         if self.controls["task"] != "mujoco-v3":
@@ -266,14 +264,9 @@ class SSSM(nn.Module):
                 with torch.no_grad():
                     module.M_y[1, :, :] = self.alpha * torch.eye(module.d_out)
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self):
         """
         Return the number of parameters in the model.
-
-        Args:
-            non_embedding (bool, optional):
-            Whether to exclude the positional embeddings (if applicable).
-            Defaults to True.
 
         Returns:
             int: The number of parameters in the model.

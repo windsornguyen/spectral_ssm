@@ -19,7 +19,7 @@ from torch.distributed import ProcessGroup
 
 from einops import rearrange
 
-from mamba.distributed.distributed_utils import (
+from models.mamba.distributed.distributed_utils import (
     all_gather_raw,
     all_reduce,
     all_reduce_raw,

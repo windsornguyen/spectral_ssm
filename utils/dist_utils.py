@@ -12,12 +12,11 @@ import torch.distributed as dist
 
 def get_data_parallel_group():
     if torch.distributed.is_initialized():
-        if not hasattr(get_data_parallel_group, '_global_group'):
+        if not hasattr(get_data_parallel_group, "_global_group"):
             get_data_parallel_group._global_group = dist.new_group()
         return get_data_parallel_group._global_group
     else:
         return None
-
 
 def get_rank(group):
     return dist.get_rank(group=group)
@@ -61,7 +60,7 @@ class Allgather(torch.autograd.Function):
         dim_size = list(grad_output.size())
         assert (
             dim_size[0] % world_size == 0
-        ), 'First dimension of the tensor should be divisible by tensor parallel size'
+        ), "First dimension of the tensor should be divisible by tensor parallel size"
 
         dim_size[0] = dim_size[0] // world_size
 
