@@ -25,7 +25,7 @@ from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
 from models.transformer.model import Transformer, TransformerConfigs
 from utils.colors import Colors, colored_print
-from utils.dist import set_seed, setup, cleanup
+from utils.dist import setup, cleanup
 
 
 def save_results(
@@ -106,6 +106,57 @@ def main() -> None:
         help="Training on the Princeton Della cluster. Defaults to True.",
         # NOTE: You MUST run with `torchrun` for this to work in the general setting.
     )
+    parser.add_argument(
+        "--dilated_attn",
+        type=bool,
+        default=False,
+        help="Whether to use dilated attention. Defaults to False.",
+    )
+    parser.add_argument(
+        "--segment_lengths",
+        type=int,
+        nargs='+',
+        default=[128, 256, 512],
+        help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
+    )
+    parser.add_argument(
+        "--dilated_ratios",
+        type=int,
+        nargs='+',
+        default=[1, 2, 4],
+        help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
+    )
+    parser.add_argument(
+        "--seq_parallel",
+        type=bool,
+        default=True,
+        help="Whether to use sequence parallelism. Defaults to True.",
+    )
+    parser.add_argument(
+        "--xpos_rel_pos",
+        type=bool,
+        default=True,
+        help="Whether to use relative positional embeddings. Defaults to True.",
+    )
+    parser.add_argument(
+        "--xpos_scale_base",
+        type=int,
+        default=512,
+        help="Scale base for positional embeddings. Defaults to 512.",
+    )
+    parser.add_argument(
+        "--rms_norm_eps",
+        type=float,
+        default=1e-5,
+        help="Epsilon for root mean square normalization. Defaults to 1e-5.",
+    )
+    parser.add_argument(
+        "--multiway",
+        type=bool,
+        default=False,
+        help="Whether to use multiway attention. Defaults to False.",
+    )
+
     args = parser.parse_args()
 
     controller = args.controller
@@ -134,11 +185,19 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 4
+    n_layers: int = 6
     scale: int = 16
+    sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
-    dropout: float = 0.10
-    use_dilated_attn: bool = False  # TODO: Finish up implementation
+    dropout: float = 0.10 # Convert all these into argparses eventually
+    dilated_attn = args.dilated_attn
+    segment_lengths = args.segment_lengths
+    dilated_ratios = args.dilated_ratios
+    seq_parallel = args.seq_parallel
+    xpos_rel_pos = args.xpos_rel_pos
+    xpos_scale_base = args.xpos_scale_base
+    rms_norm_eps = args.rms_norm_eps
+    multiway = args.multiway
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -155,56 +214,86 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
-        n_head: int = 8 if controller != "Ant-v1" else 1
-        sl: int = 900
+        n_heads: int = 8 if controller != "Ant-v1" else 1
+        sl: int = 1000
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
-            n_head=n_head,
+            n_heads=n_heads,
             sl=sl,
             scale=scale,
+            sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
-            use_dilated_attn=use_dilated_attn,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
+            device=device,
+
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
         )
 
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
-        n_head: int = 9 if controller != "Ant-v1" else 1
-        sl: int = 900
+        n_heads: int = 9 if controller != "Ant-v1" else 1
+        sl: int = 1000
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
-            n_head=n_head,
+            n_heads=n_heads,
             sl=sl,
             scale=scale,
+            sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
-            use_dilated_attn=use_dilated_attn,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
+            device=device,
+
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
         )
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         n_embd: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_head: int = 16
+        n_heads: int = 16
         sl: int = 300
 
         configs = TransformerConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
-            n_head=n_head,
+            n_heads=n_heads,
             sl=sl,
             scale=scale,
+            sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
-            use_dilated_attn=use_dilated_attn,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v3", "controller": controller},
+            device=device,
+
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
         )
 
     model = Transformer(configs).to(device)
@@ -217,7 +306,7 @@ def main() -> None:
     # TODO: Add accumulated gradients to this
     # TODO: Make data loader better
     # TODO: Add print statement reporting our batch size and accumulated batch size
-    bsz: int = 4 // world_size
+    bsz: int = 8 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -250,29 +339,33 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
+        model="transformer",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
         shuffle=True,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
 
     val_loader = get_dataloader(
+        model="transformer",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
         shuffle=False,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
@@ -303,7 +396,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 6e-4
+    max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
     betas = (0.9, 0.95)
     eps = 1e-8
@@ -348,15 +441,15 @@ def main() -> None:
         }
 
     if main_process:
-        msg = f"\nLyla: We'll be training the Transformer model on the {args.task} task with {controller}."
+        msg = f"\nLyla: We'll be training the Transformer model on the {args.task} task with {controller}"
         if world_size > 1:
             colored_print(
-                f"{msg} {device} on rank {rank + 1}/{world_size}"
+                f"{msg} with {device} today on rank {rank + 1}/{world_size}"
                 f" utilizing {world_size} distributed processes.",
                 Colors.HEADER,
             )
         else:
-            colored_print(f"{msg} {device} today.", Colors.OKCYAN)
+            colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")

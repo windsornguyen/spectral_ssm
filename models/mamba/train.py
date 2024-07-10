@@ -3,7 +3,7 @@
 # File: train.py
 # =============================================================================#
 
-"""Training loop for Mamba sequence prediction."""
+"""Training loop for Mamba-2 sequence prediction."""
 
 import argparse
 from datetime import datetime
@@ -12,21 +12,20 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from safetensors.torch import load_file, save_file
-from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
-from tqdm import tqdm
-from time import time
 
-from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
+from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment as exp, optimizer as opt
+from utils import experiment as exp
 from models.mamba.model import Mamba2, Mamba2Configs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
+from utils.dist_utils import get_data_parallel_group
 
 
 def save_results(
@@ -117,7 +116,6 @@ def main() -> None:
     }
 
     # Defaults specific to the Princeton HPC cluster; modify to your own setup.
-    # device, local_rank, rank, world_size, num_workers, main_process = setup(args)
     device, local_rank, rank, world_size, main_process = setup(args)
 
     if main_process:
@@ -136,16 +134,34 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 4
-    scale: int = 4
+    d_conv: int = 4
+    conv_init = None
+    expand: int = 2
+    d_ssm = None
+    ngroups: int = world_size
+    A_init_range: tuple[int, int] = (1, 16)
+    activation = "silu"
+    D_has_hdim: bool = False
+    rmsnorm: bool = True
+    norm_before_gate: bool = False
+    dt_min: float = 0.001
+    dt_max: float = 0.1
+    dt_init_floor: float = 1e-4
+    dt_limit: tuple[float, float] = (0.0, float("inf"))
+
+    # Fused kernel and sharding options
+    chunk_size: int = 256
+    use_mem_eff_path: bool = True
+    layer_idx =  None # Absorb kwarg for general module
+    process_group = get_data_parallel_group()
+    sequence_parallel: bool = True
+    dtype: torch.dtype = torch.float32
+
+    # TODO: Experiment-specific hyperparameters
     bias: bool = False
+    conv_bias: bool = True
     dropout: float = 0.10
-    num_eigh: int = 24
-    k_y: int = 2
-    k_u: int = 3
-    learnable_m_y: bool = True
-    alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
-    use_hankel_L: bool = False
+    loss_fn = nn.MSELoss()
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -154,28 +170,33 @@ def main() -> None:
             loss_fn = HalfCheetahLoss()
         elif controller == "Walker2D-v1":
             loss_fn = Walker2DLoss()
+        elif controller == "CartPole-v1":
+            loss_fn = CartpoleLoss()
         else:
-            loss_fn = None
+            loss_fn = nn.MSELoss()
     else:
-        loss_fn = MSELoss()
+        loss_fn = nn.MSELoss()
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        n_embd: int = 24 if controller != "Ant-v1" else 37
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = d_in    # before projection d_in = d_out
-        d_proj: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 900
+        d_model: int = 24 if controller != "Ant-v1" else 40
+        # headdim: int = (expand * d_model) // world_size
+        d_state: int = 128
+        headdim: int = 1
+        d_out: int = 18 if controller != "Ant-v1" else 32
+        sl: int = 1000
 
         configs = Mamba2Configs(
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
+            conv_init=conv_init,
             expand=expand,
             headdim=headdim,
             d_ssm=d_ssm,
             ngroups=ngroups,
             A_init_range=A_init_range,
+            activation=activation,
             D_has_hdim=D_has_hdim,
             rmsnorm=rmsnorm,
             norm_before_gate=norm_before_gate,
@@ -188,28 +209,33 @@ def main() -> None:
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
             layer_idx=layer_idx,
+            process_group=process_group,
+            sequence_parallel=sequence_parallel,
             dropout=dropout,
             loss_fn=loss_fn,
-            max_len=max_len,
             d_out=d_out,
             device=device,
+            dtype=dtype,
+            world_size=world_size
         )
 
     elif task["mujoco-v2"]:
-        n_embd: int = 18 if controller != "Ant-v1" else 29
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = n_embd
-        d_proj = n_embd
-        sl: int = 900
+        d_model: int = 18 if controller != "Ant-v1" else 32
+        d_state: int = 130 if controller == "HalfCheetah-v1" else 128
+        headdim: int = 1 if controller == "HalfCheetah-v1" else 1
+        d_out = d_model
+        sl: int = 1000
         configs = Mamba2Configs(
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
+            conv_init=conv_init,
             expand=expand,
             headdim=headdim,
             d_ssm=d_ssm,
             ngroups=ngroups,
             A_init_range=A_init_range,
+            activation=activation,
             D_has_hdim=D_has_hdim,
             rmsnorm=rmsnorm,
             norm_before_gate=norm_before_gate,
@@ -222,31 +248,35 @@ def main() -> None:
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
             layer_idx=layer_idx,
+            process_group=process_group,
+            sequence_parallel=sequence_parallel,
             dropout=dropout,
             loss_fn=loss_fn,
-            max_len=max_len,
             d_out=d_out,
             device=device,
+            dtype=dtype,
+            world_size=world_size
         )
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd = d_out
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_proj = n_embd
+        d_model = d_out
+        headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
         configs = Mamba2Configs(
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
+            conv_init=conv_init,
             expand=expand,
             headdim=headdim,
             d_ssm=d_ssm,
             ngroups=ngroups,
             A_init_range=A_init_range,
+            activation=activation,
             D_has_hdim=D_has_hdim,
             rmsnorm=rmsnorm,
             norm_before_gate=norm_before_gate,
@@ -259,21 +289,24 @@ def main() -> None:
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
             layer_idx=layer_idx,
+            process_group=process_group,
+            sequence_parallel=sequence_parallel,
             dropout=dropout,
             loss_fn=loss_fn,
-            max_len=max_len,
             d_out=d_out,
             device=device,
+            dtype=dtype,
+            world_size=world_size
         )
 
     model = Mamba2(configs).to(device)
-    # model = torch.compile(model)
+    # model = torch.compile(model) TODO: torch.compile is not well-supported with Mamba-2
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
     mamba_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 4
+    bsz: int = 8
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -306,35 +339,39 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
+        model="mamba-2",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
         shuffle=True,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
 
     val_loader = get_dataloader(
+        model="mamba-2",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
         shuffle=False,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
 
     # General training hyperparameters
-    training_stu = True
+    training_stu = False
     num_epochs: int = 3
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
@@ -359,9 +396,9 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 6e-4
+    max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
-    
+
     # Adam hyperparameters, per the GPT-3 paper
     betas = (0.9, 0.95)
     eps = 1e-8
@@ -406,15 +443,15 @@ def main() -> None:
         }
 
     if main_process:
-        msg = f"\nLyla: We'll be training the Mamba2 model on the {args.task} task with {controller}."
+        msg = f"\nLyla: We'll be training the Mamba-2 model on the {args.task} task with {controller}"
         if world_size > 1:
             colored_print(
-                f"{msg} {device} on rank {rank + 1}/{world_size}"
+                f"{msg} with {device} today on rank {rank + 1}/{world_size}"
                 f" utilizing {world_size} distributed processes.",
                 Colors.HEADER,
             )
         else:
-            colored_print(f"{msg} {device} today.", Colors.OKCYAN)
+            colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -437,7 +474,7 @@ def main() -> None:
             if relative_step % (eval_period // dilation) == 0 or last_step:
                 if main_process:
                     colored_print(
-                        f"\nLyla: Evaluating the Mamba2 model at step {relative_step}.",
+                        f"\nLyla: Evaluating the Mamba-2 model at step {relative_step}.",
                         Colors.OKCYAN,
                     )
                 val_metrics = training_run.evaluate(val_loader)
@@ -487,7 +524,7 @@ def main() -> None:
                         )
 
                         colored_print(
-                            f"Lyla: Wow! We have a new personal best for the Mamba2 model at step {relative_step}. "
+                            f"Lyla: Wow! We have a new personal best for the Mamba-2 model at step {relative_step}. "
                             f"The validation loss improved to: {val_metrics['loss']:.4f}! "
                             f"Model checkpoint saved as {model_path} and other data saved as {extra_info_path}",
                             Colors.OKGREEN,
@@ -495,14 +532,14 @@ def main() -> None:
                     else:
                         patient_counter += 1
                         colored_print(
-                            f"Lyla: No improvement in validation loss for the Mamba2 model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
+                            f"Lyla: No improvement in validation loss for the Mamba-2 model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
                             Colors.WARNING,
                         )
 
                 if patient_counter >= patience:
                     if main_process:
                         colored_print(
-                            f"Lyla: We have reached the patience limit of {patience} for the Mamba2 model. Stopping the training early at step {relative_step}...",
+                            f"Lyla: We have reached the patience limit of {patience} for the Mamba-2 model. Stopping the training early at step {relative_step}...",
                             Colors.FAIL,
                         )
                     break
@@ -556,7 +593,7 @@ def main() -> None:
                 other_data = torch.load(best_model_extra_info_path, map_location="cpu")
                 training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-            print("\nLyla: Here's the best model information for the Mamba2 model:")
+            print("\nLyla: Here's the best model information for the Mamba-2 model:")
             print(f"    Best model at step {best_model_step}")
             print(f"    Best model validation loss: {best_val_loss:.4f}")
             print(f"    Best model checkpoint saved at: {best_model_path}")
@@ -566,7 +603,7 @@ def main() -> None:
             training_details = f"training_details_mamba2_{timestamp}.txt"
             with open(training_details, "w") as f:
                 f.write(
-                    f"Training completed for Mamba2 on {args.task} with {controller} at: {datetime.now()}\n"
+                    f"Training completed for Mamba-2 on {args.task} with {controller} at: {datetime.now()}\n"
                 )
                 f.write(f"Best model step: {best_model_step}\n")
                 f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
@@ -575,11 +612,11 @@ def main() -> None:
                     f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
                 )
             print(
-                f"Lyla: Congratulations on completing the training run for the Mamba2 model! Details are saved in {training_details}."
+                f"Lyla: Congratulations on completing the training run for the Mamba-2 model! Details are saved in {training_details}."
             )
         else:
             colored_print(
-                "\nLyla: No best checkpoint found for the Mamba2 model. The model did not improve during training.",
+                "\nLyla: No best checkpoint found for the Mamba-2 model. The model did not improve during training.",
                 Colors.WARNING,
             )
 

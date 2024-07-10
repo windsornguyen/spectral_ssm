@@ -9,6 +9,10 @@ import numpy as np
 from tqdm import tqdm
 from ignite.metrics import SSIM
 
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
+
 
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -203,6 +207,8 @@ def train_vae(model, train_loader, val_loader, num_epochs, learning_rate, beta, 
 
 
 if __name__ == "__main__":
+    dist.init_process_group(backend='nccl')
+
     # Hyperparameters
     latent_dim = 128
     num_epochs = 3
@@ -239,15 +245,21 @@ if __name__ == "__main__":
     validate_dataset(val_dataset)
 
     # Create DataLoaders
+    train_sampler = DistributedSampler(train_dataset)
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4
+        train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=4
     )
+
+    val_sampler = DistributedSampler(val_dataset)
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+        val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=4
     )
 
     # Initialize and train the model
     model = VAE(input_channels=3, latent_dim=latent_dim)
+    model.to(device)
+    model = DistributedDataParallel(model)
+
     trained_model = train_vae(
         model, train_loader, val_loader, num_epochs, learning_rate, beta, device
     )
@@ -256,3 +268,5 @@ if __name__ == "__main__":
     torch.save(trained_model.state_dict(), "sota_vae_mujoco.pth")
 
     print("Training completed and model saved.")
+
+    dist.destroy_process_group()

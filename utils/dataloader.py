@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen, Yagiz Devre, Isabel Liu
+# Authors: Windsor Nguyen, Isabel Liu, Yagiz Devre
 # File: dataloader.py
 # =============================================================================#
 
@@ -15,8 +15,10 @@ from utils.colors import Colors, colored_print
 
 # TODO: Write generic dataset downloading and saving script for the user.
 class Dataloader(Dataset):
-    def __init__(self, data, task, shift=1, preprocess=True, eps=1e-7):
+    def __init__(self, model, data, task, controller, shift=1, preprocess=True, eps=1e-6):
+        self.model = model
         self.task = task
+        self.controller = controller
         self.shift = shift
         self.preprocess = preprocess
         self.eps = eps
@@ -35,6 +37,12 @@ class Dataloader(Dataset):
             else:
                 raise ValueError("Invalid data format for mujoco-v1 or mujoco-v2 tasks")
             self.data = None
+
+            if model == "mamba-2" and controller == "Ant-v1":
+                # Padding zeros to the end of each trajectory at each timestep
+                self.inputs = np.pad(self.inputs, ((0, 0), (0, 0), (0, 3)), mode='constant')
+                self.targets = np.pad(self.targets, ((0, 0), (0, 0), (0, 3)), mode='constant')
+                
         elif task == "mujoco-v3":
             self.data = data
             if self.preprocess:
@@ -53,21 +61,16 @@ class Dataloader(Dataset):
 
     def __getitem__(self, index):
         if self.task in ["mujoco-v1", "mujoco-v2"]:
+            # MuJoCo-v1 and MuJoCo-v2 data are already offset by one
             x_t = torch.tensor(self.inputs[index], dtype=torch.float32)
             x_t_plus_1 = torch.tensor(self.targets[index], dtype=torch.float32)
             return x_t, x_t_plus_1
         elif self.task == "mujoco-v3":
+            # MuJoCo-v3 data does not come offset by one
             features = self.data[index]
-        else:
-            features = torch.cat(
-                (self.data[index]["x_t"], self.data[index]["x_t_plus_1"]),
-                dim=-1,
-            )
-
-        input_frames = features[: -self.shift]
-        target_frames = features[self.shift :]
-
-        return input_frames, target_frames
+            input_frames = features[:-self.shift]
+            target_frames = features[self.shift:]
+            return input_frames, target_frames
 
     def _calculate_statistics(self):
         if self.task == "mujoco-v3":
@@ -107,20 +110,22 @@ class Dataloader(Dataset):
 
 
 def get_dataloader(
+    model,
     data,
     task,
+    controller,
     bsz,
     shift=1,
     preprocess=True,
     shuffle=True,
     pin_memory=False,
     distributed=True,
-    rank=0,
+    local_rank=0,
     world_size=1,
     device="cpu",
 ):
     colored_print(f"\nCreating dataloader on {device} for task: {task}", Colors.OKBLUE)
-    dataset = Dataloader(data, task, shift, preprocess)
+    dataset = Dataloader(model, data, task, controller, shift, preprocess)
     pin_memory = device == "cpu"
 
     sampler = (
@@ -147,10 +152,6 @@ def get_dataloader(
 
 
 def split_data(dataset, train_ratio=0.8, random_seed=1337):
-    # TODO: Not sure if we need this, experiment to see if data is the same without
-    # Set the random seed for reproducibility
-    torch.manual_seed(random_seed)
-
     if isinstance(dataset, Dataloader) and dataset.task in ["mujoco-v1", "mujoco-v2"]:
         num_samples = len(dataset)
         indices = torch.randperm(num_samples)

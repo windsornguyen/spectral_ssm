@@ -1,14 +1,16 @@
 # =============================================================================#
-# Authors: Tri Dao, Windsor Nguyen
+# Authors: Tri Dao
 # File: layer_norm_gated.py
 # Adapted from 
 # https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/layernorm_gated.py
 # =============================================================================#
 
-# Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
-# For the backward pass, we keep weight_grad and bias_grad in registers and accumulate.
-# This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
-# The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
+"""
+Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
+For the backward pass, we keep weight_grad and bias_grad in registers and accumulate.
+This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
+The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
+"""
 
 import math
 

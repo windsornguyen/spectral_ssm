@@ -62,14 +62,14 @@ def main():
     model_path = f"transformer_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
-        sl = 900
+        sl = 1000
         if args.controller == "Ant-v1":
             n_embd, d_out = 37, 29
-            n_head = 1
+            n_heads = 1
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
             n_embd, d_out = 24, 18
-            n_head = 8
+            n_heads = 8
             loss_fn = (
                 HalfCheetahLoss()
                 if args.controller == "HalfCheetah-v1"
@@ -78,8 +78,8 @@ def main():
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v2":
-        sl = 900
-        n_head = 1
+        sl = 1000
+        n_heads = 1
         if args.controller == "Ant-v1":
             n_embd, d_out = 29, 29
             loss_fn = AntLoss()
@@ -93,21 +93,21 @@ def main():
         else:
             n_embd, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v3":
-        n_head = 8
+        n_heads = 8
         sl, n_embd, d_out = 300, 512, 512
         loss_fn = MSELoss()
     else:
         raise ValueError("Invalid task")
 
     configs = TransformerConfigs(
-        n_layers=4,
+        n_layers=6,
         n_embd=n_embd,
-        n_head=n_head,
+        n_heads=n_heads,
         sl=sl,
         scale=16,
         bias=False,
         dropout=0.10,
-        use_dilated_attn=False,
+        dilated_attn=False,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
     )
@@ -123,8 +123,8 @@ def main():
     # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = f"data/{args.task}/{args.controller}/"
-        test_inputs = np.load(f"{base_path}/val_inputs_orig.npy")
-        test_targets = np.load(f"{base_path}/val_targets_orig.npy")
+        test_inputs = np.load(f"{base_path}/val_inputs.npy")
+        test_targets = np.load(f"{base_path}/val_targets.npy")
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
         test_targets = torch.from_numpy(test_targets).float().to(device)
     elif args.task == "mujoco-v3":
@@ -160,7 +160,6 @@ def main():
                     init=init,  # Use the first 100 steps as context
                     steps=steps,  # Predict the next steps
                     rollout_steps=20,
-                    window_size=sl,
                 )
 
             elif args.task == "mujoco-v3":
@@ -173,7 +172,6 @@ def main():
                     init=init,
                     steps=steps,  # Predict the next 5 steps
                     rollout_steps=1,
-                    window_size=sl,
                 )
 
             predicted_states.append(pred_states)
@@ -212,7 +210,7 @@ def main():
         "Saved ground truth shape:",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
-
+    print("Saved losses shape:", losses.shape)
     np.save(
         f"transformer_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
@@ -221,8 +219,9 @@ def main():
         f"transformer_{args.controller}_{args.task}_ground_truths.npy",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
+    np.save(f"transformer_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
-        f"Predictions and ground truths saved to 'transformer_{args.controller}_{args.task}_predictions.npy' and 'transformer_{args.controller}_{args.task}_ground_truths.npy' respectively."
+        f"Predictions, ground truths, and losses saved to 'transformer_{args.controller}_{args.task}_predictions.npy', 'transformer_{args.controller}_{args.task}_ground_truths.npy', and 'transformer_{args.controller}_{args.task}_losses.npy' respectively."
     )
 
     # Plotting

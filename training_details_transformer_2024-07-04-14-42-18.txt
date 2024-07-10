@@ -1,5 +1,0 @@
-Training completed for Transformer on mujoco-v1 with Ant-v1 at: 2024-07-04 14:42:48.744090
-Best model step: 1470
-Best model validation loss: 7.7873
-Best model checkpoint saved at: checkpoints/transformer-Ant-v1-model_step-1470-2024-07-04-14-42-18.pt
-Best model's extra info data saved at: checkpoints/transformer-Ant-v1-other_step-1470-2024-07-04-14-42-18.pt

@@ -78,6 +78,12 @@ class Experiment:
 
         self.model.to(self.device)
 
+        # Additional info
+        # TODO: Compute flops and MFU eventually
+        # self.total_time = 0
+        # self.total_steps = 0
+        # self.mfu_calculation_frequency = 100 # Estimate MFU every hundred steps.
+
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
         m_y_params = []
@@ -178,6 +184,24 @@ class Experiment:
         coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
         return min_lr + coeff * (max_lr - min_lr)
 
+    def compute_mfu(self):
+        """
+        Computes the estimated MFU of the model.
+
+        Returns:
+            float: The estimated MFU of the model.
+        """
+        fwdbwd_per_iter = 1  # Assuming one forward and backward pass per iteration
+        avg_time_per_step = self.total_time / self.total_steps
+        flops, flops_promised = self.model.estimate_mfu(fwdbwd_per_iter, avg_time_per_step)
+        mfu = flops / flops_promised
+
+        # Reset accumulators
+        self.total_time = 0
+        self.total_steps = 0
+
+        return flops, mfu
+    
     def step(
         self, inputs: torch.Tensor, targets: torch.Tensor, relative_step: int
     ) -> dict[str, float]:
@@ -197,6 +221,7 @@ class Experiment:
         t0 = time()
 
         inputs, targets = inputs.to(self.device), targets.to(self.device)
+        # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
         preds, loss_info = self.model(inputs, targets)
 
         if isinstance(loss_info, tuple):
@@ -260,6 +285,14 @@ class Experiment:
                     for k, v in loss_info.items()
                 }
             )
+        
+        # self.total_time += dt
+        # self.total_steps += 1
+
+        # # Calculate MFU periodically
+        # if relative_step % self.mfu_calculation_frequency == 0 and relative_step > 0:
+        #     flops, mfu = self.compute_mfu()
+        #     metrics["flops"], metrics["mfu"] = flops, mfu
 
         return metrics
 
@@ -286,6 +319,7 @@ class Experiment:
             for inputs, targets in dataloader:
                 t0 = time()
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
+                # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 preds, loss_info = self.model(inputs, targets)
 
                 if isinstance(loss_info, tuple):

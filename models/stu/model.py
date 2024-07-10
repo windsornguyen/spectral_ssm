@@ -1,9 +1,9 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu, Dwaipayan Saha
+# Authors: Windsor Nguyen, Isabel Liu
 # File: model.py
 # ==============================================================================#
 
-"""Spectral temporal unit (STU) block."""
+"""The Spectral State Space Model architecture."""
 
 import math
 
@@ -11,34 +11,44 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from models.stu.stu_utils import get_top_eigh, compute_ar_u, compute_spectral, compute_ar_y
-from utils.swiglu import SwiGLU
+from models.stu.stu_utils import (
+    get_top_eigh, 
+    preconvolve,
+    compute_ar_u, 
+    compute_spectral, 
+    compute_ar_y
+)
+from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.rms_norm import RMSNorm
+from utils.swiglu import SwiGLU
 from tqdm import tqdm
 from torch.nn import MSELoss
 
 
 @dataclass
-class SSSMConfigs:
+class SpectralSSMConfigs:
     d_in: int = 37
     d_out: int = 37
     d_proj: int = 29
-    n_layers: int = 6
+    n_layers: int = 2
     n_embd: int = 37
-    sl: int = 300
+    sl: int = 1_000
     scale: int = 4
     bias: bool = False
     dropout: float = 0.10
-    num_eigh: int = 24
-    k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
+    num_eigh: int = 16
     k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
+    k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
+    use_ar_y: bool = False
+    use_ar_u: bool = False
     use_hankel_L: bool = False
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
     )
+    device: torch.device = None
 
 
 class STU(nn.Module):
@@ -46,31 +56,36 @@ class STU(nn.Module):
     A simple STU (Spectral Transform Unit) layer.
 
     Args:
-        configs: Configuration object containing the following attributes:
+        configs: Configuration contains (at least) the following attributes:
             d_in (int): Input dimension.
             d_out (int): Output dimension.
-            sl (int): Input sequence length.
             num_eigh (int): Number of spectral filters to use.
+            use_ar_y (bool): Use autoregressive on the output sequence?
+            use_ar_u (bool): Use autoregressive on the input sequence?
             k_u (int): Autoregressive depth on the input sequence.
             k_y (int): Autoregressive depth on the output sequence.
-            use_hankel_L (bool): Use the alternative Hankel matrix?
             learnable_m_y (bool): Learn the M_y matrix?
             dropout (float): Dropout rate.
+        sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors.
     """
 
-    def __init__(self, configs) -> None:
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.d_in = configs.d_in
         self.d_out = configs.d_out
-        self.l, self.k = configs.sl, configs.num_eigh
-        self.use_hankel_L = configs.use_hankel_L
-        self.eigh = get_top_eigh(self.l, self.k, self.use_hankel_L, self.device)
+        self.k = configs.num_eigh
+        self.use_ar_y = configs.use_ar_y
+        self.use_ar_u = configs.use_ar_u
+        self.sigma = sigma
+        self.V = V # Precomputed FFT of top K eigenvectors.
+        self.padded_sl = padded_sl
         self.k_u = configs.k_u
         self.k_y = configs.k_y
         self.learnable_m_y = configs.learnable_m_y
-        self.dropout = nn.Dropout(configs.dropout)
-
+        self.stu_dropout = nn.Dropout(configs.dropout)
+        self.resid_dropout = nn.Dropout(configs.dropout)
+        
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
         self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
         self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
@@ -78,9 +93,10 @@ class STU(nn.Module):
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.m_y = nn.Parameter(torch.zeros(self.k_y, self.d_out, self.d_out))
+            self.M_y = nn.Parameter(torch.zeros(self.d_out, self.k_y, self.d_out))
         else:
-            self.register_buffer("m_y", torch.zeros(self.k_y, self.d_out, self.d_out))
+            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
+
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -92,15 +108,26 @@ class STU(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (bsz, sl, d_out)
         """
-        ar_u = compute_ar_u(self.M_u, inputs)
-        m_y = self.m_y if self.learnable_m_y else None
-        spectral = compute_spectral(inputs, self.eigh, self.M_phi_plus, self.M_phi_minus, m_y)
+        spectral = self.stu_dropout(
+            compute_spectral(
+                inputs, self.sigma, self.V, self.M_phi_plus, 
+                self.M_phi_minus, self.M_y, self.padded_sl, self.use_ar_y
+            )
+        )
 
-        y_t = ar_u + spectral
-        if self.learnable_m_y:
-            y_t += compute_ar_y(self.m_y, y_t)
+        match (self.use_ar_u, self.use_ar_y):
+            case (True, True):
+                y_t = spectral + compute_ar_u(self.M_u, inputs)
+                y_t += compute_ar_y(self.M_y, y_t)
+            case (True, False):
+                y_t = spectral + compute_ar_u(self.M_u, inputs)
+            case (False, True):
+                y_t = spectral
+                y_t += compute_ar_y(self.M_y, y_t)
+            case (False, False):
+                y_t = spectral
 
-        return self.dropout(y_t)
+        return self.resid_dropout(y_t)
 
 
 class MLP(nn.Module):
@@ -115,10 +142,10 @@ class MLP(nn.Module):
             dropout (float): Dropout rate.
     """
 
-    def __init__(self, configs: SSSMConfigs) -> None:
+    def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -132,21 +159,27 @@ class MLP(nn.Module):
             torch.Tensor: Output tensor
         """
         x = self.swiglu(x)
-        return self.dropout(x)
+        x = self.dropout(x)
+        return x
 
 
 class Block(nn.Module):
     """
-    A single block of the SSSM model, consisting of STU and MLP layers.
+    A single block of the spectral SSM model composed of STU and MLP layers.
 
     Args:
         configs: Configuration object for STU and MLP layers
+        sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors.
+        padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs: SSSMConfigs) -> None:
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn = RMSNorm(configs.n_embd)
-        self.stu = STU(configs)
+        self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_2 = RMSNorm(configs.n_embd)
+        self.stu = STU(configs, sigma, V, padded_sl)
+        self.rn_3 = RMSNorm(configs.n_embd)
         self.mlp = MLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -159,47 +192,52 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        # x = x + self.stu(self.rn_1(x))
-        # x = x + self.mlp(self.rn_2(x))
-        z = x
-        x = self.stu(self.rn(x))
-        x = x + self.mlp(x)
-        return x + z
+        z = self.rn_1(x)
+        x = z + self.stu(self.rn_2(x))
+        x = x + self.mlp(self.rn_3(x))
+        return x + z  
 
-
-class SSSM(nn.Module):
+class SpectralSSM(nn.Module):
     """
-    General model architecture based on stacked STU blocks and MLP layers.
+    Model architecture based on stacked blocks of STU and MLP layers.
 
     Args:
-        configs: Configuration object containing model parameters
+        configs: Configuration object containing model hyperparameters.
     """
 
-    def __init__(self, configs: SSSMConfigs) -> None:
-        super(SSSM, self).__init__()
+    def __init__(self, configs) -> None:
+        super(SpectralSSM, self).__init__()
         self.configs = configs
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
-        self.d_in = configs.d_in    # TODO: d_in is not exactly the same as n_embd
+        self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.d_proj = configs.d_proj
         self.sl = configs.sl
+        self.num_eigh = configs.num_eigh
         self.learnable_m_y = configs.learnable_m_y
         self.alpha = configs.alpha
+        self.use_hankel_L = configs.use_hankel_L
+        self.device = configs.device
+
+        self.sigma, self.phi = get_top_eigh(self.sl, self.num_eigh, self.use_hankel_L, self.device)
+        self.V, self.padded_sl = preconvolve(self.phi, self.sl) # Precomputed.
 
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-
-        self.emb = nn.Linear(self.n_embd, self.n_embd)
-        self.stu = nn.ModuleDict(
+        
+        self.spectral_ssm = nn.ModuleDict(
             dict(
                 dropout=nn.Dropout(self.dropout),
-                hidden=nn.ModuleList([Block(configs) for _ in range(self.n_layers)]),
+                hidden=nn.ModuleList(
+                    [Block(
+                        self.configs, self.sigma, self.V, self.padded_sl
+                    ) for _ in range(self.n_layers)]),
             )
         )
-        self.task_head = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
+        self.output = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
         self.m_x = self.d_out**-0.5
@@ -207,11 +245,11 @@ class SSSM(nn.Module):
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("STU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
 
     def forward(self, inputs, targets):
         """
-        Forward pass of the SSSM model.
+        Forward pass of the spectral SSM model.
 
         Args:
             inputs (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
@@ -223,14 +261,10 @@ class SSSM(nn.Module):
             - Tuple containing loss and metrics (if applicable)
         """
         _, sl, n_embd = inputs.size()
-
-        x = self.emb(inputs)
-        x = self.stu.dropout(x)
-
-        for block in self.stu.hidden:
+        x = self.spectral_ssm.dropout(inputs)
+        for block in self.spectral_ssm.hidden:
             x = block(x)
-        
-        preds = self.task_head(x)
+        preds = self.output(x)
 
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (
@@ -263,96 +297,133 @@ class SSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.m_y[1] = self.alpha * torch.eye(module.d_out)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_out)
 
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self):
         """
         Return the number of parameters in the model.
-
-        Args:
-            non_embedding (bool, optional):
-            Whether to exclude the positional embeddings (if applicable).
-            Defaults to True.
 
         Returns:
             int: The number of parameters in the model.
         """
         num_params = sum(p.numel() for p in self.parameters())
         return num_params
+    
+    def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
+        """
+        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
 
-    # TODO: Not sure when/where this could be used, but we'd like to use it!
-    # TODO: Also need to fix this function to make sure it's correct.
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params()
+        Args:
+            fwdbwd_per_iter (float): Number of forward/backward passes per iteration.
+            dt (float): Time taken for the iteration.
+
+        Returns:
+            tuple[float, float]: Estimated MFU and estimated peak FLOPS.
+
+        Reference:
+            PaLM paper Appendix B: https://arxiv.org/abs/2204.02311
+        """
         cfg = self.configs
-        L, D, E, T = cfg.num_layers, cfg.n_embd, cfg.num_eigh, cfg.input_len
+        L, D, E, T = cfg.n_layers, cfg.n_embd, cfg.num_eigh, cfg.sl
 
-        # Embedding layers
-        embed_flops = 2 * D * T
+        total_flops = 0
 
         # STU blocks
-        stu_block_flops = 0
         for _ in range(L):
-            # Layer normalization
-            stu_block_flops += 2 * D * T  # ln_1 and ln_2
+            total_flops += self._compute_rmsnorm_flops(D, T) * 2  # 2 RMSNorm per block
+            total_flops += self._compute_spectral_flops(T, D, E)
+            
+            if cfg.use_ar_u:
+                total_flops += 2 * cfg.k_u * D * D * T  # compute_ar_u
+            if cfg.use_ar_y:
+                total_flops += self._compute_ar_y_flops(T, D, cfg.k_y)
 
-            # STU layer
-            stu_block_flops += 2 * E * D * T  # Compute x_tilde
-            stu_block_flops += 2 * D * E * D  # Apply m_phi matrix
+            total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
 
-            # MLP layer
-            stu_block_flops += 2 * D * cfg.scale * D  # c_fc
-            stu_block_flops += cfg.scale * D  # GELU activation
-            stu_block_flops += 2 * cfg.scale * D * D  # c_proj
+        # Output layer
+        total_flops += 2 * D * cfg.d_proj * T
 
-        # Final layer normalization
-        final_ln_flops = 2 * D * T  # ln_f
+        # Dropout operations (1 FLOP per element)
+        total_flops += (L + 1) * D * T  # L blocks + initial dropout
 
-        # Language model head
-        lm_head_flops = 2 * D * cfg.vocab_size
+        flops_per_iter = total_flops
+        flops_achieved = flops_per_iter * fwdbwd_per_iter / dt
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops (312 TFLOPS)
+        return flops_achieved, flops_promised
 
-        flops_per_iter = embed_flops + stu_block_flops + final_ln_flops + lm_head_flops
-        flops_per_fwdbwd = flops_per_iter * fwdbwd_per_iter
+    def _compute_rmsnorm_flops(self, D: int, T: int) -> int:
+        """
+        Compute FLOPS for RMSNorm operation.
 
-        # Express flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_fwdbwd / dt  # per second
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+        Args:
+            D (int): Embedding dimension.
+            T (int): Sequence length.
 
-    # TODO: Also need to fix this function to make sure it's correct.
-    def flops_per_token(self):
-        """Estimate the number of floating-point operations per token."""
-        flops = 0
-        cfg = self.configs
+        Returns:
+            int: Total FLOPS for RMSNorm.
+        """
+        power_flops = D * T  # x^2
+        sum_flops = D * T  # Sum across dimension
+        mean_flops = T  # Division for mean
+        sqrt_flops = T  # Square root
+        normalize_flops = D * T  # Division by sqrt(mean + eps)
+        scale_flops = D * T  # Multiplication by weight
 
-        # Embedding layers
-        flops += 2 * cfg.n_embd * cfg.block_size  # wte and wpe embeddings
+        return power_flops + sum_flops + mean_flops + sqrt_flops + normalize_flops + scale_flops
 
-        # STU blocks
-        for _ in range(cfg.num_layers):
-            # Layer normalization
-            flops += 2 * cfg.n_embd * cfg.block_size  # ln_1 and ln_2
+    def _compute_spectral_flops(self, T: int, D: int, E: int) -> int:
+        """
+        Compute FLOPS for spectral computations.
 
-            # STU layer
-            flops += 2 * cfg.num_eigh * cfg.n_embd * cfg.block_size  # Compute x_tilde
-            flops += 2 * cfg.n_embd * cfg.num_eigh * cfg.n_embd  # Apply m_phi matrix
+        Args:
+            T (int): Sequence length.
+            D (int): Embedding dimension.
+            E (int): Number of eigenvectors.
 
-            # MLP layer
-            flops += 2 * cfg.n_embd * cfg.scale * cfg.n_embd  # c_fc
-            flops += cfg.scale * cfg.n_embd  # GELU activation
-            flops += 2 * cfg.scale * cfg.n_embd * cfg.n_embd  # c_proj
+        Returns:
+            int: Total FLOPS for spectral computations.
+        """
+        n = nearest_power_of_2(T * 2 - 1)
+        log_n = math.log2(n)
 
-        # Final layer normalization
-        flops += 2 * cfg.n_embd * cfg.block_size  # ln_f
+        fft_flops = 2 * n * log_n * D * E * 2  # rfft and irfft
+        filter_flops = 2 * T * D * E  # Spectral filter application
 
-        # Language model head
-        flops += 2 * cfg.n_embd * cfg.vocab_size
+        return int(fft_flops + filter_flops)
 
-        return flops
+    def _compute_ar_y_flops(self, T: int, D: int, k_y: int) -> int:
+        """
+        Compute FLOPS for compute_ar_y function.
+
+        Args:
+            T (int): Sequence length.
+            D (int): Embedding dimension.
+            k_y (int): Autoregressive depth on the output sequence.
+
+        Returns:
+            int: Total FLOPS for ar_y computation.
+        """
+        return 2 * T * k_y * D * D + T * k_y * D  # Matrix multiplications + additions
+
+    def _compute_swiglu_flops(self, D: int, scale: float, T: int) -> int:
+        """
+        Compute FLOPS for SwiGLU activation.
+
+        Args:
+            D (int): Embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            T (int): Sequence length.
+
+        Returns:
+            int: Total FLOPS for SwiGLU computation.
+        """
+        h_dim = int(scale * D)
+        
+        linear_flops = 2 * D * h_dim * T * 3  # Three linear layers
+        silu_flops = 3 * h_dim * T  # SiLU activation (3 ops per element)
+        hadamard_flops = h_dim * T  # Hadamard product
+        
+        return linear_flops + silu_flops + hadamard_flops
 
     def predict_states(
         self,
@@ -361,7 +432,6 @@ class SSSM(nn.Module):
         init: int = 950,
         steps: int = 50,
         rollout_steps: int = 20,
-        window_size: int = 900,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -386,36 +456,39 @@ class SSSM(nn.Module):
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, _, d_out = targets.size()
+        num_traj, total_steps, d_out = targets.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
-        # To track what the model hallucinates
-        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
+        # Track model hallucinations
+        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        # To track the MSE loss between rollout vs ground truth for each trajectory
+        # Track loss between rollout vs ground truth
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
+        # Initialize cost function
+        mse_loss = MSELoss()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step # Start at init
-            window_start = current_step - window_size
+            current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, window_start:current_step], targets[:, window_start:current_step]
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
             rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
-            mse_loss = MSELoss()
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
-            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
+            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
             # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
             # next_input = torch.cat([next_input, next_action], dim=2)
             # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-        return hallucinated_steps, (avg_loss, traj_losses)
+        return predicted_steps, (avg_loss, traj_losses)
