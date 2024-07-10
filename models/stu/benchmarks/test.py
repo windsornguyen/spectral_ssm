@@ -4,7 +4,7 @@ from prettytable import PrettyTable
 import time
 from typing import Callable, Tuple
 
-from models.stu.model import SSSM, SSSMConfigs
+from models.stu.model import SpectralSSM, SpectralSSMConfigs
 
 from models.stu.benchmarks.synthetic import (
     generate_copy,
@@ -15,7 +15,7 @@ from models.stu.benchmarks.synthetic import (
 
 
 def benchmark_model(
-    model: SSSM,
+    model: SpectralSSM,
     dataset: torch.utils.data.Dataset,
     loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     task_name: str,
@@ -52,7 +52,7 @@ def benchmark_model(
     return avg_loss, exec_time
 
 
-def run_benchmarks(model: SSSM, configs: SSSMConfigs):
+def run_benchmarks(model: SpectralSSM, configs: SpectralSSMConfigs):
     results = PrettyTable()
     results.field_names = ["Dataset", "Avg Loss", "Execution Time (s)"]
 
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         dropout=0.1,
     )
 
-    model = SSSM(configs)
+    model = SpectralSSM(configs)
 
     # Run benchmarks
     run_benchmarks(model, configs)

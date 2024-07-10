@@ -15,7 +15,7 @@ from safetensors.torch import load_file
 import seaborn as sns
 from matplotlib.gridspec import GridSpec
 
-from models.stu.model import SSSM, SSSMConfigs
+from models.stu.model import SpectralSSM, SpectralSSMConfigs
 
 from torch.nn import HuberLoss, MSELoss
 from losses.loss_ant import AntLoss
@@ -115,7 +115,7 @@ def main():
     )
 
     # Initialize and load the model
-    model = SSSM(configs).to(device)
+    model = SpectralSSM(configs).to(device)
     # model = torch.compile(model)
     state_dict = load_file(model_path, device="cuda:0")
     model.load_state_dict(state_dict)
@@ -284,7 +284,7 @@ def main():
         ax2.set_yscale("log")  # Use log scale for better visibility
 
     plt.suptitle(
-        f"SSSM Predictions for {args.controller} on {args.task}\n",
+        f"Spectral SSM Predictions for {args.controller} on {args.task}\n",
         fontsize=16,
     )
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])

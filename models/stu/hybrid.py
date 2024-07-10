@@ -1,9 +1,9 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu
-# File: model.py
+# Authors: Windsor Nguyen
+# File: hybrid.py
 # ==============================================================================#
 
-"""The Spectral State Space Model architecture."""
+"""The Spectral State Space Model architecture with attention."""
 
 import math
 
@@ -18,6 +18,7 @@ from models.stu.stu_utils import (
     compute_spectral, 
     compute_ar_y
 )
+from models.transformer.attn import CausalSelfAttention
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
@@ -26,7 +27,7 @@ from torch.nn import MSELoss
 
 
 @dataclass
-class SpectralSSMConfigs:
+class SpectralHybridConfigs:
     d_in: int = 37
     d_out: int = 37
     d_proj: int = 29
@@ -163,9 +164,9 @@ class MLP(nn.Module):
         return x
 
 
-class Block(nn.Module):
+class HybridBlock(nn.Module):
     """
-    A single block of the spectral SSM model composed of STU and MLP layers.
+    A single block of the hybrid spectral SSM model (spectral filtering + attention).
 
     Args:
         configs: Configuration object for STU and MLP layers
@@ -175,15 +176,19 @@ class Block(nn.Module):
     """
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
-        super(Block, self).__init__()
+        super(HybridBlock, self).__init__()
         self.rn_1 = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
         self.rn_2 = RMSNorm(configs.n_embd)
-        self.mlp = MLP(configs)
+        self.mlp_1 = MLP(configs)
+        self.attn = CausalSelfAttention(configs)
+        self.rn_3 = RMSNorm(configs.n_embd)
+        self.mlp_2 = MLP(configs)
+        self.rn_4 = RMSNorm(configs.n_embd)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the Block.
+        Forward pass of the hybrid spectral filtering + attention block.
 
         Args:
             x (torch.Tensor): Input tensor
@@ -192,19 +197,21 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp(self.rn_2(x))
+        x = x + self.mlp_1(self.rn_2(x))
+        x = x + self.attn(self.rn_3(x))
+        x = x + self.mlp_2(self.rn_4(x))
         return x
 
-class SpectralSSM(nn.Module):
+class SpectralHybrid(nn.Module):
     """
-    Model architecture based on stacked blocks of STU and MLP layers.
+    Model architecture based on stacked blocks of STU, attention, and MLP layers.
 
     Args:
         configs: Configuration object containing model hyperparameters.
     """
 
     def __init__(self, configs) -> None:
-        super(SpectralSSM, self).__init__()
+        super(SpectralHybrid, self).__init__()
         self.configs = configs
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
@@ -226,17 +233,26 @@ class SpectralSSM(nn.Module):
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
         
-        self.spectral_ssm = nn.ModuleDict(
+        self.hybrid = nn.ModuleDict(
             dict(
+                wpe=nn.Embedding(configs.sl, configs.n_embd),
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
-                    [Block(
+                    [HybridBlock(
                         self.configs, self.sigma, self.V, self.padded_sl
                     ) for _ in range(self.n_layers)]),
             )
         )
+        
         self.output = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
-
+        # Adjust output dims based on task and controller
+        self.d_out = configs.n_embd
+        if configs.controls["task"] == "mujoco-v1":
+            if configs.controls["controller"] == "Ant-v1":
+                self.d_out = 29
+            else:
+                self.d_out = 18
+                
         # Initialize all weights
         self.m_x = self.d_out**-0.5
         self.std = self.n_embd**-0.5
@@ -259,8 +275,8 @@ class SpectralSSM(nn.Module):
             - Tuple containing loss and metrics (if applicable)
         """
         _, sl, n_embd = inputs.size()
-        x = self.spectral_ssm.dropout(inputs)
-        for block in self.spectral_ssm.hidden:
+        x = self.hybrid.dropout(inputs)
+        for block in self.hybrid.hidden:
             x = block(x)
         preds = self.output(x)
 
@@ -281,7 +297,9 @@ class SpectralSSM(nn.Module):
             module (nn.Module): The module to initialize.
         """
         if isinstance(module, nn.Linear):
-            self.std *= (2 * self.n_layers) ** -0.5
+            if hasattr(module, "SCALE_INIT"):
+                # Scale by 4 to account for the sublayers
+                self.std *= (4 * self.configs.n_layers) ** -0.5
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -297,15 +315,21 @@ class SpectralSSM(nn.Module):
                 with torch.no_grad():
                     module.M_y[:, 1] = self.alpha * torch.eye(module.d_out)
 
-    def get_num_params(self):
+    def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
+
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
 
         Returns:
             int: The number of parameters in the model.
         """
-        num_params = sum(p.numel() for p in self.parameters())
-        return num_params
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.transformer.wpe.weight.numel()
+        return n_params
     
     def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
         """

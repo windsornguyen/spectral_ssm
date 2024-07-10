@@ -1,5 +1,0 @@
-Training completed for Mamba-2 on mujoco-v2 with Walker2D-v1 at: 2024-07-09 01:57:01.121984
-Best model step: 1055
-Best model validation loss: 12.0460
-Best model checkpoint saved at: checkpoints/mamba2-Walker2D-v1-model_step-1055-2024-07-09-01-56-24-48l.pt
-Best model's extra info data saved at: checkpoints/mamba2-Walker2D-v1-other_step-1055-2024-07-09-01-56-24-48l.pt

@@ -1,5 +1,7 @@
 import torch
 from prettytable import PrettyTable
+from utils.nearest_power_of_2 import nearest_power_of_2
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -28,25 +30,6 @@ def shift(u: torch.Tensor, k: int = 1) -> torch.Tensor:
     shifted = torch.roll(u, shifts=k, dims=1)
     shifted[:, :k] = 0
     return shifted
-
-
-@torch.jit.script
-def nearest_power_of_2(x: int) -> int:
-    """
-    Returns the smallest power of 2 that is greater than or equal to x. If x is already a power of 2,
-    it returns x itself. Otherwise, it returns the next higher power of 2.
-
-    Args:
-        x (int): The input integer for which the nearest power of 2 is to be found.
-
-    Returns:
-        int: The smallest power of 2 that is greater than or equal to x.
-    """
-    s = bin(x)
-    s = s.lstrip("-0b")
-    length = len(s)
-    return 1 << (length - 1) if x == 1 << (length - 1) else 1 << length
-
 
 
 def conv(u: torch.Tensor, phi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

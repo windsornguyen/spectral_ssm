@@ -9,10 +9,6 @@
 """
 Implementation of Root Mean Square Layer Normalization (RMSNorm).
 
-Based on the paper:
-"Root Mean Square Layer Normalization" (Zhang and Sennrich, 2019)
-https://arxiv.org/abs/1910.07467
-
 RMSNorm is a simplified version of Layer Normalization that only
 performs scaling, leading to improved performance and stability.
 """
@@ -20,17 +16,37 @@ performs scaling, leading to improved performance and stability.
 import torch
 import torch.nn as nn
 
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-8):
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Layer Normalization (RMSNorm).
+
+    Args:
+        dim (int): The dimension of the input tensor to be normalized.
+        eps (float, optional): A small value for numerical stability. Default: 1e-6
+        elementwise_affine (bool, optional): If True, learns an affine transform. Default: True
+
+    Shape:
+        - Input: (*, dim)
+        - Output: (*, dim)
+    
+    Reference:
+        "Root Mean Square Layer Normalization" (Zhang and Sennrich, 2019),
+        https://arxiv.org/abs/1910.07467.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5, elementwise_affine: bool = True):
         super().__init__()
+        self.dim = dim
         self.eps = eps
-        self.wt = nn.Parameter(torch.ones(dim))
+        self.elementwise_affine = elementwise_affine
+        self.weight = nn.Parameter(torch.ones(dim)) if elementwise_affine else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Compute root mean square
-        rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
-    
-        # Normalize and scale
-        x_norm = x / rms
+        assert x.shape[-1] == self.dim, f"Expected last dimension {self.dim}, but got {x.shape[-1]}"
+        output = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        if self.weight is not None:
+            output = output * self.weight
+        return output
 
-        return self.wt * x_norm
+    def __repr__(self):
+        return f"{self.__class__.__name__}(dim={self.dim}, eps={self.eps}, elementwise_affine={self.elementwise_affine})"

@@ -15,7 +15,7 @@ from utils.colors import Colors, colored_print
 
 # TODO: Write generic dataset downloading and saving script for the user.
 class Dataloader(Dataset):
-    def __init__(self, data, task, shift=1, preprocess=True, eps=1e-7):
+    def __init__(self, data, task, shift=1, preprocess=True, eps=1e-6):
         self.task = task
         self.shift = shift
         self.preprocess = preprocess
@@ -53,21 +53,16 @@ class Dataloader(Dataset):
 
     def __getitem__(self, index):
         if self.task in ["mujoco-v1", "mujoco-v2"]:
+            # MuJoCo-v1 and MuJoCo-v2 data are already offset by one
             x_t = torch.tensor(self.inputs[index], dtype=torch.float32)
             x_t_plus_1 = torch.tensor(self.targets[index], dtype=torch.float32)
             return x_t, x_t_plus_1
         elif self.task == "mujoco-v3":
+            # MuJoCo-v3 data does not come offset by one
             features = self.data[index]
-        else:
-            features = torch.cat(
-                (self.data[index]["x_t"], self.data[index]["x_t_plus_1"]),
-                dim=-1,
-            )
-
-        input_frames = features[: -self.shift]
-        target_frames = features[self.shift :]
-
-        return input_frames, target_frames
+            input_frames = features[:-self.shift]
+            target_frames = features[self.shift:]
+            return input_frames, target_frames
 
     def _calculate_statistics(self):
         if self.task == "mujoco-v3":
@@ -115,7 +110,7 @@ def get_dataloader(
     shuffle=True,
     pin_memory=False,
     distributed=True,
-    rank=0,
+    local_rank=0,
     world_size=1,
     device="cpu",
 ):
@@ -147,10 +142,6 @@ def get_dataloader(
 
 
 def split_data(dataset, train_ratio=0.8, random_seed=1337):
-    # TODO: Not sure if we need this, experiment to see if data is the same without
-    # Set the random seed for reproducibility
-    torch.manual_seed(random_seed)
-
     if isinstance(dataset, Dataloader) and dataset.task in ["mujoco-v1", "mujoco-v2"]:
         num_samples = len(dataset)
         indices = torch.randperm(num_samples)

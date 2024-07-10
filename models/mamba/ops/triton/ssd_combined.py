@@ -779,16 +779,16 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
         
         ## DEBUG ##
-        channel_dim = xBC.shape[-1]
-        print(f"dim: {dim}")
-        print(f"ngroups: {ngroups}")
-        print(f"dstate: {dstate}")
-        print(f"nheads: {nheads}")
-        print(f"headdim: {headdim}")
-        print(f"Channel dimension size (dim + ngroups * dstate * 2): {dim + ngroups * dstate * 2}")
-        print(f"Channel dimension size: {channel_dim}")
-        print(f"xBC shape: {xBC.shape}")
-        print(f"xBC strides: {xBC.stride()}")
+        # channel_dim = xBC.shape[-1]
+        # print(f"dim: {dim}")
+        # print(f"ngroups: {ngroups}")
+        # print(f"dstate: {dstate}")
+        # print(f"nheads: {nheads}")
+        # print(f"headdim: {headdim}")
+        # print(f"Channel dimension size (dim + ngroups * dstate * 2): {dim + ngroups * dstate * 2}")
+        # print(f"Channel dimension size: {channel_dim}")
+        # print(f"xBC shape: {xBC.shape}")
+        # print(f"xBC strides: {xBC.stride()}")
         ## DEBUG ##
 
         xBC_conv = rearrange(

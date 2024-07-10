@@ -32,6 +32,10 @@ class SwiGLU(nn.Module):
         dim (int): Input and output dimension.
         h_dim (int): Hidden dimension.
         bias (bool, optional): If false, additive biases will not be learned.
+    
+    Reference:
+        "GLU Variants Improve Transformer" (Shazeer, 2020),
+        https://arxiv.org/abs/2002.05202.
     """
 
     def __init__(self, dim, h_dim, bias=False):

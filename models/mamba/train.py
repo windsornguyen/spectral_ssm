@@ -222,8 +222,8 @@ def main() -> None:
 
     elif task["mujoco-v2"]:
         d_model: int = 18 if controller != "Ant-v1" else 29
-        d_state: int = 130
-        headdim: int = 1
+        d_state: int = 130 if controller == "HalfCheetah-v1" else 131
+        headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
         sl: int = 900
         configs = Mamba2Configs(
@@ -348,7 +348,7 @@ def main() -> None:
         shuffle=True,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
@@ -362,7 +362,7 @@ def main() -> None:
         shuffle=False,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
@@ -440,15 +440,15 @@ def main() -> None:
         }
 
     if main_process:
-        msg = f"\nLyla: We'll be training the Mamba-2 model on the {args.task} task with {controller}."
+        msg = f"\nLyla: We'll be training the Mamba-2 model on the {args.task} task with {controller}"
         if world_size > 1:
             colored_print(
-                f"{msg} {device} on rank {rank + 1}/{world_size}"
+                f"{msg} with {device} today on rank {rank + 1}/{world_size}"
                 f" utilizing {world_size} distributed processes.",
                 Colors.HEADER,
             )
         else:
-            colored_print(f"{msg} {device} today.", Colors.OKCYAN)
+            colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")

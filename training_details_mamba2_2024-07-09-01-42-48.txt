@@ -1,5 +1,0 @@
-Training completed for Mamba2 on mujoco-v2 with HalfCheetah-v1 at: 2024-07-09 01:44:05.887440
-Best model step: 2467
-Best model validation loss: 66.8167
-Best model checkpoint saved at: checkpoints/mamba2-HalfCheetah-v1-model_step-2467-2024-07-09-01-42-48-48l.pt
-Best model's extra info data saved at: checkpoints/mamba2-HalfCheetah-v1-other_step-2467-2024-07-09-01-42-48-48l.pt

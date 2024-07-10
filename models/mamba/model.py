@@ -390,8 +390,8 @@ class Mamba2(nn.Module):
         y = self._apply_ssm(x, dt, A, B, C, seq_idx, cu_sl, ssm_state, z, dt_limit_kwargs, inference_params)
         y = self.dropout(y)
 
-        if self.configs.rmsnorm:
-            y = self.norm(y, z)
+        # if self.configs.rmsnorm:
+        #     y = self.norm(y, z)
         if d_mlp > 0:
             y = torch.cat([F.silu(z0) * x0, y], dim=-1)
         out = self.out_proj(y)
@@ -506,8 +506,8 @@ class Mamba2(nn.Module):
         # SSM Step
         y = self._step_ssm(x, dt, A, B, C, ssm_state, z, dtype)
 
-        if self.configs.rmsnorm:
-            y = self.norm(y, z)
+        # if self.configs.rmsnorm:
+        #     y = self.norm(y, z)
         if d_mlp > 0:
             y = torch.cat([F.silu(z0) * x0, y], dim=-1)
         out = self.out_proj(y)

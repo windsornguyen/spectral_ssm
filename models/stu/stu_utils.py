@@ -6,6 +6,7 @@
 """Utility functions for spectral SSM."""
 
 import torch
+from utils.nearest_power_of_2 import nearest_power_of_2
 
 
 @torch.jit.script
@@ -118,6 +119,7 @@ def compute_ar_u(M_u: torch.Tensor, u_t: torch.Tensor) -> torch.Tensor:
     """
     k_u = M_u.shape[0]
 
+    # TODO: Do we shift by another parameter or by k_u? i.e. Do we shift only if use_ar_u?
     # Sum M^u_i \hat_{u}_{t+1-i} from i=1 to i=k_u
     u_shifted = torch.stack([shift(u_t, i) for i in range(k_u)], dim=1)
     ar_u = torch.einsum("bksi,koi->bso", u_shifted, M_u)
@@ -169,7 +171,6 @@ def compute_ar_y(M_y: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
     |  0      0      I    |     | y_{t-3}      |     | 0             |   | y_{t-2}      |
     +---------------------+     +--------------+     +---------------+   +--------------+
     """
-    M_y = M_y.permute(1, 0, 2) # TODO: Fix shapes so you don't have to do this
     d_out, k_y, _ = M_y.shape
     bsz, sl, _ = y_t.shape
 
@@ -177,7 +178,7 @@ def compute_ar_y(M_y: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
     #      Identity has (k - 1) rows => [(k - 1) * d_out, k * d_out]
     eye = torch.eye((k_y - 1) * d_out, k_y * d_out, dtype=y_t.dtype, device=y_t.device)
     A = M_y.reshape(d_out, k_y * d_out) # <-- Ensure matmul-compatible with eye
-    A = torch.cat([A, eye], dim=0)   # <-- Stack A atop the identity matrices
+    A = torch.cat([A, eye], dim=0)      # <-- Stack A atop the identity matrices
     A = A.unsqueeze(0).expand(bsz, k_y * d_out, k_y * d_out) # <-- Add bsz dim for bmm
 
     # (2). Prepare state with padding
@@ -198,26 +199,25 @@ def compute_ar_y(M_y: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
     return torch.stack(ys, dim=1)
 
 
-def nearest_power_of_2(x: int) -> int:
+@torch.jit.script
+def preconvolve(phi: torch.Tensor, sl: int) -> tuple[torch.Tensor, int]:
     """
-    Returns the smallest power of 2 that is greater than or equal to x.
-    If x is already a power of 2, it returns x itself.
-    Otherwise, it returns the next higher power of 2.
+    Precomputes the FFT of phi for use in the conv function.
 
     Args:
-        x (int): The input integer.
+        phi (torch.Tensor): Top K eigenvectors of shape [sl, K].
+        sl (int): Original sequence length.
 
     Returns:
-        int: The smallest power of 2 that is greater than or equal to x.
+        tuple[torch.Tensor, int]: Precomputed FFT of phi, padded sequence length.
     """
-    s = bin(x)
-    s = s.lstrip("-0b")
-    length = len(s)
-    return 1 << (length - 1) if x == 1 << (length - 1) else 1 << length
-
+    _, K = phi.shape
+    n = nearest_power_of_2(sl * 2 - 1)
+    phi = phi.view(1, -1, K, 1)
+    return torch.fft.rfft(phi, n=n, dim=1), n
 
 @torch.jit.script
-def conv(u: torch.Tensor, phi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def conv(u: torch.Tensor, V: torch.Tensor, n: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Implements the FFT convolution of the input sequences into the Hankel 
     spectral basis, as described in Section 3 of the paper.
@@ -227,35 +227,27 @@ def conv(u: torch.Tensor, phi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
     Args:
         u (torch.Tensor): Input of shape [bsz, sl, d].
-        phi (torch.Tensor): Top K eigenvectors of shape [sl, K].
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors of shape [1, n//2+1, K, 1].
+        n (int): Padded sequence length for FFT.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Feature tensors U⁺ and U⁻ of shape [bsz, sl, K, d].
     """
     bsz, sl, d = u.shape
-    _, K = phi.shape
+    _, _, K, _ = V.shape
 
-    # Round sequence length to the nearest power of 2 for efficient convolution
-    n = nearest_power_of_2(sl * 2 - 1)
+    # Prepare u for both positive and negative convolutions
+    u_plus = u.view(bsz, sl, 1, d).expand(bsz, sl, K, d)
+    u_minus = u_plus.clone()
+    u_minus[:, 1::2] *= -1
 
-    # Add bsz and d dims to phi and u and expand to the return shape
-    phi = phi.view(1, -1, K, 1).expand(bsz, -1, K, d)
-    u = u.view(bsz, -1, 1, d).expand(bsz, -1, K, d)
+    # Compute U⁺ and U⁻
+    U_plus = torch.fft.rfft(u_plus, n=n, dim=1)
+    U_minus = torch.fft.rfft(u_minus, n=n, dim=1)
 
-    # Compute U⁺
-    V = torch.fft.rfft(phi, n=n, dim=1)
-    U = torch.fft.rfft(u, n=n, dim=1)
-    U_plus = torch.fft.irfft(V * U, n=n, dim=1)[:, :sl]
-
-    # Generate alternating signs tensor, (-1)^i of length sl, match dims of u
-    alt = torch.ones(sl, device=u.device)
-    alt[1::2] = -1  # Replace every other element with -1, starting from index 1
-    alt = alt.view(1, sl, 1, 1).expand_as(u)
-
-    # Compute U⁻
-    u_alt = u * alt
-    U_alt = torch.fft.rfft(u_alt, n=n, dim=1)
-    U_minus = torch.fft.irfft(V * U_alt, n=n, dim=1)[:, :sl]
+    # Perform the convolutions!
+    U_plus = torch.fft.irfft(V * U_plus, n=n, dim=1)[:, :sl]
+    U_minus = torch.fft.irfft(V * U_minus, n=n, dim=1)[:, :sl]
 
     return U_plus, U_minus
 
@@ -263,10 +255,13 @@ def conv(u: torch.Tensor, phi: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 @torch.jit.script
 def compute_spectral(
     inputs: torch.Tensor,
-    eigh: tuple[torch.Tensor, torch.Tensor],
+    sigma: torch.Tensor,
+    V: torch.Tensor,
     M_phi_plus: torch.Tensor,
     M_phi_minus: torch.Tensor,
-    M_y: torch.Tensor = None,
+    M_y: torch.Tensor,
+    n: int,
+    use_ar_y: bool
 ) -> torch.Tensor:
     """
     Computes the spectral component of the STU or AR-STU model, as described
@@ -277,24 +272,25 @@ def compute_spectral(
 
     Args:
         inputs (torch.Tensor): A tensor of shape [bsz, sl, d_in].
-        eigh (tuple[torch.Tensor, torch.Tensor]): Eigenvalues [K,] and eigenvectors [sl, K].
+        sigma (torch.Tensor): Eigenvalues tensor of shape [K,].
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors of shape [1, n//2+1, K, 1].
         M_phi_plus (torch.Tensor): Positive spectral filter weights [K, d_out, d_in].
         M_phi_minus (torch.Tensor): Negative spectral filter weights [K, d_out, d_in].
-        M_y (torch.Tensor, optional): Autoregressive weights for AR-STU [d_out, k_y, d_out].
+        M_y (torch.Tensor): Autoregressive weights for AR-STU [d_out, k_y, d_out].
+        n (int): Padded sequence length for FFT.
+        use_ar_y (bool): Whether to use autoregressive on the output sequence.
 
     Returns:
         torch.Tensor: The spectral component tensor of shape [bsz, sl, d_out].
     """
-    M_y = M_y.permute(1, 0, 2) # TODO: Fix shapes so you don't have to do this
-    sigma, phi = eigh
-    _, K = phi.shape
+    k_y = M_y.shape[1]
+    K = M_phi_plus.shape[0]
 
     # Compute U⁺ and U⁻
-    U_plus, U_minus = conv(inputs, phi)  # -> tuple of [bsz, sl, K, d_in]
+    U_plus, U_minus = conv(inputs, V, n)  # -> tuple of [bsz, sl, K, d_in]
 
     # Shift U⁺ and U⁻ k_y time steps
-    if M_y is not None:
-        k_y = M_y.shape[1]
+    if use_ar_y: # TODO: Do we shift by another parameter or by k_y? i.e. Do we shift only if use_ar_y?
         U_plus, U_minus = shift(U_plus, k_y), shift(U_minus, k_y)
 
     # Perform spectral filter on U⁺ and U⁻ w/ sigma

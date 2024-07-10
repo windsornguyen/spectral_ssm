@@ -25,7 +25,7 @@ from losses.loss_walker import Walker2DLoss
 from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
-from models.stu.model import SSSM, SSSMConfigs
+from models.stu.model import SpectralSSM, SpectralSSMConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
@@ -137,15 +137,17 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 6
-    scale: int = 2
+    n_layers: int = 2
+    scale: int = 4
     bias: bool = False
     dropout: float = 0.10
-    num_eigh: int = 24
+    num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
+    use_ar_y: bool = False
+    use_ar_u: bool = False
     use_hankel_L: bool = False
 
     if not task["mujoco-v3"]:
@@ -170,7 +172,7 @@ def main() -> None:
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 900
 
-        configs = SSSMConfigs(
+        configs = SpectralSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
@@ -181,13 +183,16 @@ def main() -> None:
             bias=bias,
             dropout=dropout,
             num_eigh=num_eigh,
-            k_u=k_u,
             k_y=k_y,
+            k_u=k_u,
             learnable_m_y=learnable_m_y,
             alpha=alpha,
+            use_ar_y=use_ar_y,
+            use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
+            device=device,
         )
 
     elif task["mujoco-v2"]:
@@ -196,7 +201,7 @@ def main() -> None:
         d_out = n_embd
         d_proj = n_embd
         sl: int = 900
-        configs = SSSMConfigs(
+        configs = SpectralSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
@@ -207,13 +212,16 @@ def main() -> None:
             bias=bias,
             dropout=dropout,
             num_eigh=num_eigh,
-            k_u=k_u,
             k_y=k_y,
+            k_u=k_u,
             learnable_m_y=learnable_m_y,
             alpha=alpha,
+            use_ar_y=use_ar_y,
+            use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
+            device=device,
         )
 
     elif task["mujoco-v3"]:
@@ -225,7 +233,7 @@ def main() -> None:
         d_proj = n_embd
         sl: int = 300
 
-        configs = SSSMConfigs(
+        configs = SpectralSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
             d_in=d_in,
@@ -236,20 +244,24 @@ def main() -> None:
             bias=bias,
             dropout=dropout,
             num_eigh=num_eigh,
-            k_u=k_u,
             k_y=k_y,
+            k_u=k_u,
             learnable_m_y=learnable_m_y,
             alpha=alpha,
+            use_ar_y=use_ar_y,
+            use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v3", "controller": controller},
+            device=device,
         )
 
-    model = SSSM(configs).to(device)
+    model = SpectralSSM(configs).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
     stu_model = model.module if world_size > 1 else model
+    flops, mfu = None, None
 
     # Data loader hyperparameters
     bsz: int = 8
@@ -293,7 +305,7 @@ def main() -> None:
         shuffle=True,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
@@ -307,7 +319,7 @@ def main() -> None:
         shuffle=False,
         pin_memory=True,
         distributed=world_size > 1,
-        rank=local_rank,
+        local_rank=local_rank,
         world_size=world_size,
         device=device,
     )
@@ -385,15 +397,15 @@ def main() -> None:
         }
 
     if main_process:
-        msg = f"\nLyla: We'll be training the SSSM model on the {args.task} task with {controller}."
+        msg = f"\nLyla: We'll be training the spectral SSM model on the {args.task} task with {controller}"
         if world_size > 1:
             colored_print(
-                f"{msg} {device} on rank {rank + 1}/{world_size}"
+                f"{msg} with {device} today on rank {rank + 1}/{world_size}"
                 f" utilizing {world_size} distributed processes.",
                 Colors.HEADER,
             )
         else:
-            colored_print(f"{msg} {device} today.", Colors.OKCYAN)
+            colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -416,7 +428,7 @@ def main() -> None:
             if relative_step % (eval_period // dilation) == 0 or last_step:
                 if main_process:
                     colored_print(
-                        f"\nLyla: Evaluating the SSSM model at step {relative_step}.",
+                        f"\nLyla: Evaluating the spectral SSM model at step {relative_step}.",
                         Colors.OKCYAN,
                     )
                 val_metrics = training_run.evaluate(val_loader)
@@ -466,7 +478,7 @@ def main() -> None:
                         )
 
                         colored_print(
-                            f"Lyla: Wow! We have a new personal best for the SSSM model at step {relative_step}. "
+                            f"Lyla: Wow! We have a new personal best for the spectral SSM model at step {relative_step}. "
                             f"The validation loss improved to: {val_metrics['loss']:.4f}! "
                             f"Model checkpoint saved as {model_path} and other data saved as {extra_info_path}",
                             Colors.OKGREEN,
@@ -474,24 +486,35 @@ def main() -> None:
                     else:
                         patient_counter += 1
                         colored_print(
-                            f"Lyla: No improvement in validation loss for the SSSM model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
+                            f"Lyla: No improvement in validation loss for the spectral SSM model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
                             Colors.WARNING,
                         )
 
                 if patient_counter >= patience:
                     if main_process:
                         colored_print(
-                            f"Lyla: We have reached the patience limit of {patience} for the SSSM model. Stopping the training early at step {relative_step}...",
+                            f"Lyla: We have reached the patience limit of {patience} for the spectral SSM model. Stopping the training early at step {relative_step}...",
                             Colors.FAIL,
                         )
                     break
 
             # Logging
-            if main_process and relative_step % 5 == 0:
+            if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
+                
+                if 'flops' in train_results:
+                    flops = train_results['flops']
+                
+                if 'mfu' in train_results:
+                    mfu = train_results['mfu']
+                
+                flops_str = f"FLOPS/traj: {flops:.4f}" if flops is not None else "FLOPS/traj: N/A"
+                mfu_str = f"Est. MFU: {mfu:.4f}" if mfu is not None else "Est. MFU: N/A"
+                
                 colored_print(
                     f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
-                    f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f}",
+                    f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f} | "
+                    f"{flops_str} | {mfu_str}",
                     Colors.OKBLUE,
                 )
 
@@ -535,7 +558,7 @@ def main() -> None:
                 other_data = torch.load(best_model_extra_info_path, map_location="cpu")
                 training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-            print("\nLyla: Here's the best model information for the SSSM model:")
+            print("\nLyla: Here's the best model information for the spectral SSM model:")
             print(f"    Best model at step {best_model_step}")
             print(f"    Best model validation loss: {best_val_loss:.4f}")
             print(f"    Best model checkpoint saved at: {best_model_path}")
@@ -545,7 +568,7 @@ def main() -> None:
             training_details = f"training_details_sssm_{timestamp}.txt"
             with open(training_details, "w") as f:
                 f.write(
-                    f"Training completed for SSSM on {args.task} with {controller} at: {datetime.now()}\n"
+                    f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
                 )
                 f.write(f"Best model step: {best_model_step}\n")
                 f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
@@ -554,11 +577,11 @@ def main() -> None:
                     f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
                 )
             print(
-                f"Lyla: Congratulations on completing the training run for the SSSM model! Details are saved in {training_details}."
+                f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
             )
         else:
             colored_print(
-                "\nLyla: No best checkpoint found for the SSSM model. The model did not improve during training.",
+                "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
                 Colors.WARNING,
             )
 

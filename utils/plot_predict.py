@@ -64,7 +64,7 @@ num_preds, time_steps, num_features = sssm.shape
 print(sssm.shape, transformer.shape, ground_truth.shape)
 assert (
     sssm.shape == transformer.shape == ground_truth.shape
-), "The shapes of SSSM, Transformer, and Ground Truth are not the same."
+), "The shapes of the spectral SSM, the Transformer, and the ground truth are not the same!"
 
 # Choose features to plot the predicted states (embeddings) v. ground truth states
 if args.task in ["mujoco-v1", "mujoco-v2"]:
@@ -80,7 +80,7 @@ else:
     raise ValueError("Invalid task")
 
 # Plotting
-colors = ["b", "g", "r"]  # blue for SSSM, green for Transformer, red for Ground Truth
+colors = ["b", "g", "r"]  # blue for spectral SSM, green for Transformer, red for Ground Truth
 for pred_idx in range(num_preds):
     # Compute and plot the mean losses
     print(f"Plotting mean loss for prediction {pred_idx + 1}")
@@ -96,7 +96,7 @@ for pred_idx in range(num_preds):
     ax.plot(
         range(time_steps - 1),
         sssm_mean_loss[: time_steps - 1],
-        label=f"Prediction {pred_idx+1} SSSM Mean Loss",
+        label=f"Prediction {pred_idx+1} spectral SSM Mean Loss",
         color=colors[0],
         linewidth=2,
     )
@@ -147,7 +147,7 @@ for pred_idx in range(num_preds):
         axs[feature_idx, 0].plot(
             range(time_steps - 1),
             sssm[pred_idx, : time_steps - 1, feature_idx],
-            label="SSSM",
+            label="Spectral SSM",
             color=colors[0],
             linewidth=2,
         )
@@ -177,7 +177,7 @@ for pred_idx in range(num_preds):
         axs[feature_idx, 1].plot(
             range(time_steps - 1),
             sssm_loss[: time_steps - 1],
-            label="SSSM Loss",
+            label="Spectral SSM Loss",
             color=colors[0],
             linewidth=2,
         )
