@@ -3,7 +3,7 @@
 # File: train.py
 # =============================================================================#
 
-"""Training loop for hybrid STU-attention sequence prediction."""
+"""Training loop for STU-Attention hybrid sequence prediction."""
 
 
 import argparse
@@ -186,7 +186,7 @@ def main() -> None:
 
     # Shared hyperparameters
     # STU settings
-    num_eigh: int = 24
+    num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
     learnable_m_y: bool = True
@@ -418,8 +418,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
+        model="hybrid",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
@@ -432,8 +434,10 @@ def main() -> None:
     )
 
     val_loader = get_dataloader(
+        model="hybrid",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,

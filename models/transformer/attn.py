@@ -5,8 +5,6 @@
 
 """Vanilla Self-Attention."""
 
-import math
-
 import torch
 import torch.nn as nn
 
@@ -42,7 +40,7 @@ class CausalSelfAttention(nn.Module):
         self.n_heads = configs.n_heads
 
         # Flash attention makes the GPUs go brrr, but support is only in PyTorch >= 2.0
-        has_flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        has_flash_attn = hasattr(nn.functional, "scaled_dot_product_attention")
         use_flash_attn = has_flash_attn and configs.flash_attn
         self.flash_attn = use_flash_attn
 
@@ -92,7 +90,7 @@ class CausalSelfAttention(nn.Module):
         # Causal self-attention; self-attend: (bsz, nh, sl, hs) x (bsz, nh, hs, sl) -> (B, nh, sl, sl)
         if self.flash_attn:
             # Efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(
+            y = nn.functional.scaled_dot_product_attention(
                 q,
                 k,
                 v,
@@ -105,7 +103,7 @@ class CausalSelfAttention(nn.Module):
             q = q * k.size(-1) ** -0.5
             att = q @ k.transpose(-2, -1)
             att = att.masked_fill(self.mask[:, :, :sl, :sl] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
+            att = nn.Functional.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (bsz, nh, sl, sl) x (bsz, nh, sl, hs) -> (bsz, nh, sl, hs)
 

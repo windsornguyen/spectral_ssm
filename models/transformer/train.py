@@ -186,7 +186,7 @@ def main() -> None:
 
     # Shared hyperparameters
     n_layers: int = 2
-    scale: int = 4
+    scale: int = 16
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
     dropout: float = 0.1 # Convert all these into argparses eventually
@@ -256,6 +256,7 @@ def main() -> None:
             controls={"task": "mujoco-v2", "controller": controller},
             device=device,
             
+            # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
             dilated_ratios=dilated_ratios,
@@ -286,6 +287,7 @@ def main() -> None:
             controls={"task": "mujoco-v3", "controller": controller},
             device=device,
 
+            # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
             dilated_ratios=dilated_ratios,
@@ -339,8 +341,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
+        model="transformer",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
@@ -353,8 +357,10 @@ def main() -> None:
     )
 
     val_loader = get_dataloader(
+        model="transformer",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,

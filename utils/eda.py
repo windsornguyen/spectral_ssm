@@ -5,8 +5,8 @@ from sklearn.model_selection import train_test_split
 
 # Load the input and target data
 # controller = "Walker2D-v1"
-input_file = f"/scratch/gpfs/mn4560/ssm/testing/raw_inputs.npy"
-target_file = f"/scratch/gpfs/mn4560/ssm/testing/raw_targets.npy"
+input_file = f"data/mujoco-v1/Walker2D-v1/raw_inputs.npy"
+target_file = f"data/mujoco-v1/Walker2D-v1/raw_targets.npy"
 # # Ant (in, out) dims: (37, 29)
 # # Walker2D (in, out)  dims: (24, 18)
 # # HalfCheetah (in, out)  dims: (24, 18)
@@ -54,14 +54,10 @@ print(f"Train inputs shape: {X_train.shape}, train targets shape: {y_train.shape
 print(f"Val inputs shape: {X_val.shape}, val targets shape: {y_val.shape}")
 
 # Save the split data to .npy files
-dataset = f"/scratch/gpfs/mn4560/ssm/utils/"
-data_dir = os.path.join("data", dataset)
-os.makedirs(data_dir, exist_ok=True)
-
-np.save(os.path.join(data_dir, "train_inputs.npy"), X_train)
-np.save(os.path.join(data_dir, "train_targets.npy"), y_train)
-np.save(os.path.join(data_dir, "val_inputs.npy"), X_val)
-np.save(os.path.join(data_dir, "val_targets.npy"), y_val)
+np.save("data/mujoco-v1/Walker2D-v1/train_inputs.npy", X_train)
+np.save("data/mujoco-v1/Walker2D-v1/train_targets.npy", y_train)
+np.save("data/mujoco-v1/Walker2D-v1/val_inputs.npy", X_val)
+np.save("data/mujoco-v1/Walker2D-v1/val_targets.npy", y_val)
 
 
 # # Modified function to load data from the new .npy files

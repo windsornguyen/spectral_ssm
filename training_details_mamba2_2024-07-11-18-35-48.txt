@@ -1,0 +1,5 @@
+Training completed for Mamba-2 on mujoco-v2 with Ant-v1 at: 2024-07-11 18:36:26.584937
+Best model step: 1175
+Best model validation loss: 2.0113
+Best model checkpoint saved at: checkpoints/mamba2-Ant-v1-model_step-1175-2024-07-11-18-35-48-48l.pt
+Best model's extra info data saved at: checkpoints/mamba2-Ant-v1-other_step-1175-2024-07-11-18-35-48-48l.pt

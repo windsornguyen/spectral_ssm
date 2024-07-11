@@ -3,7 +3,7 @@
 # File: plot_predict.py
 # =============================================================================#
 
-"""Plotting script for STU v. Transformer sequence prediction."""
+"""Plotting script for spectral SSM v. Transformer sequence prediction."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -48,6 +48,8 @@ try:
     transformer_ground_truth = load_data(
         f"transformer_{args.controller}_{args.task}_ground_truths.npy"
     )
+    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses.npy")
+    transformer_losses = load_data(f"transformer_{args.controller}_{args.task}_losses.npy")
 except FileNotFoundError as e:
     print(f"Error loading data: {e}")
     exit(1)
@@ -64,7 +66,7 @@ num_preds, time_steps, num_features = sssm.shape
 print(sssm.shape, transformer.shape, ground_truth.shape)
 assert (
     sssm.shape == transformer.shape == ground_truth.shape
-), "The shapes of the spectral SSM, the Transformer, and the ground truth are not the same!"
+), "The shapes of Spectral SSM, Transformer, and Ground Truths are not the same."
 
 # Choose features to plot the predicted states (embeddings) v. ground truth states
 if args.task in ["mujoco-v1", "mujoco-v2"]:
@@ -80,7 +82,7 @@ else:
     raise ValueError("Invalid task")
 
 # Plotting
-colors = ["b", "g", "r"]  # blue for spectral SSM, green for Transformer, red for Ground Truth
+colors = ["b", "g", "r"]  # blue for Spectral SSM, green for Transformer, red for Ground Truth
 for pred_idx in range(num_preds):
     # Compute and plot the mean losses
     print(f"Plotting mean loss for prediction {pred_idx + 1}")
@@ -88,31 +90,32 @@ for pred_idx in range(num_preds):
     # One figure for each prediction
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    sssm_mean_loss = np.mean(np.abs(ground_truth[pred_idx] - sssm[pred_idx]), axis=1)
-    transformer_mean_loss = np.mean(
-        np.abs(ground_truth[pred_idx] - transformer[pred_idx]), axis=1
-    )
+    # sssm_mean_loss = np.mean(np.abs(ground_truth[pred_idx] - sssm[pred_idx]), axis=1)
+    # transformer_mean_loss = np.mean(
+    #     np.abs(ground_truth[pred_idx] - transformer[pred_idx]), axis=1
+    # )
 
     ax.plot(
         range(time_steps - 1),
-        sssm_mean_loss[: time_steps - 1],
-        label=f"Prediction {pred_idx+1} spectral SSM Mean Loss",
+        sssm_losses[pred_idx, : time_steps - 1],
+        label=f"Prediction {pred_idx+1} Spectral SSM Mean Loss",
         color=colors[0],
         linewidth=2,
     )
     ax.plot(
         range(time_steps - 1),
-        transformer_mean_loss[: time_steps - 1],
+        transformer_losses[pred_idx, : time_steps - 1],
         label=f"Prediction {pred_idx+1} Transformer Mean Loss",
         color=colors[1],
         linewidth=2,
     )
+
     ax.legend()
     ax.set_xlabel("Time Step")
     ax.set_ylabel("Mean Absolute Error")
     ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
     # Save the mean loss figures
-    plt.savefig(f"mean_losses_preds_{pred_idx+1}_{args.controller}.png")
+    plt.savefig(f"plots/losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}.png")
     plt.close(fig)
 
 # Perform PCA
@@ -132,11 +135,11 @@ if args.task == "mujoco-v3":
 for pred_idx in range(num_preds):
     print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
     # One figure for each prediction
-    fig, axs = plt.subplots(n_components, 2, figsize=(15, 5 * n_components))
+    fig, axs = plt.subplots(n_components, 1, figsize=(15, 5 * n_components))
 
     # Plot the predicted states (embeddings) and ground truth states
     for feature_idx in range(n_components):
-        axs[feature_idx, 0].plot(
+        axs[feature_idx].plot(
             range(time_steps - 1),
             ground_truth[pred_idx, : time_steps - 1, feature_idx],
             label="Ground Truth",
@@ -144,61 +147,42 @@ for pred_idx in range(num_preds):
             linewidth=2,
             linestyle="--",
         )
-        axs[feature_idx, 0].plot(
+        axs[feature_idx].plot(
             range(time_steps - 1),
             sssm[pred_idx, : time_steps - 1, feature_idx],
             label="Spectral SSM",
             color=colors[0],
             linewidth=2,
         )
-        axs[feature_idx, 0].plot(
+        axs[feature_idx].plot(
             range(time_steps - 1),
             transformer[pred_idx, : time_steps - 1, feature_idx],
             label="Transformer",
             color=colors[1],
             linewidth=2,
         )
-        axs[feature_idx, 0].set_xlabel("Time Step")
-        axs[feature_idx, 0].set_ylabel(f"Feature {feature_idx+1} Value")
-        axs[feature_idx, 0].set_title(
+        axs[feature_idx].set_xlabel("Time Step")
+        axs[feature_idx].set_ylabel(f"Feature {feature_idx+1} Value")
+        axs[feature_idx].set_title(
             f"Prediction {pred_idx+1}, Feature {feature_idx+1}"
         )
-        axs[feature_idx, 0].legend()
+        axs[feature_idx].legend()
 
-        # Plot the Feature losses
-        sssm_loss = np.abs(
-            ground_truth[pred_idx, :, feature_idx] - sssm[pred_idx, :, feature_idx]
-        )
-        transformer_loss = np.abs(
-            ground_truth[pred_idx, :, feature_idx]
-            - transformer[pred_idx, :, feature_idx]
-        )
-
-        axs[feature_idx, 1].plot(
-            range(time_steps - 1),
-            sssm_loss[: time_steps - 1],
-            label="Spectral SSM Loss",
-            color=colors[0],
-            linewidth=2,
-        )
-        axs[feature_idx, 1].plot(
-            range(time_steps - 1),
-            transformer_loss[: time_steps - 1],
-            label="Transformer Loss",
-            color=colors[1],
-            linewidth=2,
-        )
-        axs[feature_idx, 1].set_xlabel("Time Step")
-        axs[feature_idx, 1].set_ylabel("Absolute Error")
-        axs[feature_idx, 1].set_title(
-            f"Loss for Prediction {pred_idx+1}, Feature {feature_idx+1}"
-        )
-        axs[feature_idx, 1].legend()
+        # # Plot the Feature losses
+        # sssm_loss = np.abs(
+        #     ground_truth[pred_idx, :, feature_idx] - sssm[pred_idx, :, feature_idx]
+        # )
+        # transformer_loss = np.abs(
+        #     ground_truth[pred_idx, :, feature_idx]
+        #     - transformer[pred_idx, :, feature_idx]
+        # )
 
     plt.suptitle(
-        f"Predictions and Losses for {args.controller} on {args.task}", fontsize=16
+        f"Predictions for {args.controller} on {args.task}", fontsize=16
     )
     plt.tight_layout()
+
     # Save the figures
-    plt.savefig(f"preds_{pred_idx+1}_{args.controller}.png")
+    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}.png")
+    plt.show()
     plt.close(fig)

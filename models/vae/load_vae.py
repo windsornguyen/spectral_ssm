@@ -12,11 +12,11 @@ import numpy as np
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1, groups=in_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.bn2 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU()
+        self.silu = nn.SiLU()
         self.downsample = (
             nn.Conv2d(in_channels, out_channels, 1)
             if in_channels != out_channels
@@ -26,9 +26,9 @@ class ResBlock(nn.Module):
     def forward(self, x):
         print(f"ResBlock input shape: {x.shape}")
         identity = self.downsample(x)
-        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.silu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
-        result = self.relu(out + identity)
+        result = self.silu(out + identity)
         print(f"ResBlock output shape: {result.shape}")
         return result
 
@@ -49,7 +49,7 @@ class VAE(nn.Module):
             ResBlock(256, 256),
             nn.Flatten(),
             nn.Linear(256 * 30 * 30, 512),
-            nn.ReLU(),
+            nn.SiLU(),
         )
         self.fc_mu = nn.Linear(512, latent_dim)
         self.fc_logvar = nn.Linear(512, latent_dim)
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     model.eval()
     print("Model loaded and set to eval mode")
 
-    video_dir = "../../data/mujoco-v3/Ant-v1/val"
+    video_dir = "../../data/vae/Ant-v1/testing_val"
     print(f"Loading frame from: {video_dir}")
     frame = load_video_frame(video_dir).to(device)
     print(f"Frame loaded, shape: {frame.shape}, device: {frame.device}")

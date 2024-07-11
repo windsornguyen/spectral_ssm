@@ -170,7 +170,7 @@ def main() -> None:
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = d_in    # before projection d_in = d_out
         d_proj: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 900
+        sl: int = 1000
 
         configs = SpectralSSMConfigs(
             n_layers=n_layers,
@@ -200,7 +200,7 @@ def main() -> None:
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
         d_proj = n_embd
-        sl: int = 900
+        sl: int = 1000
         configs = SpectralSSMConfigs(
             n_layers=n_layers,
             n_embd=n_embd,
@@ -297,9 +297,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
-        # TODO: Put model here in new dataloader
+        model="spectral_ssm",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
@@ -312,9 +313,10 @@ def main() -> None:
     )
 
     val_loader = get_dataloader(
-        # TODO: Put model here in new dataloader
+        model="spectral_ssm",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,

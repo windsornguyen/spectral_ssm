@@ -145,7 +145,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -163,6 +163,45 @@ class MLP(nn.Module):
         return x
 
 
+class GatedMLP(nn.Module):
+    """
+    Gated Multi-layer perceptron network using SiLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            n_embd (int): Input and output embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.in_features = configs.n_embd
+        self.out_features = configs.n_embd
+        self.hidden_features = int(configs.scale * configs.n_embd)
+
+        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.activation = torch.nn.functional.silu
+        self.dropout = nn.Dropout(configs.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the GatedMLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        y = self.fc1(x)
+        y, gate = y.chunk(2, dim=-1)
+        y = y * self.activation(gate)
+        y = self.fc2(y)
+        return self.dropout(y)
+
 class Block(nn.Module):
     """
     A single block of the spectral SSM model composed of STU and MLP layers.
@@ -177,8 +216,9 @@ class Block(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
         self.rn_1 = RMSNorm(configs.n_embd)
-        self.stu = STU(configs, sigma, V, padded_sl)
         self.rn_2 = RMSNorm(configs.n_embd)
+        self.stu = STU(configs, sigma, V, padded_sl)
+        self.rn_3 = RMSNorm(configs.n_embd)
         self.mlp = MLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -191,9 +231,10 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp(self.rn_2(x))
-        return x
+        z = self.rn_1(x)
+        x = z + self.stu(self.rn_2(x))
+        x = x + self.mlp(self.rn_3(x))
+        return x + z  
 
 class SpectralSSM(nn.Module):
     """
@@ -271,7 +312,7 @@ class SpectralSSM(nn.Module):
             return preds, (loss, metrics)
         else:
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, (loss,)
+            return preds, loss
 
     def _init_weights(self, module):
         """
@@ -430,7 +471,6 @@ class SpectralSSM(nn.Module):
         init: int = 950,
         steps: int = 50,
         rollout_steps: int = 20,
-        window_size: int = 900,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -455,36 +495,39 @@ class SpectralSSM(nn.Module):
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, _, d_out = targets.size()
+        num_traj, total_steps, d_out = targets.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
-        # To track what the model hallucinates
-        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
+        # Track model hallucinations
+        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        # To track the MSE loss between rollout vs ground truth for each trajectory
+        # Track loss between rollout vs ground truth
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
+        # Initialize cost function
+        mse_loss = MSELoss()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step # Start at init
-            window_start = current_step - window_size
+            current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, window_start:current_step], targets[:, window_start:current_step]
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
             rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
-            mse_loss = MSELoss()
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
-            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
+            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
             # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
             # next_input = torch.cat([next_input, next_action], dim=2)
             # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-        return hallucinated_steps, (avg_loss, traj_losses)
+        return predicted_steps, (avg_loss, traj_losses)

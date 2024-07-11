@@ -77,7 +77,7 @@ class TransformerBlock(nn.Module):
 
 @dataclass
 class TransformerConfigs:
-    n_layers: int = 4
+    n_layers: int = 2
     n_embd: int = 512  # Embedding dimension
     n_heads: int = 16  # Constraint: n_heads % n_embd == 0
     sl: int = 300  # Sequence length
@@ -224,7 +224,7 @@ class Transformer(nn.Module):
             return preds, (loss, metrics)
         else:
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, (loss,)
+            return preds, loss
 
     # TODO: Not sure when/where this could be used, but we'd like to use it!
     # TODO: Also need to fix this function to make sure it's correct.
@@ -283,7 +283,6 @@ class Transformer(nn.Module):
         init: int = 950,
         steps: int = 50,
         rollout_steps: int = 20,
-        window_size: int = 900,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -308,39 +307,39 @@ class Transformer(nn.Module):
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, _, d_in = inputs.size()
-        _, _, d_out = targets.size()
+        num_traj, total_steps, d_out = targets.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
-        # To track what the model hallucinates
-        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
+        # Track model hallucinations
+        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        # To track the MSE loss between rollout vs ground truth for each trajectory
+        # Track loss between rollout vs ground truth
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
+        # Initialize cost function
+        mse_loss = nn.MSELoss()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step # Start at init
-            window_start = current_step - window_size
+            current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, window_start:current_step], targets[:, window_start:current_step]
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
             rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
-
-            mse_loss = nn.MSELoss()
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
-            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
+            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # Concatenate the autoregressive predictions of states and the ground truth actions
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
             # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
             # next_input = torch.cat([next_input, next_action], dim=2)
             # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-
-        return hallucinated_steps, (avg_loss, traj_losses)
+        return predicted_steps, (avg_loss, traj_losses)

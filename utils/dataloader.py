@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen, Yagiz Devre, Isabel Liu
+# Authors: Windsor Nguyen, Isabel Liu, Yagiz Devre
 # File: dataloader.py
 # =============================================================================#
 
@@ -15,8 +15,10 @@ from utils.colors import Colors, colored_print
 
 # TODO: Write generic dataset downloading and saving script for the user.
 class Dataloader(Dataset):
-    def __init__(self, data, task, shift=1, preprocess=True, eps=1e-6):
+    def __init__(self, model, data, task, controller, shift=1, preprocess=True, eps=1e-6):
+        self.model = model
         self.task = task
+        self.controller = controller
         self.shift = shift
         self.preprocess = preprocess
         self.eps = eps
@@ -35,6 +37,12 @@ class Dataloader(Dataset):
             else:
                 raise ValueError("Invalid data format for mujoco-v1 or mujoco-v2 tasks")
             self.data = None
+
+            if model == "mamba-2" and controller == "Ant-v1":
+                # Padding zeros to the end of each trajectory at each timestep
+                self.inputs = np.pad(self.inputs, ((0, 0), (0, 0), (0, 3)), mode='constant')
+                self.targets = np.pad(self.targets, ((0, 0), (0, 0), (0, 3)), mode='constant')
+                
         elif task == "mujoco-v3":
             self.data = data
             if self.preprocess:
@@ -102,8 +110,10 @@ class Dataloader(Dataset):
 
 
 def get_dataloader(
+    model,
     data,
     task,
+    controller,
     bsz,
     shift=1,
     preprocess=True,
@@ -115,7 +125,7 @@ def get_dataloader(
     device="cpu",
 ):
     colored_print(f"\nCreating dataloader on {device} for task: {task}", Colors.OKBLUE)
-    dataset = Dataloader(data, task, shift, preprocess)
+    dataset = Dataloader(model, data, task, controller, shift, preprocess)
     pin_memory = device == "cpu"
 
     sampler = (

@@ -63,7 +63,7 @@ def main():
     model_path = f"sssm_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
-        sl = 900
+        sl = 1000
         if args.controller == "Ant-v1":
             n_embd, d_out, d_proj = 37, 37, 29
             loss_fn = AntLoss()
@@ -77,7 +77,7 @@ def main():
         else:
             n_embd, d_out, d_proj, loss_fn = None, None, None, None
     elif args.task == "mujoco-v2":
-        sl = 900
+        sl = 1000
         if args.controller == "Ant-v1":
             n_embd, d_out, d_proj = 29, 29, 29
             loss_fn = AntLoss()
@@ -96,8 +96,8 @@ def main():
     else:
         raise ValueError("Invalid task")
 
-    configs = SSSMConfigs(
-        n_layers=4,
+    configs = SpectralSSMConfigs(
+        n_layers=6,
         n_embd=n_embd,
         d_in=n_embd,  # TODO: Fix later, d_in \neq n_embd
         d_out=d_out,
@@ -112,6 +112,7 @@ def main():
         learnable_m_y=True,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
+        device=device,
     )
 
     # Initialize and load the model
@@ -124,8 +125,8 @@ def main():
     # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = f"data/{args.task}/{args.controller}/"
-        test_inputs = np.load(f"{base_path}/val_inputs_orig.npy")
-        test_targets = np.load(f"{base_path}/val_targets_orig.npy")
+        test_inputs = np.load(f"{base_path}/val_inputs.npy")
+        test_targets = np.load(f"{base_path}/val_targets.npy")
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
         test_targets = torch.from_numpy(test_targets).float().to(device)
     elif args.task == "mujoco-v3":
@@ -160,7 +161,6 @@ def main():
                     init=init,
                     steps=steps,  # Predict the next steps
                     rollout_steps=20,
-                    window_size=sl,
                 )
 
             elif args.task == "mujoco-v3":
@@ -173,7 +173,6 @@ def main():
                     init=init,  # Use the first 295 steps as context
                     steps=steps,  # Predict the next 5 steps
                     rollout_steps=1,
-                    window_size=sl,
                 )
 
             predicted_states.append(pred_states)
@@ -212,7 +211,7 @@ def main():
         "Saved ground truth shape:",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
-
+    print("Saved losses shape:", losses.shape)
     np.save(
         f"sssm_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
@@ -221,8 +220,9 @@ def main():
         f"sssm_{args.controller}_{args.task}_ground_truths.npy",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
+    np.save(f"sssm_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
-        f"Predictions and ground truths saved to 'sssm_{args.controller}_{args.task}_predictions.npy' and 'sssm_{args.controller}_{args.task}_ground_truths.npy' respectively."
+        f"Predictions, ground truths, and losses saved to 'sssm_{args.controller}_{args.task}_predictions.npy', 'sssm_{args.controller}_{args.task}_ground_truths.npy', and 'sssm_{args.controller}_{args.task}_losses.npy' respectively."
     )
 
     # Plotting
