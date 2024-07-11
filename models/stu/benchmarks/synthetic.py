@@ -8,6 +8,7 @@
 import torch
 from torch.utils.data import TensorDataset
 
+
 def generate_copy(
     num_examples: int = 5,
     num_categories: int = 10,
@@ -223,7 +224,8 @@ def generate_associative_recall(
     # Set random seed.
     torch.manual_seed(seed)
 
-    idx = torch.randint(0, vocab_size, (num_examples, sequence_len // 2))
+    sequence_len = (sequence_len // 2) * 2
+    idx = torch.randint(0, vocab_size, (num_examples, sequence_len))
 
     def get_assoc(start: int, end: int):
         # Range of values

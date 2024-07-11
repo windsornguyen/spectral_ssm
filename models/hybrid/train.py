@@ -186,7 +186,7 @@ def main() -> None:
 
     # Shared hyperparameters
     # STU settings
-    num_eigh: int = 24
+    num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
     learnable_m_y: bool = True

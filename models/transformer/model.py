@@ -15,13 +15,12 @@ from models.transformer.attn import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
-from utils.squared_relu import SquaredReLU
 from utils.dist_utils import all_gather_func, get_data_parallel_rank, get_data_parallel_world_size
 
 
 class FFN(nn.Module):
     """
-    Simple feed-forward network using the SwiGLU activation.
+    Feed-forward network using the SwiGLU activation.
 
     Args:
         configs: Configuration object containing the following attributes:
@@ -84,7 +83,7 @@ class TransformerConfigs:
     sl: int = 300  # Sequence length
     scale: int = 4
     sub_rn: bool = True
-    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = False
     dropout: float = 0.10
     flash_attn: bool = True
     loss_fn: nn.Module = nn.MSELoss()
@@ -116,10 +115,12 @@ class Transformer(nn.Module):
         self.controls = configs.controls
         self.n_embd = configs.n_embd
         self.d_in = nn.Linear(self.n_embd, self.n_embd)
+        self.dropout = nn.Dropout(self.configs.dropout)
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
                 wpe=nn.Embedding(configs.sl, configs.n_embd),
+                dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
                 ),
@@ -199,14 +200,15 @@ class Transformer(nn.Module):
 
         # Position embeddings of shape (sl, n_embd)
         pos_emb = self.transformer.wpe(pos)  # -> (sl, n_embd)
-        # Project inputs into lower dimensional space and add positional embeddings
 
-        # x = self.d_in(inputs) # (bsz, sl, n_embd)
+        # Add positional embeddings to the input
         x = inputs + pos_emb
         
         incremental_state = None # 
         if self.configs.dilated_attn:
             incremental_state = {}
+
+        x = self.transformer.dropout(inputs)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:
@@ -222,7 +224,7 @@ class Transformer(nn.Module):
             return preds, (loss, metrics)
         else:
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, (loss,)
+            return preds, loss
 
     # TODO: Not sure when/where this could be used, but we'd like to use it!
     # TODO: Also need to fix this function to make sure it's correct.

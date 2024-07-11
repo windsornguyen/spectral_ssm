@@ -1,46 +1,31 @@
-# =============================================================================#
-# Authors: Tri Dao, Albert Gu, Windsor Nguyen, Isabel Liu
-# File: (Mamba-2) model.py
-# Adapted from
-# https://github.com/state-spaces/mamba/blob/main/mamba_ssm/modules/mamba2.py
-# =============================================================================#
+# ==============================================================================#
+# Authors: Windsor Nguyen, Isabel Liu
+# File: model.py
+# ==============================================================================#
+
+"""The Mamba-2 architecture."""
 
 import math
-from typing import Optional, Any, Tuple
-from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange, repeat
 
-try:
-    from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-except ImportError:
-    causal_conv1d_fn, causal_conv1d_update = None, None
+from dataclasses import dataclass, field
+from utils.nearest_power_of_2 import nearest_power_of_2
+from utils.rms_norm import RMSNorm
+from utils.swiglu import SwiGLU
+from tqdm import tqdm
 
-try:
-    from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states
-except ImportError:
-    causal_conv1d_varlen_states = None
-
-try:
-    from ops.triton.selective_state_update import selective_state_update
-except ImportError:
-    selective_state_update = None
-
-from models.mamba.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
-from models.mamba.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
-from models.mamba.distributed.distributed_utils import all_reduce, reduce_scatter
-from models.mamba.ops.triton.ssd_combined import (
-    mamba_chunk_scan_combined,
-    mamba_split_conv1d_scan_combined,
-)
+from models.mamba.mamba import MambaLayer
 
 
 @dataclass
 class Mamba2Configs:
-    d_model: int
+    bsz: int = 8
+    n_layers: int = 2
+    d_model: int = 32
+    d_out: int = 29
     d_state: int = 128
     d_conv: int = 4
     conv_init: Optional[float] = None
@@ -48,7 +33,7 @@ class Mamba2Configs:
     headdim: int = 64
     d_ssm: Optional[int] = None # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
     ngroups: int = 1
-    A_init_range: Tuple[int, int] = (1, 16)
+    A_init_range: tuple[int, int] = (1, 16)
     activation: str = "silu"
     D_has_hdim: bool = False
     rmsnorm: bool = True
@@ -56,173 +41,152 @@ class Mamba2Configs:
     dt_min: float = 0.001
     dt_max: float = 0.1
     dt_init_floor: float = 1e-4
-    dt_limit: Tuple[float, float] = (0.0, float("inf"))
+    dt_limit: tuple[float, float] = (0.0, float("inf"))
     bias: bool = False
     conv_bias: bool = True
 
     # Fused kernel and sharding options
     chunk_size: int = 256
     use_mem_eff_path: bool = True
-    layer_idx: Optional[int] = None # Absorb kwarg for general module
-    process_group: Optional[Any] = None
+    process_group: Optional[any] = None
     sequence_parallel: bool = True
-    device: Optional[Any] = None
-    dtype: Optional[Any] = None
+    device: Optional[any] = None
+    dtype: Optional[any] = None
     world_size: int = 1
 
     # TODO: Experiment-specific hyperparameters
-    dropout: float = 0.10
-    loss_fn: Optional[Any] = torch.nn.SiLU()
-    d_out: int = 29
+    loss_fn: Optional[any] = nn.SiLU()
+    controls: dict = field(
+        default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
+    )
 
 
-@dataclass
-class InferenceParameters:
-    kv_mem_dict: dict = field(default_factory=dict)
-    seqlen_offset: int = 0
+class MLP(nn.Module):
+    """
+    Multi-layer perceptron network using SwiGLU activation.
 
+    Args:
+        configs: Configuration object containing the following attributes:
+            scale (float): Scaling factor for hidden dimension.
+            n_embd (int): Embedding dimension.
+            bias (bool): Whether to use bias in linear layers.
+    """
+
+    def __init__(self, configs) -> None:
+        super(MLP, self).__init__()
+        self.h_dim = configs.scale * configs.n_embd
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the MLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        x = self.swiglu(x)
+        return x
+
+class GatedMLP(nn.Module):
+    """
+    Gated multi-layer perceptron network using SiLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            d_model (int): Input and output embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            bias (bool): Whether to use bias in linear layers.
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.h_dim = configs.scale * configs.d_model
+        self.fc_1 = nn.Linear(configs.d_model, self.h_dim, bias=configs.bias)
+        self.fc_2 = nn.Linear(self.h_dim, configs.d_out, bias=configs.bias)
+        self.silu = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the GatedMLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        x = self.fc_1(x)
+        x, gate = x.chunk(2, dim=-1)
+        x = x * self.silu(gate)
+        x = self.fc_2(x)
+        return x
+
+
+class MambaBlock(nn.Module):
+    """
+    A single block of the spectral SSM model composed of Mamba-2 and MLP layers.
+
+    Args:
+        configs: Configuration object for Mamba-2 and MLP layers
+        sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors.
+        padded_sl (int): Padded sequence length for FFT operations.
+    """
+
+    def __init__(self, configs) -> None:
+        super(MambaBlock, self).__init__()
+        self.mamba = MambaLayer(configs)
+        self.rn = RMSNorm(configs.d_model)
+        self.mlp = GatedMLP(configs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Block.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        x = x + self.mamba(x)
+        x = x + self.mlp(self.rn(x))
+        return x
 
 class Mamba2(nn.Module):
+    """
+    Model architecture based on stacked blocks of Mamba-2 and MLP layers.
+
+    Args:
+        configs: Configuration object containing model hyperparameters.
+    """
+
     def __init__(self, configs: Mamba2Configs):
-        super().__init__()
+        super(Mamba2, self).__init__()
         self.configs = configs
-        self.factory_kwargs = {"device": configs.device, "dtype": configs.dtype}
+        self.n_layers = self.configs.n_layers
+        self.d_model = self.configs.d_model
+        self.d_out = self.configs.d_out
+        self.bias = self.configs.bias
+        self.loss_fn = self.configs.loss_fn
+        self.controls = self.configs.controls
 
-        # Note: The Swish function with β=1 is equivalent nn.SiLU()
-        self.activation = nn.SiLU() if self.configs.activation == "silu" else nn.SiLU() # TODO: Write this better
-        self.dropout = nn.Dropout(self.configs.dropout)
+        self.mamba = nn.ModuleDict(
+            dict(
+                hidden=nn.ModuleList(
+                    [MambaLayer(self.configs) for _ in range(self.n_layers)]),
+            )
+        )
+        self.output = nn.Linear(self.d_model, self.d_out, bias=self.bias)
 
-        self.ngroups = self.configs.ngroups // self.configs.world_size
-
-        self.chunk_size = self.configs.chunk_size
-        self.use_mem_eff_path = self.configs.use_mem_eff_path
-        self.layer_idx = self.configs.layer_idx
-
-        self._init_dimensions()
-        self.d_ssm = self.d_inner if self.configs.d_ssm is None else self.configs.d_ssm // self.world_size
-        assert self.d_ssm % self.configs.headdim == 0
-        self.nheads = self.d_ssm // self.configs.headdim
-
-        self._init_layers()
-        self._init_parameters()
-        
-        self.D_has_hdim = self.configs.D_has_hdim
-        self.rmsnorm = self.configs.rmsnorm
-        self.norm_before_gate = self.configs.norm_before_gate
-        self.dt_limit = self.configs.dt_limit
-        
         # Report the number of parameters
         print(
             "Mamba2 Model Parameter Count (excl. pos. emb.): %.2fM"
             % (self.get_num_params() / 1e6,)
         )
-
-    def _init_dimensions(self):
-        self.d_inner = (self.configs.expand * self.configs.d_model) // self.configs.world_size
-        assert (self.d_inner * self.configs.world_size == self.configs.expand * self.configs.d_model)
-
-        self.d_ssm = (
-            self.d_inner
-            if self.configs.d_ssm is None
-            else self.configs.d_ssm // self.configs.world_size
-        )
-        assert self.configs.ngroups % self.configs.world_size == 0
-
-    def _init_layers(self):
-        d_in_proj = (2 * self.d_inner + 2 * self.ngroups * self.configs.d_state + self.nheads)
-
-        if self.configs.process_group is None:
-            self.in_proj = nn.Linear(
-                self.configs.d_model,
-                d_in_proj,
-                bias=self.configs.bias,
-                **self.factory_kwargs,
-            )
-        else:
-            self.in_proj = ColumnParallelLinear(
-                self.configs.d_model,
-                d_in_proj * self.configs.world_size,
-                bias=self.configs.bias,
-                process_group=self.configs.process_group,
-                sequence_parallel=self.configs.sequence_parallel,
-                **self.factory_kwargs,
-            )
-
-        conv_dim = self.d_ssm + 2 * self.ngroups * self.configs.d_state
-        self.conv1d = nn.Conv1d(
-            in_channels=conv_dim,
-            out_channels=conv_dim,
-            bias=self.configs.conv_bias,
-            kernel_size=self.configs.d_conv,
-            groups=conv_dim,
-            padding=self.configs.d_conv - 1,
-            **self.factory_kwargs,
-        )
-
-        if self.configs.rmsnorm:
-            self.norm = RMSNormGated(
-                self.d_ssm,
-                eps=1e-5,
-                norm_before_gate=self.configs.norm_before_gate,
-                group_size=self.d_ssm // self.configs.ngroups,
-                **self.factory_kwargs,
-            )
-
-        if self.configs.process_group is None:
-            self.out_proj = nn.Linear(
-                self.d_inner,
-                self.configs.d_out,
-                bias=self.configs.bias,
-                **self.factory_kwargs,
-            )
-        else:
-            self.out_proj = RowParallelLinear(
-                self.d_inner * self.configs.world_size,
-                self.configs.d_out,
-                bias=self.configs.bias,
-                process_group=self.configs.process_group,
-                sequence_parallel=self.configs.sequence_parallel,
-                **self.factory_kwargs,
-            )
-
-    def _init_parameters(self):
-        if self.configs.conv_init is not None:
-            nn.init.uniform_(
-                self.conv1d.weight, -self.configs.conv_init, self.configs.conv_init
-            )
-
-        # Initialize log dt bias
-        dt = torch.exp(
-            torch.rand(self.nheads, **self.factory_kwargs)
-            * (math.log(self.configs.dt_max) - math.log(self.configs.dt_min))
-            + math.log(self.configs.dt_min)
-        )
-        dt = torch.clamp(dt, min=self.configs.dt_init_floor)
-
-        # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        self.dt_bias = nn.Parameter(inv_dt)
-
-        # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-        # name.endswith("bias") in param_grouping.py
-        self.dt_bias._no_weight_decay = True
-
-        assert self.configs.A_init_range[0] > 0 and self.configs.A_init_range[1] >= self.configs.A_init_range[0]
-        A = torch.empty(
-            self.nheads, dtype=torch.float32, device=self.configs.device
-        ).uniform_(*self.configs.A_init_range)
-        A_log = torch.log(A).to(dtype=self.configs.dtype)
-        self.A_log = nn.Parameter(A_log)
-        self.A_log._no_weight_decay = True
-
-        # D "skip" parameter
-        self.D = nn.Parameter(
-            torch.ones(
-                self.d_ssm if self.configs.D_has_hdim else self.nheads,
-                device=self.configs.device,
-            )
-        )
-        self.D._no_weight_decay = True
 
     def get_num_params(self):
         """
@@ -234,443 +198,215 @@ class Mamba2(nn.Module):
         num_params = sum(p.numel() for p in self.parameters())
         return num_params
     
-    def forward(
+    def forward(self, inputs, targets):
+        """
+        Forward pass of the spectral SSM model.
+
+        Args:
+            inputs (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
+            targets (torch.Tensor): Target tensor for loss computation
+
+        Returns:
+            Type (ignore due to high variability):
+            - Predictions tensor
+            - tuple containing loss and metrics (if applicable)
+        """
+        _, sl, _ = inputs.size()
+        x = inputs
+        for block in self.mamba.hidden:
+            x = block(x, sl)
+        preds = self.output(x)
+
+        if self.controls["task"] != "mujoco-v3":
+            loss, metrics = (
+                self.loss_fn(preds, targets) if targets is not None else (None, None)
+            )
+            return preds, (loss, metrics)
+        else:
+            loss = self.loss_fn(preds, targets) if targets is not None else None
+            return preds, loss
+    
+    # TODO: Incorrectly written for Mamba-2
+    def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
+        """
+        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+        Args:
+            fwdbwd_per_iter (float): Number of forward/backward passes per iteration.
+            dt (float): Time taken for the iteration.
+
+        Returns:
+            tuple[float, float]: Estimated MFU and estimated peak FLOPS.
+
+        Reference:
+            PaLM paper Appendix B: https://arxiv.org/abs/2204.02311
+        """
+        cfg = self.configs
+        L, D, E, T = cfg.n_layers, cfg.d_model, cfg.num_eigh, cfg.sl
+
+        total_flops = 0
+
+        # Mamba2 blocks
+        for _ in range(L):
+            total_flops += self._compute_rmsnorm_flops(D, T) * 2  # 2 RMSNorm per block
+            total_flops += self._compute_mamba_flops(T, D, E)
+            
+            if cfg.use_ar_u:
+                total_flops += 2 * cfg.k_u * D * D * T  # compute_ar_u
+            if cfg.use_ar_y:
+                total_flops += self._compute_ar_y_flops(T, D, cfg.k_y)
+
+            total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
+
+        # Output layer
+        total_flops += 2 * D * cfg.d_proj * T
+
+        # Dropout operations (1 FLOP per element)
+        total_flops += (L + 1) * D * T  # L blocks + initial dropout
+
+        flops_per_iter = total_flops
+        flops_achieved = flops_per_iter * fwdbwd_per_iter / dt
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops (312 TFLOPS)
+        return flops_achieved, flops_promised
+
+    def _compute_rmsnorm_flops(self, D: int, T: int) -> int:
+        """
+        Compute FLOPS for RMSNorm operation.
+
+        Args:
+            D (int): Embedding dimension.
+            T (int): Sequence length.
+
+        Returns:
+            int: Total FLOPS for RMSNorm.
+        """
+        power_flops = D * T  # x^2
+        sum_flops = D * T  # Sum across dimension
+        mean_flops = T  # Division for mean
+        sqrt_flops = T  # Square root
+        normalize_flops = D * T  # Division by sqrt(mean + eps)
+        scale_flops = D * T  # Multiplication by weight
+
+        return power_flops + sum_flops + mean_flops + sqrt_flops + normalize_flops + scale_flops
+
+    def _compute_mamba_flops(self, T: int, D: int, E: int) -> int:
+        """
+        Compute FLOPS for spectral computations.
+
+        Args:
+            T (int): Sequence length.
+            D (int): Embedding dimension.
+            E (int): Number of eigenvectors.
+
+        Returns:
+            int: Total FLOPS for spectral computations.
+        """
+        n = nearest_power_of_2(T * 2 - 1)
+        log_n = math.log2(n)
+
+        fft_flops = 2 * n * log_n * D * E * 2  # rfft and irfft
+        filter_flops = 2 * T * D * E  # Spectral filter application
+
+        return int(fft_flops + filter_flops)
+
+    def _compute_ar_y_flops(self, T: int, D: int, k_y: int) -> int:
+        """
+        Compute FLOPS for compute_ar_y function.
+
+        Args:
+            T (int): Sequence length.
+            D (int): Embedding dimension.
+            k_y (int): Autoregressive depth on the output sequence.
+
+        Returns:
+            int: Total FLOPS for ar_y computation.
+        """
+        return 2 * T * k_y * D * D + T * k_y * D  # Matrix multiplications + additions
+
+    def _compute_swiglu_flops(self, D: int, scale: float, T: int) -> int:
+        """
+        Compute FLOPS for SwiGLU activation.
+
+        Args:
+            D (int): Embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            T (int): Sequence length.
+
+        Returns:
+            int: Total FLOPS for SwiGLU computation.
+        """
+        h_dim = int(scale * D)
+        
+        linear_flops = 2 * D * h_dim * T * 3  # Three linear layers
+        silu_flops = 3 * h_dim * T  # SiLU activation (3 ops per element)
+        hadamard_flops = h_dim * T  # Hadamard product
+        
+        return linear_flops + silu_flops + hadamard_flops
+
+    def predict_states(
         self,
         inputs: torch.Tensor,
-        targets: Optional[torch.Tensor] = None,
-        sl: int = None,
-        seq_idx=None, 
-        cu_sl=None,
-        inference_params: Optional[InferenceParameters] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        targets: torch.Tensor,
+        init: int = 950,
+        steps: int = 50,
+        rollout_steps: int = 20,
+    ) -> tuple[
+        torch.Tensor,
+        tuple[
+            torch.Tensor, dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]
+        ],
+    ]:
         """
-        u: (bsz, sl, hdim) if seqlen=None.
-            If seqlen is not None, u is (batch * seqlen, hidden_dim). This is so that when we
-            split u during sequence parallel, we split the batch * seqlen dimension
-            (in case batch is small).
-        Returns: same shape as u
+        Perform autoregressive prediction with optional periodic grounding to true targets.
+
+        Args:
+            inputs (torch.Tensor): Input tensor of shape (num_traj, total_steps, d_in)
+            targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
+            init (int): Index of the initial state to start the prediction
+            steps (int): Number of steps to predict
+
+        Returns:
+        tuple: Contains the following elements:
+            - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
+            - tuple:
+                - avg_loss (torch.Tensor): Scalar tensor with the average loss
+                - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
         """
-        sl_og = sl
-        if sl is None:
-            bsz, sl, _ = inputs.shape
-        else:
-            bsz_sl, _ = inputs.shape
-            bsz = bsz_sl // sl
+        device = next(self.parameters()).device
+        print(f"Predicting on {device}.")
+        num_traj, total_steps, d_out = targets.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
-        conv_state, ssm_state = None, None
-        if inference_params is not None:
-            inference_batch = cu_sl.shape[0] - 1 if cu_sl is not None else bsz
-            conv_state, ssm_state = self._get_states_from_cache(
-                inference_params, inference_batch
-            )
-            if inference_params.seqlen_offset > 0:
-                # The states are updated inplace
-                out, _, _ = self.step(inputs, conv_state, ssm_state)
-                return out
+        # Track model hallucinations
+        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        inputs = self.dropout(inputs)
-        zxbcdt = self.in_proj(inputs) # (B, L, d_in_proj) or (B * L, d_in_proj)
-        if sl_og is not None:
-            zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=sl)
+        # Track loss between rollout vs ground truth
+        traj_losses = torch.zeros(num_traj, steps, device=device)
 
-        # If the model is loaded in fp16, without the .float() here, A might be -inf
-        A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
-        dt_limit_kwargs = (
-            {}
-            if self.configs.dt_limit == (0.0, float("inf"))
-            else {"dt_limit": self.configs.dt_limit}
-        )
+        # Initialize cost function
+        mse_loss = nn.MSELoss()
 
-        if self.configs.use_mem_eff_path and inference_params is None:
-            out = self._forward_mem_efficient(zxbcdt, A, sl_og, seq_idx, dt_limit_kwargs)
-        else:
-            out = self._forward_standard(
-                bsz=bsz,
-                zxbcdt=zxbcdt,
-                A=A,
-                cu_sl=cu_sl,
-                seq_idx=seq_idx,
-                dt_limit_kwargs=dt_limit_kwargs,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
-                inference_params=inference_params
+        for step in tqdm(range(steps), desc="Predicting", unit="step"):
+            current_step = init + step
+
+            # Predict the next state using a fixed window size of inputs
+            step_preds, (_, _) = self.forward(
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
-        loss = self.configs.loss_fn(out, targets) if targets is not None else None
-        return out, loss
+            # Calculate the mean loss of the last rollout_steps predictions
+            rollout_preds = step_preds[:, -rollout_steps:, :]
+            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
+            traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
-    def _forward_mem_efficient(
-        self, zxbcdt: torch.Tensor, A: torch.Tensor, sl_og: int, seq_idx: int, dt_limit_kwargs: dict
-    ) -> torch.Tensor:
-        out = mamba_split_conv1d_scan_combined(
-            zxbcdt,
-            rearrange(self.conv1d.weight, "d 1 w -> d w"),
-            self.conv1d.bias,
-            self.dt_bias,
-            A,
+            # Store the last prediction step for plotting
+            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            D=rearrange(self.D, "(h p) -> h p", p=self.configs.headdim)
-            if self.configs.D_has_hdim
-            else self.D,
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
+            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+            # next_input = torch.cat([next_input, next_action], dim=2)
+            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
-            chunk_size=self.configs.chunk_size,
-            seq_idx=seq_idx,
-            activation=self.configs.activation,
-            rmsnorm_weight=self.norm.weight if self.configs.rmsnorm else None,
-            rmsnorm_eps=self.norm.eps if self.configs.rmsnorm else 1e-6,
-            outproj_weight=self.out_proj.weight,
-            outproj_bias=self.out_proj.bias,
-            headdim=None if self.configs.D_has_hdim else self.configs.headdim,
-            ngroups=self.ngroups,
-            norm_before_gate=self.configs.norm_before_gate,
-            **dt_limit_kwargs,
-        )
-        if sl_og is not None:
-            out = rearrange(out, "b l d -> (b l) d")
-        if self.configs.process_group is not None:
-            reduce_fn = reduce_scatter if self.configs.sequence_parallel else all_reduce
-            out = reduce_fn(out, self.configs.process_group)
-        return out
-
-    def _forward_standard(
-        self,
-        bsz: int, 
-        zxbcdt: torch.Tensor,
-        A: torch.Tensor,
-        cu_sl: int,
-        seq_idx: int,
-        dt_limit_kwargs: dict,
-        conv_state: Optional[torch.Tensor],
-        ssm_state: Optional[torch.Tensor],
-        inference_params,
-    ) -> torch.Tensor:
-        d_mlp = (
-            zxbcdt.shape[-1]
-            - 2 * self.d_ssm
-            - 2 * self.ngroups * self.configs.d_state
-            - self.nheads
-        ) // 2
-        z0, x0, z, xBC, dt = torch.split(
-            zxbcdt,
-            [
-                d_mlp,
-                d_mlp,
-                self.d_ssm,
-                self.d_ssm + 2 * self.ngroups * self.configs.d_state,
-                self.nheads,
-            ],
-            dim=-1,
-        )
-
-        if conv_state is not None:
-            if cu_sl is None:
-                # If we just take xBC[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
-                # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
-                xBC_t = rearrange(xBC, "b l d -> b d l")
-                conv_state.copy_(F.pad(xBC_t, (self.configs.d_conv - xBC_t.shape[-1], 0)))
-        else:
-            assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
-            assert bsz == 1, "varlen inference only supports batch dimension 1"
-            conv_varlen_states = causal_conv1d_varlen_states(
-                xBC.squeeze(0), cu_sl, state_len=conv_state.shape[-1]
-            )
-            conv_state.copy_(conv_varlen_states)
-
-        xBC = self._apply_conv(xBC, seq_idx)
-        x, B, C = torch.split(
-            xBC,
-            [
-                self.d_ssm,
-                self.ngroups * self.configs.d_state,
-                self.ngroups * self.configs.d_state,
-            ],
-            dim=-1,
-        )
-
-        y = self._apply_ssm(x, dt, A, B, C, seq_idx, cu_sl, ssm_state, z, dt_limit_kwargs, inference_params)
-        y = self.dropout(y)
-
-        if self.configs.rmsnorm:
-            y = self.norm(y, z)
-        if d_mlp > 0:
-            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
-        out = self.out_proj(y)
-        out = self.dropout(out)
-
-        return out
-
-    def _apply_conv(self, xBC, seq_idx: torch.Tensor) -> torch.Tensor:
-        if causal_conv1d_fn is None:
-            assert seq_idx is None, "varlen conv1d requires the causal_conv1d package"
-            return self.activation(
-                self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, -(self.d_conv - 1):]
-            ) # (B, L, self.d_ssm + 2 * ngroups * d_state)
-        else:
-            return causal_conv1d_fn(
-                xBC.transpose(1, 2),
-                rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                bias=self.conv1d.bias,
-                activation=self.configs.activation,
-            ).transpose(1, 2)
-
-    def _apply_ssm(
-        self,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        seq_idx: int,
-        cu_sl: int,
-        ssm_state: Optional[torch.Tensor],
-        z: torch.Tensor,
-        dt_limit_kwargs: dict,
-        inference_params
-    ) -> torch.Tensor:
-        y = mamba_chunk_scan_combined(
-            rearrange(x, "b l (h p) -> b l h p", p=self.configs.headdim),
-    
-            dt,
-            A,
-    
-            rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
-            rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
-
-            chunk_size=self.configs.chunk_size,
-    
-            D=rearrange(self.D, "(h p) -> h p", p=self.configs.headdim)
-            if self.configs.D_has_hdim
-            else self.D,
-
-            z=rearrange(z, "b l (h p) -> b l h p", p=self.configs.headdim)
-            if not self.configs.rmsnorm
-            else None,
-
-            dt_bias=self.dt_bias,
-            dt_softplus=True,
-            seq_idx=seq_idx,
-            cu_sl=cu_sl,
-            **dt_limit_kwargs,
-            return_final_states=ssm_state is not None,
-            return_varlen_states=cu_sl is not None and inference_params is not None,
-        )
-        if ssm_state is not None:
-            y, last_state, *rest = y
-            if cu_sl is None:
-                ssm_state.copy_(last_state)
-            else:
-                varlen_states = rest[0]
-                ssm_state.copy_(varlen_states)
-        return rearrange(y, "b l h p -> b l (h p)")
-
-    def step(
-        self,
-        hidden_states: torch.Tensor,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        dtype = hidden_states.dtype
-        assert (hidden_states.shape[1] == 1), "Only support decoding with 1 token at a time for now"
-        zxbcdt = self.in_proj(hidden_states.squeeze(1)) # (B 2D)
-        d_mlp = (
-            zxbcdt.shape[-1]
-            - 2 * self.d_ssm
-            - 2 * self.ngroups * self.configs.d_state
-            - self.nheads
-        ) // 2
-        z0, x0, z, xBC, dt = torch.split(
-            zxbcdt,
-            [
-                d_mlp,
-                d_mlp,
-                self.d_ssm,
-                self.d_ssm + 2 * self.ngroups * self.configs.d_state,
-                self.nheads,
-            ],
-            dim=-1,
-        )
-
-        xBC = self._step_conv(xBC, conv_state, dtype)
-
-        x, B, C = torch.split(
-            xBC,
-            [
-                self.d_ssm,
-                self.ngroups * self.configs.d_state,
-                self.ngroups * self.configs.d_state,
-            ],
-            dim=-1,
-        )
-        A = -torch.exp(self.A_log.float()) # (nheads,)
-
-        # SSM Step
-        y = self._step_ssm(x, dt, A, B, C, ssm_state, z, dtype)
-
-        if self.configs.rmsnorm:
-            y = self.norm(y, z)
-        if d_mlp > 0:
-            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
-        out = self.out_proj(y)
-        return out.unsqueeze(1), conv_state, ssm_state
-
-    def _step_conv(self, xBC: torch.Tensor, conv_state: torch.Tensor, dtype) -> torch.Tensor:
-        if causal_conv1d_update is None:
-            conv_state.copy_(torch.roll(conv_state, shifts=-1, dims=-1)) # Update state (B D W)
-            conv_state[:, :, -1] = xBC
-            xBC = torch.sum(
-                conv_state * rearrange(self.conv1d.weight, "d 1 w -> d w"), dim=-1
-            ) # (B D)
-            if self.conv1d.bias is not None:
-                xBC = xBC + self.conv1d.bias
-            xBC = self.activation(xBC).to(dtype=dtype)
-        else:
-            xBC = causal_conv1d_update(
-                xBC,
-                conv_state,
-                rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                self.conv1d.bias,
-                self.configs.activation,
-            )
-        return xBC
-
-    def _step_ssm(
-        self,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        ssm_state: torch.Tensor,
-        z: torch.Tensor,
-        dtype
-    ) -> torch.Tensor:
-        if selective_state_update is None:
-            return self._step_ssm_default(x, dt, A, B, C, ssm_state, z, dtype)
-        else:
-            return self._step_ssm_selective(x, dt, A, B, C, ssm_state, z)
-
-    def _step_ssm_default(
-        self,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        ssm_state: torch.Tensor,
-        z: torch.Tensor,
-        dtype
-    ) -> torch.Tensor:
-        assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
-
-        # Discretize A and B
-        dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype)) # (bsz, nheads)
-        dA = torch.exp(dt * A) # (bsz, nheads)
-        x = rearrange(x, "b (h p) -> b h p", p=self.configs.headdim)
-        dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
-        ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
-        y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
-        y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
-        y = rearrange(y, "b h p -> b (h p)")
-        if not self.configs.rmsnorm:
-            y = y * self.activation(z) # (B D)
-        return y
-
-    def _step_ssm_selective(
-        self,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        ssm_state: torch.Tensor,
-        z: torch.Tensor,
-    ) -> torch.Tensor:
-        A = repeat(A, "h -> h p n", p=self.configs.headdim, n=self.configs.d_state).to(
-            dtype=torch.float32
-        )
-        dt = repeat(dt, "b h -> b h p", p=self.configs.headdim)
-        dt_bias = repeat(self.dt_bias, "h -> h p", p=self.configs.headdim)
-        D = repeat(self.D, "h -> h p", p=self.configs.headdim)
-        B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
-        C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
-        x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.configs.headdim)
-        if not self.configs.rmsnorm:
-            z = rearrange(z, "b (h p) -> b h p", p=self.configs.headdim)
-        y = selective_state_update(
-            ssm_state,
-            x_reshaped,
-            dt,
-            A,
-            B,
-            C,
-            D,
-            z=z if not self.configs.rmsnorm else None,
-            dt_bias=dt_bias,
-            dt_softplus=True,
-        )
-        return rearrange(y, "b h p -> b (h p)")
-
-    def allocate_inference_cache(
-        self, bsz: int, max_seqlen: int, dtype: Optional[torch.dtype] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        device = self.out_proj.weight.device
-        conv_dtype = self.conv1d.weight.dtype if dtype is None else dtype
-        conv_state = torch.zeros(
-            bsz,
-            self.conv1d.weight.shape[0],
-            self.configs.d_conv,
-            device=device,
-            dtype=conv_dtype,
-        ).transpose(1, 2)
-        ssm_dtype = self.in_proj.weight.dtype if dtype is None else dtype
-        ssm_state = torch.zeros(
-            bsz,
-            self.nheads,
-            self.configs.headdim,
-            self.configs.d_state,
-            device=device,
-            dtype=ssm_dtype,
-        )
-        return conv_state, ssm_state
-
-    def _get_states_from_cache(
-        self,
-        inference_params: InferenceParameters,
-        bsz: int,
-        initialize_states: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert self.configs.layer_idx is not None
-        if self.configs.layer_idx not in inference_params.kv_mem_dict:
-            conv_state, ssm_state = self._initialize_states(bsz)
-            inference_params.kv_mem_dict[self.configs.layer_idx] = (
-                conv_state,
-                ssm_state,
-            )
-        else:
-            conv_state, ssm_state = inference_params.kv_mem_dict[
-                self.configs.layer_idx
-            ]
-            # TODO: What if bsz changes between generation, and we reuse the same states?
-            if initialize_states:
-                conv_state.zero_()
-                ssm_state.zero_()
-        return conv_state, ssm_state
-
-    def _initialize_states(self, bsz: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        conv_state = torch.zeros(
-            bsz,
-            self.conv1d.weight.shape[0],
-            self.configs.d_conv,
-            device=self.conv1d.weight.device,
-            dtype=self.conv1d.weight.dtype,
-        ).transpose(1, 2)
-
-        ssm_state = torch.zeros(
-            bsz,
-            self.nheads,
-            self.configs.headdim,
-            self.configs.d_state,
-            device=self.in_proj.weight.device,
-            dtype=self.in_proj.weight.dtype,
-        )
-        return conv_state, ssm_state
+        avg_loss = traj_losses.mean()
+        return predicted_steps, (avg_loss, traj_losses)

@@ -220,10 +220,10 @@ class HybridBlock(nn.Module):
         z = self.rn_1(x)
         x = z + self.stu(self.rn_2(x))
         x = x + self.mlp_1(self.rn_3(x)) + z
-        
-        # # Attention portion
-        # x = x + self.attn(self.rn_4(x))
-        # x = x + self.mlp_2(self.rn_5(x))
+
+        # Attention portion
+        x = x + self.attn(self.rn_4(x))
+        x = x + self.mlp_2(self.rn_5(x))
         return x
 
 class SpectralHybrid(nn.Module):

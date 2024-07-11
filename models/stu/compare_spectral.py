@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Tuple
+from utils.nearest_power_of_2 import nearest_power_of_2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -35,10 +35,6 @@ def compute_m_phi_minus(
     U_minus: torch.Tensor, m_phi_minus: torch.Tensor, sigma: torch.Tensor, k_y: int
 ) -> torch.Tensor:
     return compute_m_phi_plus(U_minus, m_phi_minus, sigma, k_y)
-
-
-def nearest_power_of_2(x: int) -> int:
-    return 2 ** (x - 1).bit_length()
 
 
 def conv(v: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
@@ -95,7 +91,7 @@ def compute_ar_x_preds(m_u: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 
 def compute_x_tilde(
-    inputs: torch.Tensor, eigh: Tuple[torch.Tensor, torch.Tensor]
+    inputs: torch.Tensor, eigh: tuple[torch.Tensor, torch.Tensor]
 ) -> torch.Tensor:
     eig_vals, eig_vecs = eigh
     k = eig_vals.size(0)

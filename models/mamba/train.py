@@ -138,7 +138,7 @@ def main() -> None:
     conv_init = None
     expand: int = 2
     d_ssm = None
-    ngroups: int = world_size
+    ngroups: int = 1 # TODO: What should this be set to?
     A_init_range: tuple[int, int] = (1, 16)
     activation = "silu"
     D_has_hdim: bool = False
@@ -151,17 +151,19 @@ def main() -> None:
 
     # Fused kernel and sharding options
     chunk_size: int = 256
-    use_mem_eff_path: bool = True
-    layer_idx =  None # Absorb kwarg for general module
+    use_mem_eff_path: bool = True # TODO: Toggle to see if this makes it faster
     process_group = get_data_parallel_group()
     sequence_parallel: bool = True
     dtype: torch.dtype = torch.float32
 
     # TODO: Experiment-specific hyperparameters
+    # Data loader hyperparameters
+    bsz: int = 8 if use_mem_eff_path else 1
+    n_layers: int = 2
     bias: bool = False
     conv_bias: bool = True
-    dropout: float = 0.10
     loss_fn = nn.MSELoss()
+    preprocess: bool = True
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -187,6 +189,8 @@ def main() -> None:
         sl: int = 1000
 
         configs = Mamba2Configs(
+            bsz=bsz,
+            n_layers=n_layers,
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
@@ -208,10 +212,8 @@ def main() -> None:
             conv_bias=conv_bias,
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
-            layer_idx=layer_idx,
             process_group=process_group,
             sequence_parallel=sequence_parallel,
-            dropout=dropout,
             loss_fn=loss_fn,
             d_out=d_out,
             device=device,
@@ -221,11 +223,13 @@ def main() -> None:
 
     elif task["mujoco-v2"]:
         d_model: int = 18 if controller != "Ant-v1" else 32
-        d_state: int = 130 if controller == "HalfCheetah-v1" else 128
+        d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
         sl: int = 1000
         configs = Mamba2Configs(
+            bsz=bsz,
+            n_layers=n_layers,
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
@@ -247,10 +251,8 @@ def main() -> None:
             conv_bias=conv_bias,
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
-            layer_idx=layer_idx,
             process_group=process_group,
             sequence_parallel=sequence_parallel,
-            dropout=dropout,
             loss_fn=loss_fn,
             d_out=d_out,
             device=device,
@@ -267,6 +269,8 @@ def main() -> None:
         sl: int = 300
 
         configs = Mamba2Configs(
+            bsz=bsz,
+            n_layers=n_layers,
             d_model=d_model,
             d_state=d_state,
             d_conv=d_conv,
@@ -288,10 +292,8 @@ def main() -> None:
             conv_bias=conv_bias,
             chunk_size=chunk_size,
             use_mem_eff_path=use_mem_eff_path,
-            layer_idx=layer_idx,
             process_group=process_group,
             sequence_parallel=sequence_parallel,
-            dropout=dropout,
             loss_fn=loss_fn,
             d_out=d_out,
             device=device,
@@ -305,9 +307,6 @@ def main() -> None:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
     mamba_model = model.module if world_size > 1 else model
 
-    # Data loader hyperparameters
-    bsz: int = 8
-    preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
     mujoco_v1_base = f"data/mujoco-v1/{args.controller}/"
@@ -494,10 +493,10 @@ def main() -> None:
                         patient_counter = 0
 
                         # Construct paths for model checkpoint and extra info
-                        model_checkpoint = f"mamba2-{controller}-model_step-{relative_step}-{timestamp}-48l.pt"
+                        model_checkpoint = f"mamba2-{controller}-model_step-{relative_step}-{timestamp}-{n_layers}l.pt"
                         model_path = os.path.join(checkpoint_dir, model_checkpoint)
 
-                        extra_info = f"mamba2-{controller}-other_step-{relative_step}-{timestamp}-48l.pt"
+                        extra_info = f"mamba2-{controller}-other_step-{relative_step}-{timestamp}-{n_layers}l.pt"
                         extra_info_path = os.path.join(checkpoint_dir, extra_info)
 
                         best_checkpoint = (model_checkpoint, extra_info)

@@ -140,7 +140,7 @@ def main() -> None:
     n_layers: int = 2
     scale: int = 4
     bias: bool = False
-    dropout: float = 0.10
+    dropout: float = 0.1
     num_eigh: int = 24
     k_y: int = 2
     k_u: int = 3
@@ -356,7 +356,7 @@ def main() -> None:
     weight_decay: float = 1e-1
     max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
-    
+
     # Adam hyperparameters, per the GPT-3 paper
     betas = (0.9, 0.95)
     eps = 1e-8

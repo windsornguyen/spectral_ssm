@@ -185,11 +185,11 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 6
+    n_layers: int = 2
     scale: int = 16
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
-    dropout: float = 0.10 # Convert all these into argparses eventually
+    dropout: float = 0.1 # Convert all these into argparses eventually
     dilated_attn = args.dilated_attn
     segment_lengths = args.segment_lengths
     dilated_ratios = args.dilated_ratios
@@ -255,7 +255,8 @@ def main() -> None:
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
             device=device,
-
+            
+            # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
             dilated_ratios=dilated_ratios,
@@ -286,6 +287,7 @@ def main() -> None:
             controls={"task": "mujoco-v3", "controller": controller},
             device=device,
 
+            # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
             dilated_ratios=dilated_ratios,

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import jax.scipy.signal
 import time
 import math
+from utils.nearest_power_of_2 import nearest_power_of_2
 
 
 def tr_conv(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -24,10 +25,6 @@ def tr_conv(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     Z = X * Y
     z = torch.fft.irfft(Z, n=n)
     return z[: x.shape[0]]
-
-
-def nearest_power_of_2(x: int) -> int:
-    return 1 << (x - 1).bit_length()
 
 
 def conv_torch_base(v: torch.Tensor, u: torch.Tensor) -> torch.Tensor:

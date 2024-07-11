@@ -42,7 +42,6 @@ class SwiGLU(nn.Module):
         self.w = nn.Linear(dim, h_dim, bias=bias)
         self.v = nn.Linear(dim, h_dim, bias=bias)
         self.w2 = nn.Linear(h_dim, dim, bias=bias)
-
         self.use_sq_relu = use_sq_relu
         if self.use_sq_relu:
             self.sq_relu = SquaredReLU()

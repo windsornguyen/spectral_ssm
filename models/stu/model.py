@@ -53,7 +53,7 @@ class SpectralSSMConfigs:
 
 class STU(nn.Module):
     """
-    A simple STU (Spectral Transform Unit) layer.
+    An STU (Spectral Transform Unit) layer.
 
     Args:
         configs: Configuration contains (at least) the following attributes:
@@ -132,7 +132,7 @@ class STU(nn.Module):
 
 class MLP(nn.Module):
     """
-    Simple multi-layer perceptron network using SwiGLU activation.
+    Multi-layer perceptron network using SwiGLU activation.
 
     Args:
         configs: Configuration object containing the following attributes:
@@ -162,6 +162,45 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+
+class GatedMLP(nn.Module):
+    """
+    Gated Multi-layer perceptron network using SiLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            n_embd (int): Input and output embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.in_features = configs.n_embd
+        self.out_features = configs.n_embd
+        self.hidden_features = int(configs.scale * configs.n_embd)
+
+        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.activation = torch.nn.functional.silu
+        self.dropout = nn.Dropout(configs.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the GatedMLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        y = self.fc1(x)
+        y, gate = y.chunk(2, dim=-1)
+        y = y * self.activation(gate)
+        y = self.fc2(y)
+        return self.dropout(y)
 
 class Block(nn.Module):
     """
@@ -273,7 +312,7 @@ class SpectralSSM(nn.Module):
             return preds, (loss, metrics)
         else:
             loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, (loss,)
+            return preds, loss
 
     def _init_weights(self, module):
         """

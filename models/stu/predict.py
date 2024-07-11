@@ -99,7 +99,7 @@ def main():
     configs = SpectralSSMConfigs(
         n_layers=6,
         n_embd=n_embd,
-        d_in=n_embd, # TODO: Fix later, d_in \neq n_embd
+        d_in=n_embd,  # TODO: Fix later, d_in \neq n_embd
         d_out=d_out,
         d_proj=d_proj,
         sl=sl,
@@ -284,7 +284,7 @@ def main():
         ax2.set_yscale("log")  # Use log scale for better visibility
 
     plt.suptitle(
-        f"SSSM Predictions for {args.controller} on {args.task}\n",
+        f"Spectral SSM Predictions for {args.controller} on {args.task}\n",
         fontsize=16,
     )
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
