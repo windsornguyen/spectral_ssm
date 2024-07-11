@@ -3,7 +3,8 @@
 # File: train.py
 # =============================================================================#
 
-"""Training loop for STU sequence prediction."""
+"""Training loop for hybrid STU-attention sequence prediction."""
+
 
 import argparse
 from datetime import datetime
@@ -16,22 +17,20 @@ from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from time import time
 
 from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
-from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
-from models.stu.model import SpectralSSM, SpectralSSMConfigs
+from models.hybrid.model import SpectralHybrid, SpectralHybridConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
 
 def save_results(
-    task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None
+    task, ctrl, data, name, ts, directory="results", prefix="hybrid", meta=None
 ):
     """
     Save data to a file with enhanced flexibility and metadata support.
@@ -75,7 +74,7 @@ def save_results(
     return fpath
 
 
-# Example: `torchrun -m --nproc_per_node=1 models.stu.train --controller Ant-v1 --task mujoco-v3`
+# Example: `torchrun -m --nproc_per_node=1 models.hybrid.train --controller Ant-v1 --task mujoco-v3`
 def main() -> None:
     torch.set_float32_matmul_precision("high")  # Enable CUDA TensorFloat-32
 
@@ -87,7 +86,7 @@ def main() -> None:
         "--controller",
         type=str,
         default="Ant-v1",
-        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1", "CartPole-v1"],
+        choices=["Ant-v1", "HalfCheetah-v1", "Walker2D-v1"],
         help="Controller to use for the MuJoCo environment. Defaults to Ant-v1.",
     )
     parser.add_argument(
@@ -108,6 +107,57 @@ def main() -> None:
         help="Training on the Princeton Della cluster. Defaults to True.",
         # NOTE: You MUST run with `torchrun` for this to work in the general setting.
     )
+    parser.add_argument(
+        "--dilated_attn",
+        type=bool,
+        default=False,
+        help="Whether to use dilated attention. Defaults to False.",
+    )
+    parser.add_argument(
+        "--segment_lengths",
+        type=int,
+        nargs='+',
+        default=[128, 256, 512],
+        help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
+    )
+    parser.add_argument(
+        "--dilated_ratios",
+        type=int,
+        nargs='+',
+        default=[1, 2, 4],
+        help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
+    )
+    parser.add_argument(
+        "--seq_parallel",
+        type=bool,
+        default=True,
+        help="Whether to use sequence parallelism. Defaults to True.",
+    )
+    parser.add_argument(
+        "--xpos_rel_pos",
+        type=bool,
+        default=True,
+        help="Whether to use relative positional embeddings. Defaults to True.",
+    )
+    parser.add_argument(
+        "--xpos_scale_base",
+        type=int,
+        default=512,
+        help="Scale base for positional embeddings. Defaults to 512.",
+    )
+    parser.add_argument(
+        "--rms_norm_eps",
+        type=float,
+        default=1e-5,
+        help="Epsilon for root mean square normalization. Defaults to 1e-5.",
+    )
+    parser.add_argument(
+        "--multiway",
+        type=bool,
+        default=False,
+        help="Whether to use multiway attention. Defaults to False.",
+    )
+
     args = parser.parse_args()
 
     controller = args.controller
@@ -118,7 +168,6 @@ def main() -> None:
     }
 
     # Defaults specific to the Princeton HPC cluster; modify to your own setup.
-    # device, local_rank, rank, world_size, num_workers, main_process = setup(args)
     device, local_rank, rank, world_size, main_process = setup(args)
 
     if main_process:
@@ -136,11 +185,7 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 2
-    scale: int = 4
-    bias: bool = False
-    dropout: float = 0.1
+    # STU settings
     num_eigh: int = 24
     k_y: int = 2
     k_u: int = 3
@@ -149,6 +194,26 @@ def main() -> None:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
+    
+    # Transformer settings
+    sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
+    flash_attn: bool = True # Whether to use FlashAttention-2 or not
+    
+    # Dilated Attention settings
+    dilated_attn = args.dilated_attn
+    segment_lengths = args.segment_lengths
+    dilated_ratios = args.dilated_ratios
+    seq_parallel = args.seq_parallel
+    xpos_rel_pos = args.xpos_rel_pos
+    xpos_scale_base = args.xpos_scale_base
+    rms_norm_eps = args.rms_norm_eps
+    multiway = args.multiway
+    
+    # General training settings
+    n_layers: int = 2
+    scale: int = 4
+    bias: bool = False
+    dropout: float = 0.10 # Convert all these into argparses eventually
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -157,8 +222,6 @@ def main() -> None:
             loss_fn = HalfCheetahLoss()
         elif controller == "Walker2D-v1":
             loss_fn = Walker2DLoss()
-        elif controller == "CartPole-v1":
-            loss_fn = CartpoleLoss()
         else:
             loss_fn = None
     else:
@@ -167,21 +230,16 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         n_embd: int = 24 if controller != "Ant-v1" else 37
+        n_heads: int = 8 if controller != "Ant-v1" else 1
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = d_in    # before projection d_in = d_out
         d_proj: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 900
-
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
+        sl: int = 1000
+        configs = SpectralHybridConfigs(
+            # STU settings
             d_in=d_in,
             d_out=d_out,
             d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
             num_eigh=num_eigh,
             k_y=k_y,
             k_u=k_u,
@@ -190,27 +248,46 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # Transformer settings
+            n_embd=n_embd,
+            n_heads=n_heads,
+            sub_rn=sub_rn,
+            flash_attn=flash_attn,
+            
+            # Dilated Attention
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
+            
+            # General training settings
+            sl=sl,
+            n_layers=n_layers,
+            scale=scale,
+            bias=bias,
+            dropout=dropout,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
             device=device,
         )
 
     elif task["mujoco-v2"]:
-        n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
+        n_embd: int = 18 if controller != "Ant-v1" else 29
+        n_heads: int = 9 if controller != "Ant-v1" else 1
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
         d_proj = n_embd
-        sl: int = 900
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
+        sl: int = 1000
+        configs = SpectralHybridConfigs(
+            # STU settings
             d_in=d_in,
             d_out=d_out,
             d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
             num_eigh=num_eigh,
             k_y=k_y,
             k_u=k_u,
@@ -219,8 +296,31 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # Transformer settings
+            n_embd=n_embd,
+            n_heads=n_heads,
+            sub_rn=sub_rn,
+            flash_attn=flash_attn,
+            
+            # Dilated Attention
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
+            
+            # General training settings
+            sl=sl,
+            n_layers=n_layers,
+            scale=scale,
+            bias=bias,
+            dropout=dropout,
             loss_fn=loss_fn,
-            controls={"task": "mujoco-v2", "controller": controller},
+            controls={"task": "mujoco-v1", "controller": controller},
             device=device,
         )
 
@@ -228,21 +328,17 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd = d_out
+        n_embd: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        n_heads: int = 16
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_proj = n_embd
         sl: int = 300
 
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
+        configs = SpectralHybridConfigs(
+            # STU settings
             d_in=d_in,
             d_out=d_out,
             d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
             num_eigh=num_eigh,
             k_y=k_y,
             k_u=k_u,
@@ -251,20 +347,45 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # Transformer settings
+            n_embd=n_embd,
+            n_heads=n_heads,
+            sub_rn=sub_rn,
+            flash_attn=flash_attn,
+            
+            # Dilated Attention
+            dilated_attn=dilated_attn,
+            segment_lengths=segment_lengths,
+            dilated_ratios=dilated_ratios,
+            seq_parallel=seq_parallel,
+            xpos_rel_pos=xpos_rel_pos,
+            xpos_scale_base=xpos_scale_base,
+            rms_norm_eps=rms_norm_eps,
+            multiway=multiway,
+            
+            # General training settings
+            sl=sl,
+            n_layers=n_layers,
+            scale=scale,
+            bias=bias,
+            dropout=dropout,
             loss_fn=loss_fn,
-            controls={"task": "mujoco-v3", "controller": controller},
+            controls={"task": "mujoco-v1", "controller": controller},
             device=device,
         )
 
-    model = SpectralSSM(configs).to(device)
+    model = SpectralHybrid(configs).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
-    stu_model = model.module if world_size > 1 else model
-    flops, mfu = None, None
+    hybrid_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    bsz: int = 8
+    # TODO: Add accumulated gradients to this
+    # TODO: Make data loader better
+    # TODO: Add print statement reporting our batch size and accumulated batch size
+    bsz: int = 8 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -297,7 +418,6 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
-        # TODO: Put model here in new dataloader
         data=train_data,
         task=args.task,
         bsz=bsz,
@@ -312,7 +432,6 @@ def main() -> None:
     )
 
     val_loader = get_dataloader(
-        # TODO: Put model here in new dataloader
         data=val_data,
         task=args.task,
         bsz=bsz,
@@ -327,7 +446,7 @@ def main() -> None:
     )
 
     # General training hyperparameters
-    training_stu = True
+    training_stu = False
     num_epochs: int = 3
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
@@ -354,8 +473,6 @@ def main() -> None:
     weight_decay: float = 1e-1
     max_lr: float = 1.5e-3
     min_lr: float = max_lr * 0.1
-
-    # Adam hyperparameters, per the GPT-3 paper
     betas = (0.9, 0.95)
     eps = 1e-8
     use_amsgrad = False
@@ -371,7 +488,7 @@ def main() -> None:
     )
 
     training_run = exp.Experiment(
-        model=stu_model,
+        model=hybrid_model,
         task=task,
         loss_fn=loss_fn,
         bsz=bsz,
@@ -399,7 +516,7 @@ def main() -> None:
         }
 
     if main_process:
-        msg = f"\nLyla: We'll be training the spectral SSM model on the {args.task} task with {controller}"
+        msg = f"\nLyla: We'll be training the STU-Attention hybrid model on the {args.task} task with {controller}"
         if world_size > 1:
             colored_print(
                 f"{msg} with {device} today on rank {rank + 1}/{world_size}"
@@ -430,7 +547,7 @@ def main() -> None:
             if relative_step % (eval_period // dilation) == 0 or last_step:
                 if main_process:
                     colored_print(
-                        f"\nLyla: Evaluating the spectral SSM model at step {relative_step}.",
+                        f"\nLyla: Evaluating the STU-Attention hybrid model on step {relative_step}.",
                         Colors.OKCYAN,
                     )
                 val_metrics = training_run.evaluate(val_loader)
@@ -450,10 +567,10 @@ def main() -> None:
                         patient_counter = 0
 
                         # Construct paths for model checkpoint and extra info
-                        model_checkpoint = f"sssm-{controller}-model_step-{relative_step}-{timestamp}.pt"
+                        model_checkpoint = f"hybrid-{controller}-model_step-{relative_step}-{timestamp}.pt"
                         model_path = os.path.join(checkpoint_dir, model_checkpoint)
 
-                        extra_info = f"sssm-{controller}-other_step-{relative_step}-{timestamp}.pt"
+                        extra_info = f"hybrid-{controller}-other_step-{relative_step}-{timestamp}.pt"
                         extra_info_path = os.path.join(checkpoint_dir, extra_info)
 
                         best_checkpoint = (model_checkpoint, extra_info)
@@ -480,7 +597,7 @@ def main() -> None:
                         )
 
                         colored_print(
-                            f"Lyla: Wow! We have a new personal best for the spectral SSM model at step {relative_step}. "
+                            f"Lyla: Wow! We have a new personal best for the STU-Attention hybrid model at step {relative_step}. "
                             f"The validation loss improved to: {val_metrics['loss']:.4f}! "
                             f"Model checkpoint saved as {model_path} and other data saved as {extra_info_path}",
                             Colors.OKGREEN,
@@ -488,14 +605,14 @@ def main() -> None:
                     else:
                         patient_counter += 1
                         colored_print(
-                            f"Lyla: No improvement in validation loss for the spectral SSM model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
+                            f"Lyla: No improvement in validation loss for the STU-Attention hybrid model for {patient_counter} eval periods. Current best loss: {best_val_loss:.4f}.",
                             Colors.WARNING,
                         )
 
                 if patient_counter >= patience:
                     if main_process:
                         colored_print(
-                            f"Lyla: We have reached the patience limit of {patience} for the spectral SSM model. Stopping the training early at step {relative_step}...",
+                            f"Lyla: We have reached the patience limit of {patience} for the STU-Attention hybrid model. Stopping the training early at step {relative_step}...",
                             Colors.FAIL,
                         )
                     break
@@ -503,20 +620,9 @@ def main() -> None:
             # Logging
             if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
-                
-                if 'flops' in train_results:
-                    flops = train_results['flops']
-                
-                if 'mfu' in train_results:
-                    mfu = train_results['mfu']
-                
-                flops_str = f"FLOPS/traj: {flops:.4f}" if flops is not None else "FLOPS/traj: N/A"
-                mfu_str = f"Est. MFU: {mfu:.4f}" if mfu is not None else "Est. MFU: N/A"
-                
                 colored_print(
                     f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
-                    f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f} | "
-                    f"{flops_str} | {mfu_str}",
+                    f"Step Time: {train_results['step_time']*1000:.4f}ms | Tokens/sec: {train_results['tokens_per_sec']:.4f}",
                     Colors.OKBLUE,
                 )
 
@@ -560,17 +666,19 @@ def main() -> None:
                 other_data = torch.load(best_model_extra_info_path, map_location="cpu")
                 training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-            print("\nLyla: Here's the best model information for the spectral SSM model:")
+            print(
+                "\nLyla: Here's the best model information for the STU-Attention hybrid model:"
+            )
             print(f"    Best model at step {best_model_step}")
             print(f"    Best model validation loss: {best_val_loss:.4f}")
             print(f"    Best model checkpoint saved at: {best_model_path}")
             print(f"    Best other data saved at: {best_model_extra_info_path}")
 
             # Save the training details to a file
-            training_details = f"training_details_sssm_{timestamp}.txt"
+            training_details = f"training_details_hybrid_{timestamp}.txt"
             with open(training_details, "w") as f:
                 f.write(
-                    f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
+                    f"Training completed for STU-Attention hybrid on {args.task} with {controller} at: {datetime.now()}\n"
                 )
                 f.write(f"Best model step: {best_model_step}\n")
                 f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
@@ -579,11 +687,11 @@ def main() -> None:
                     f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
                 )
             print(
-                f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
+                f"Lyla: Congratulations on completing the training run for the STU-Attention hybrid model! Details are saved in {training_details}."
             )
         else:
             colored_print(
-                "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
+                "\nLyla: No best checkpoint found for the STU-Attention hybrid model. The model did not improve during training.",
                 Colors.WARNING,
             )
 

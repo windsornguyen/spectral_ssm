@@ -79,9 +79,10 @@ class Experiment:
         self.model.to(self.device)
 
         # Additional info
-        self.total_time = 0
-        self.total_steps = 0
-        self.mfu_calculation_frequency = 100 # Estimate MFU every hundred steps.
+        # TODO: Compute flops and MFU eventually
+        # self.total_time = 0
+        # self.total_steps = 0
+        # self.mfu_calculation_frequency = 100 # Estimate MFU every hundred steps.
 
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
@@ -285,13 +286,13 @@ class Experiment:
                 }
             )
         
-        self.total_time += dt
-        self.total_steps += 1
+        # self.total_time += dt
+        # self.total_steps += 1
 
-        # Calculate MFU periodically
-        if relative_step % self.mfu_calculation_frequency == 0 and relative_step > 0:
-            flops, mfu = self.compute_mfu()
-            metrics["flops"], metrics["mfu"] = flops, mfu
+        # # Calculate MFU periodically
+        # if relative_step % self.mfu_calculation_frequency == 0 and relative_step > 0:
+        #     flops, mfu = self.compute_mfu()
+        #     metrics["flops"], metrics["mfu"] = flops, mfu
 
         return metrics
 

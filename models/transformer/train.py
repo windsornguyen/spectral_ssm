@@ -189,7 +189,7 @@ def main() -> None:
     scale: int = 4
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
-    dropout: float = 0.10 # Convert all these into argparses eventually
+    dropout: float = 0.1 # Convert all these into argparses eventually
     dilated_attn = args.dilated_attn
     segment_lengths = args.segment_lengths
     dilated_ratios = args.dilated_ratios

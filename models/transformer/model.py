@@ -11,28 +11,42 @@ from dataclasses import dataclass, field
 from einops import rearrange
 from torch.nn import functional as F
 from tqdm import tqdm
+from models.transformer.attn import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.rms_norm import RMSNorm
-from utils.squared_relu import SquaredReLU
+from utils.swiglu import SwiGLU
 from utils.dist_utils import all_gather_func, get_data_parallel_rank, get_data_parallel_world_size
 
 
 class FFN(nn.Module):
     """
-    Simple feed-forward network with the squared ReLU activation function.
+    Feed-forward network using the SwiGLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            scale (float): Scaling factor for hidden dimension.
+            n_embd (int): Embedding dimension.
+            bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
     """
 
     def __init__(self, configs):
         super(FFN, self).__init__()
-        self.c_fc = nn.Linear(configs.n_embd, configs.scale * configs.n_embd, bias=configs.bias)
-        self.squared_relu = SquaredReLU() # TODO: Make act fns configurable
-        self.c_proj = nn.Linear(configs.scale * configs.n_embd, configs.n_embd, bias=configs.bias)
+        self.h_dim = configs.scale * configs.n_embd
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.squared_relu(x)
-        x = self.c_proj(x)
+        """
+        Forward pass of the MLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        x = self.swiglu(x)
         x = self.dropout(x)
         return x
 
@@ -69,7 +83,7 @@ class TransformerConfigs:
     sl: int = 300  # Sequence length
     scale: int = 4
     sub_rn: bool = True
-    bias: bool = False  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    bias: bool = False
     dropout: float = 0.10
     flash_attn: bool = True
     loss_fn: nn.Module = nn.MSELoss()
@@ -101,10 +115,12 @@ class Transformer(nn.Module):
         self.controls = configs.controls
         self.n_embd = configs.n_embd
         self.d_in = nn.Linear(self.n_embd, self.n_embd)
+        self.dropout = nn.Dropout(self.configs.dropout)
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
                 wpe=nn.Embedding(configs.sl, configs.n_embd),
+                dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
                 ),
@@ -184,14 +200,15 @@ class Transformer(nn.Module):
 
         # Position embeddings of shape (sl, n_embd)
         pos_emb = self.transformer.wpe(pos)  # -> (sl, n_embd)
-        # Project inputs into lower dimensional space and add positional embeddings
 
-        # x = self.d_in(inputs) # (bsz, sl, n_embd)
+        # Add positional embeddings to the input
         x = inputs + pos_emb
         
         incremental_state = None # 
         if self.configs.dilated_attn:
             incremental_state = {}
+
+        x = self.transformer.dropout(inputs)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:

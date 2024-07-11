@@ -53,7 +53,7 @@ class SpectralSSMConfigs:
 
 class STU(nn.Module):
     """
-    A simple STU (Spectral Transform Unit) layer.
+    An STU (Spectral Transform Unit) layer.
 
     Args:
         configs: Configuration contains (at least) the following attributes:
@@ -132,7 +132,7 @@ class STU(nn.Module):
 
 class MLP(nn.Module):
     """
-    Simple multi-layer perceptron network using SwiGLU activation.
+    Multi-layer perceptron network using SwiGLU activation.
 
     Args:
         configs: Configuration object containing the following attributes:

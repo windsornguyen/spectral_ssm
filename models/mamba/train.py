@@ -162,7 +162,6 @@ def main() -> None:
     conv_bias: bool = True
     dropout: float = 0.10
     loss_fn = nn.MSELoss()
-    d_out: int = 29
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -180,12 +179,12 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        d_model: int = 24 if controller != "Ant-v1" else 37
+        d_model: int = 24 if controller != "Ant-v1" else 40
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
-        d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 900
+        d_out: int = 18 if controller != "Ant-v1" else 32
+        sl: int = 1000
 
         configs = Mamba2Configs(
             d_model=d_model,
@@ -221,11 +220,11 @@ def main() -> None:
         )
 
     elif task["mujoco-v2"]:
-        d_model: int = 18 if controller != "Ant-v1" else 29
-        d_state: int = 130 if controller == "HalfCheetah-v1" else 131
+        d_model: int = 18 if controller != "Ant-v1" else 32
+        d_state: int = 130 if controller == "HalfCheetah-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
-        sl: int = 900
+        sl: int = 1000
         configs = Mamba2Configs(
             d_model=d_model,
             d_state=d_state,
@@ -340,8 +339,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
+        model="mamba-2",
         data=train_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,
@@ -354,8 +355,10 @@ def main() -> None:
     )
 
     val_loader = get_dataloader(
+        model="mamba-2",
         data=val_data,
         task=args.task,
+        controller=args.controller,
         bsz=bsz,
         shift=shift,
         preprocess=preprocess,

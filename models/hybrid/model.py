@@ -1,6 +1,6 @@
 # ==============================================================================#
 # Authors: Windsor Nguyen
-# File: hybrid.py
+# File: model.py
 # ==============================================================================#
 
 """The Spectral State Space Model architecture with attention."""
@@ -28,15 +28,10 @@ from torch.nn import MSELoss
 
 @dataclass
 class SpectralHybridConfigs:
+    # STU settings
     d_in: int = 37
     d_out: int = 37
     d_proj: int = 29
-    n_layers: int = 2
-    n_embd: int = 37
-    sl: int = 1_000
-    scale: int = 4
-    bias: bool = False
-    dropout: float = 0.10
     num_eigh: int = 16
     k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
     k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
@@ -45,6 +40,29 @@ class SpectralHybridConfigs:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
+    
+    # Transformer settings
+    n_embd: int = 37 # Constraint: n_heads % n_embd == 0
+    n_heads: int = 16 # Constraint: n_heads % n_embd == 0
+    
+    # Dilated Attention settings
+    sub_rn: bool = True
+    flash_attn: bool = True
+    dilated_attn: bool = False
+    segment_lengths: list[int] = field(default_factory=lambda: [128])
+    dilated_ratios: list[int] = field(default_factory=lambda: [1])
+    seq_parallel: bool = True
+    xpos_rel_pos: bool = True
+    xpos_scale_base: int = 512
+    rms_norm_eps: float = 1e-5
+    multiway: bool = False
+
+    # General training settings
+    sl: int = 1_000 # Sequence length
+    n_layers: int = 2
+    scale: int = 4
+    bias: bool = False
+    dropout: float = 0.10
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -133,7 +151,7 @@ class STU(nn.Module):
 
 class MLP(nn.Module):
     """
-    Simple multi-layer perceptron network using SwiGLU activation.
+    Multi-layer perceptron network using SwiGLU activation.
 
     Args:
         configs: Configuration object containing the following attributes:
@@ -146,7 +164,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias)
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -178,13 +196,15 @@ class HybridBlock(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(HybridBlock, self).__init__()
         self.rn_1 = RMSNorm(configs.n_embd)
-        self.stu = STU(configs, sigma, V, padded_sl)
         self.rn_2 = RMSNorm(configs.n_embd)
-        self.mlp_1 = MLP(configs)
-        self.attn = CausalSelfAttention(configs)
+        self.stu = STU(configs, sigma, V, padded_sl)
         self.rn_3 = RMSNorm(configs.n_embd)
-        self.mlp_2 = MLP(configs)
+        self.mlp_1 = MLP(configs)
+
         self.rn_4 = RMSNorm(configs.n_embd)
+        self.attn = CausalSelfAttention(configs)
+        self.rn_5 = RMSNorm(configs.n_embd)
+        self.mlp_2 = MLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -196,10 +216,14 @@ class HybridBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp_1(self.rn_2(x))
-        x = x + self.attn(self.rn_3(x))
-        x = x + self.mlp_2(self.rn_4(x))
+        # STU portion
+        z = self.rn_1(x)
+        x = z + self.stu(self.rn_2(x))
+        x = x + self.mlp_1(self.rn_3(x)) + z
+
+        # Attention portion
+        x = x + self.attn(self.rn_4(x))
+        x = x + self.mlp_2(self.rn_5(x))
         return x
 
 class SpectralHybrid(nn.Module):
@@ -230,7 +254,6 @@ class SpectralHybrid(nn.Module):
 
         self.bias = configs.bias
         self.dropout = configs.dropout
-        self.loss_fn = configs.loss_fn
         self.controls = configs.controls
         
         self.hybrid = nn.ModuleDict(
@@ -244,7 +267,6 @@ class SpectralHybrid(nn.Module):
             )
         )
         
-        self.output = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
         # Adjust output dims based on task and controller
         self.d_out = configs.n_embd
         if configs.controls["task"] == "mujoco-v1":
@@ -252,14 +274,17 @@ class SpectralHybrid(nn.Module):
                 self.d_out = 29
             else:
                 self.d_out = 18
-                
+        
+        self.output = nn.Linear(configs.n_embd, self.d_out, bias=configs.bias)
+        self.loss_fn = self.configs.loss_fn
+        
         # Initialize all weights
         self.m_x = self.d_out**-0.5
         self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print("\STU-Attention Hybrid Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
 
     def forward(self, inputs, targets):
         """
@@ -275,6 +300,16 @@ class SpectralHybrid(nn.Module):
             - Tuple containing loss and metrics (if applicable)
         """
         _, sl, n_embd = inputs.size()
+        
+        # Generate positional embeddings for the sequence
+        pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
+
+        # Position embeddings of shape (sl, n_embd)
+        pos_emb = self.hybrid.wpe(pos)  # -> (sl, n_embd)
+
+        # Add positional embeddings to the input
+        x = inputs + pos_emb
+        
         x = self.hybrid.dropout(inputs)
         for block in self.hybrid.hidden:
             x = block(x)
@@ -328,9 +363,9 @@ class SpectralHybrid(nn.Module):
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+            n_params -= self.hybrid.wpe.weight.numel()
         return n_params
-    
+
     def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
         """
         Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
