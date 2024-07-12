@@ -100,13 +100,13 @@ def main():
         raise ValueError("Invalid task")
 
     configs = TransformerConfigs(
-        n_layers=6,
+        n_layers=2,
         n_embd=n_embd,
         n_heads=n_heads,
         sl=sl,
         scale=16,
         bias=False,
-        dropout=0.10,
+        dropout=0.0,
         dilated_attn=False,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},

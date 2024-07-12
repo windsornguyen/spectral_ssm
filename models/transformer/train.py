@@ -189,7 +189,16 @@ def main() -> None:
     scale: int = 16
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
-    dropout: float = 0.1 # Convert all these into argparses eventually
+    dropout: float = 0.0 # Convert all these into argparses eventually
+    flash_attn: bool = True
+    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
+
+    # MoE
+    moe: bool = False
+    num_experts: int = 2
+    num_experts_per_tok: int = 1
+
+    # Dilated Attention
     dilated_attn = args.dilated_attn
     segment_lengths = args.segment_lengths
     dilated_ratios = args.dilated_ratios
@@ -217,6 +226,7 @@ def main() -> None:
         n_heads: int = 8 if controller != "Ant-v1" else 1
         sl: int = 1000
         configs = TransformerConfigs(
+            # General Transformer settings
             n_layers=n_layers,
             n_embd=n_embd,
             n_heads=n_heads,
@@ -225,10 +235,18 @@ def main() -> None:
             sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
+            flash_attn=flash_attn,
+            use_sq_relu=use_sq_relu,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
             device=device,
 
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
+
+            # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
             dilated_ratios=dilated_ratios,
@@ -244,6 +262,7 @@ def main() -> None:
         n_heads: int = 9 if controller != "Ant-v1" else 1
         sl: int = 1000
         configs = TransformerConfigs(
+            # General Transformer settings
             n_layers=n_layers,
             n_embd=n_embd,
             n_heads=n_heads,
@@ -252,9 +271,16 @@ def main() -> None:
             sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
+            flash_attn=flash_attn,
+            use_sq_relu=use_sq_relu,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
             device=device,
+            
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
             
             # Dilated Attention
             dilated_attn=dilated_attn,
@@ -275,6 +301,7 @@ def main() -> None:
         sl: int = 300
 
         configs = TransformerConfigs(
+            # General Transformer settings
             n_layers=n_layers,
             n_embd=n_embd,
             n_heads=n_heads,
@@ -283,9 +310,16 @@ def main() -> None:
             sub_rn=sub_rn,
             bias=bias,
             dropout=dropout,
+            flash_attn=flash_attn,
+            use_sq_relu=use_sq_relu,
             loss_fn=loss_fn,
             controls={"task": "mujoco-v3", "controller": controller},
             device=device,
+            
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_tok=num_experts_per_tok,
 
             # Dilated Attention
             dilated_attn=dilated_attn,

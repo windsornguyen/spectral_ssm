@@ -13,10 +13,44 @@ from torch.nn import functional as F
 from tqdm import tqdm
 from models.transformer.attn import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
+from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from utils.dist_utils import all_gather_func, get_data_parallel_rank, get_data_parallel_world_size
 
+
+@dataclass
+class TransformerConfigs:
+    n_layers: int = 2
+    n_embd: int = 512  # Embedding dimension
+    n_heads: int = 16  # Constraint: n_heads % n_embd == 0
+    sl: int = 300  # Sequence length
+    scale: int = 4
+    sub_rn: bool = True
+    bias: bool = False
+    dropout: float = 0.10
+    flash_attn: bool = True
+    use_sq_relu: bool = False
+    loss_fn: nn.Module = nn.MSELoss()
+    controls: dict = field(
+        default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
+    )
+    device: torch.device = None
+    
+    # MoE
+    moe: bool = True
+    num_experts: int = 8
+    num_experts_per_tok: int = 2
+
+    # Dilated Attention
+    dilated_attn: bool = False
+    segment_lengths: list[int] = field(default_factory=lambda: [128]) # TODO: Check this makes sense (and follows paper)
+    dilated_ratios: list[int] = field(default_factory=lambda: [1]) # TODO: Check this makes sense (and follows paper)
+    seq_parallel: bool = True
+    xpos_rel_pos: bool = True
+    xpos_scale_base: int = 512
+    rms_norm_eps: float = 1e-5
+    multiway: bool = False
 
 class FFN(nn.Module):
     """
@@ -32,8 +66,10 @@ class FFN(nn.Module):
 
     def __init__(self, configs):
         super(FFN, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.swiglu = SwiGLU(
+            dim=configs.n_embd, h_dim=configs.scale * configs.n_embd,
+            bias=configs.bias, use_sq_relu=configs.use_sq_relu
+        )
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x):
@@ -50,7 +86,6 @@ class FFN(nn.Module):
         x = self.dropout(x)
         return x
 
-
 class TransformerBlock(nn.Module):
     """
     Single block of the Transformer.
@@ -61,7 +96,16 @@ class TransformerBlock(nn.Module):
         self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
         self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
-        self.ffn = FFN(configs)
+
+        if configs.moe:
+            self.ffn = MoE(
+                configs,
+                experts=[FFN(configs) for _ in range(configs.num_experts)],
+                # TODO: Add a more sophisticated gating mechanism?
+                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
+            )
+        else:
+            self.ffn = FFN(configs)
 
     def _get_attn_type(self, configs):
         if configs.dilated_attn:
@@ -73,35 +117,6 @@ class TransformerBlock(nn.Module):
         x = x + self.attn(self.rn_1(x))
         x = x + self.ffn(self.rn_2(x))
         return x
-
-
-@dataclass
-class TransformerConfigs:
-    n_layers: int = 2
-    n_embd: int = 512  # Embedding dimension
-    n_heads: int = 16  # Constraint: n_heads % n_embd == 0
-    sl: int = 300  # Sequence length
-    scale: int = 4
-    sub_rn: bool = True
-    bias: bool = False
-    dropout: float = 0.10
-    flash_attn: bool = True
-    loss_fn: nn.Module = nn.MSELoss()
-    controls: dict = field(
-        default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
-    )
-    device: torch.device = None
-    
-    # Dilated Attention
-    dilated_attn: bool = False
-    segment_lengths: list[int] = field(default_factory=lambda: [128])
-    dilated_ratios: list[int] = field(default_factory=lambda: [1])
-    seq_parallel: bool = True
-    xpos_rel_pos: bool = True
-    xpos_scale_base: int = 512
-    rms_norm_eps: float = 1e-5
-    multiway: bool = False
-
 
 class Transformer(nn.Module):
     """
@@ -116,6 +131,12 @@ class Transformer(nn.Module):
         self.n_embd = configs.n_embd
         self.d_in = nn.Linear(self.n_embd, self.n_embd)
         self.dropout = nn.Dropout(self.configs.dropout)
+        
+        if configs.moe:
+            print(f"\nMoE?: Enabled | Using {configs.num_experts} experts.")
+        else:
+            print(f"\nMoE?: Disabled")
+
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
@@ -144,7 +165,7 @@ class Transformer(nn.Module):
 
         # Report the number of parameters
         print(
-            "Transformer Model Parameter Count (excl. pos. emb.): %.2fM"
+            "\nTransformer Model Parameter Count (excl. pos. emb.): %.2fM"
             % (self.get_num_params() / 1e6,)
         )
 
