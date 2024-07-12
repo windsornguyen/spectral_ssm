@@ -150,6 +150,11 @@ def main() -> None:
     use_ar_u: bool = True
     use_hankel_L: bool = False
 
+    # MoE
+    moe: bool = False
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
             loss_fn = AntLoss()
@@ -190,6 +195,12 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             loss_fn=loss_fn,
             controls={"task": "mujoco-v1", "controller": controller},
             device=device,
@@ -219,6 +230,12 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             loss_fn=loss_fn,
             controls={"task": "mujoco-v2", "controller": controller},
             device=device,
@@ -251,6 +268,12 @@ def main() -> None:
             use_ar_y=use_ar_y,
             use_ar_u=use_ar_u,
             use_hankel_L=use_hankel_L,
+
+            # MoE
+            moe=moe,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             loss_fn=loss_fn,
             controls={"task": "mujoco-v3", "controller": controller},
             device=device,

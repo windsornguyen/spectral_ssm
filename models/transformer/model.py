@@ -40,7 +40,7 @@ class TransformerConfigs:
     # MoE
     moe: bool = True
     num_experts: int = 8
-    num_experts_per_tok: int = 2
+    num_experts_per_timestep: int = 2
 
     # Dilated Attention
     dilated_attn: bool = False
@@ -97,15 +97,11 @@ class TransformerBlock(nn.Module):
         self.attn = self._get_attn_type(configs)
         self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
 
-        if configs.moe:
-            self.ffn = MoE(
-                configs,
-                experts=[FFN(configs) for _ in range(configs.num_experts)],
-                # TODO: Add a more sophisticated gating mechanism?
-                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
-            )
-        else:
-            self.ffn = FFN(configs)
+        self.ffn_1 = MoE(
+            configs,
+            experts=[FFN(configs) for _ in range(configs.num_experts)],
+            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+        ) if configs.moe else FFN(configs)
 
     def _get_attn_type(self, configs):
         if configs.dilated_attn:
@@ -115,7 +111,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x):
         x = x + self.attn(self.rn_1(x))
-        x = x + self.ffn(self.rn_2(x))
+        x = x + self.ffn_1(self.rn_2(x))
         return x
 
 class Transformer(nn.Module):
@@ -351,7 +347,7 @@ class Transformer(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting

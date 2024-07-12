@@ -196,7 +196,7 @@ def main() -> None:
     # MoE
     moe: bool = False
     num_experts: int = 2
-    num_experts_per_tok: int = 1
+    num_experts_per_timestep: int = 1
 
     # Dilated Attention
     dilated_attn = args.dilated_attn
@@ -244,7 +244,7 @@ def main() -> None:
             # MoE
             moe=moe,
             num_experts=num_experts,
-            num_experts_per_tok=num_experts_per_tok,
+            num_experts_per_timestep=num_experts_per_timestep,
 
             # Dilated Attention
             dilated_attn=dilated_attn,
@@ -280,7 +280,7 @@ def main() -> None:
             # MoE
             moe=moe,
             num_experts=num_experts,
-            num_experts_per_tok=num_experts_per_tok,
+            num_experts_per_timestep=num_experts_per_timestep,
             
             # Dilated Attention
             dilated_attn=dilated_attn,
@@ -319,7 +319,7 @@ def main() -> None:
             # MoE
             moe=moe,
             num_experts=num_experts,
-            num_experts_per_tok=num_experts_per_tok,
+            num_experts_per_timestep=num_experts_per_timestep,
 
             # Dilated Attention
             dilated_attn=dilated_attn,
@@ -336,7 +336,7 @@ def main() -> None:
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
-    transformer_model = model.module if world_size > 1 else model
+    hybrid_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
     # TODO: Add accumulated gradients to this
@@ -449,7 +449,7 @@ def main() -> None:
     )
 
     training_run = exp.Experiment(
-        model=transformer_model,
+        model=hybrid_model,
         task=task,
         loss_fn=loss_fn,
         bsz=bsz,

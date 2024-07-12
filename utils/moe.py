@@ -33,21 +33,21 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert networks.
         gate (nn.Module): Gating network.
         num_experts (int): Total number of experts.
-        num_experts_per_tok (int): Number of experts to use per token.
+        num_experts_per_timestep (int): Number of experts to use per token.
     """
     def __init__(self, configs, experts: list[nn.Module], gate: nn.Module):
         super(MoE, self).__init__()
         assert len(experts) > 0, "MoE requires at least one expert"
-        assert configs.num_experts_per_tok <= configs.num_experts, "num_experts_per_tok must be <= num_experts"
+        assert configs.num_experts_per_timestep <= configs.num_experts, "num_experts_per_timestep must be <= num_experts"
         self.experts = nn.ModuleList(experts)
         self.gate = gate
         self.num_experts = configs.num_experts
-        self.num_experts_per_tok = configs.num_experts_per_tok
+        self.num_experts_per_timestep = configs.num_experts_per_timestep
 
     def forward(self, inputs: torch.Tensor):
         inputs_fused = inputs.view(-1, inputs.shape[-1]) # (bsz * sl, n_embd)
         gate_logits = self.gate(inputs_fused)
-        weights, selected_experts = torch.topk(gate_logits, self.num_experts_per_tok)
+        weights, selected_experts = torch.topk(gate_logits, self.num_experts_per_timestep)
         weights = F.softmax(weights, dim=-1, dtype=torch.float).type_as(inputs)
 
         results = torch.zeros_like(inputs_fused)
@@ -56,4 +56,5 @@ class MoE(nn.Module):
             results[batch_idx] += weights[batch_idx, nth_expert, None] * expert(
                 inputs_fused[batch_idx]
             )
+
         return results.view_as(inputs)

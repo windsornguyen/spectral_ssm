@@ -19,6 +19,7 @@ from models.stu.stu_utils import (
     compute_ar_y
 )
 from utils.nearest_power_of_2 import nearest_power_of_2
+from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
@@ -49,6 +50,11 @@ class SpectralSSMConfigs:
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
     )
     device: torch.device = None
+
+    # MoE
+    moe: bool = True
+    num_experts: int = 8
+    num_experts_per_timestep: int = 2
 
 
 class STU(nn.Module):
@@ -219,7 +225,12 @@ class Block(nn.Module):
         self.rn_2 = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
         self.rn_3 = RMSNorm(configs.n_embd)
-        self.mlp = MLP(configs)
+
+        self.mlp = MoE(
+            configs,
+            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+        ) if configs.moe else GatedMLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -231,10 +242,11 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        z = self.rn_1(x)
-        x = z + self.stu(self.rn_2(x))
-        x = x + self.mlp(self.rn_3(x))
-        return x + z  
+        z = x
+        x = self.stu(self.rn_2(x))
+        x = x + self.mlp(self.rn_3(x)) + z
+
+        return x
 
 class SpectralSSM(nn.Module):
     """
@@ -518,7 +530,7 @@ class SpectralSSM(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting

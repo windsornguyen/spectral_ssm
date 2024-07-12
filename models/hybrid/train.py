@@ -192,13 +192,19 @@ def main() -> None:
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     use_ar_y: bool = False
-    use_ar_u: bool = False
+    use_ar_u: bool = True
     use_hankel_L: bool = False
-    
+
     # Transformer settings
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
-    
+
+    # MoE
+    moe_1: bool = True
+    moe_2: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
     # Dilated Attention settings
     dilated_attn = args.dilated_attn
     segment_lengths = args.segment_lengths
@@ -214,6 +220,8 @@ def main() -> None:
     scale: int = 4
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
+    flash_attn: bool = True
+    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -255,6 +263,12 @@ def main() -> None:
             sub_rn=sub_rn,
             flash_attn=flash_attn,
             
+            # MoE
+            moe_1=moe_1,
+            moe_2=moe_2,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
@@ -302,7 +316,13 @@ def main() -> None:
             n_heads=n_heads,
             sub_rn=sub_rn,
             flash_attn=flash_attn,
-            
+
+            # MoE
+            moe_1=moe_1,
+            moe_2=moe_2,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,
@@ -353,7 +373,13 @@ def main() -> None:
             n_heads=n_heads,
             sub_rn=sub_rn,
             flash_attn=flash_attn,
-            
+
+            # MoE
+            moe_1=moe_1,
+            moe_2=moe_2,
+            num_experts=num_experts,
+            num_experts_per_timestep=num_experts_per_timestep,
+
             # Dilated Attention
             dilated_attn=dilated_attn,
             segment_lengths=segment_lengths,

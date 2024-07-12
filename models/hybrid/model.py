@@ -1,5 +1,5 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen
+# Authors: Windsor Nguyen, Isabel Liu
 # File: model.py
 # ==============================================================================#
 
@@ -20,6 +20,7 @@ from models.stu.stu_utils import (
 )
 from models.transformer.attn import CausalSelfAttention
 from utils.nearest_power_of_2 import nearest_power_of_2
+from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
@@ -44,7 +45,15 @@ class SpectralHybridConfigs:
     # Transformer settings
     n_embd: int = 37 # Constraint: n_heads % n_embd == 0
     n_heads: int = 16 # Constraint: n_heads % n_embd == 0
+    flash_attn: bool = True
+    use_sq_relu: bool = False
     
+    # MoE
+    moe_1: bool = False
+    moe_2: bool = True
+    num_experts: int = 8
+    num_experts_per_timestep: int = 2
+
     # Dilated Attention settings
     sub_rn: bool = True
     flash_attn: bool = True
@@ -163,8 +172,10 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.swiglu = SwiGLU(
+            dim=configs.n_embd, h_dim=configs.scale * configs.n_embd,
+            bias=configs.bias, use_sq_relu=configs.use_sq_relu
+        )
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -195,16 +206,26 @@ class HybridBlock(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(HybridBlock, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
-        self.rn_2 = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
-        self.rn_3 = RMSNorm(configs.n_embd)
-        self.mlp_1 = MLP(configs)
-
-        self.rn_4 = RMSNorm(configs.n_embd)
         self.attn = CausalSelfAttention(configs)
+
+        self.mlp_1 = MoE(
+            configs,
+            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+        ) if configs.moe_1 else MLP(configs)
+
+        self.mlp_2 = MoE(
+            configs,
+            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+        ) if configs.moe_2 else MLP(configs)
+
+        #self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_2 = RMSNorm(configs.n_embd)
+        self.rn_3 = RMSNorm(configs.n_embd)
+        self.rn_4 = RMSNorm(configs.n_embd)
         self.rn_5 = RMSNorm(configs.n_embd)
-        self.mlp_2 = MLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -217,13 +238,14 @@ class HybridBlock(nn.Module):
             torch.Tensor: Output tensor
         """
         # STU portion
-        z = self.rn_1(x)
-        x = z + self.stu(self.rn_2(x))
+        z = x
+        x = self.stu(self.rn_2(x))
         x = x + self.mlp_1(self.rn_3(x)) + z
 
         # Attention portion
         x = x + self.attn(self.rn_4(x))
-        x = x + self.mlp_2(self.rn_5(x))
+        x = x + self.mlp_2(self.rn_5(x)) + z
+
         return x
 
 class SpectralHybrid(nn.Module):

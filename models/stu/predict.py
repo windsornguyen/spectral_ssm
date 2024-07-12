@@ -60,7 +60,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
-    model_path = f"sssm_{args.controller}_{args.task}.pt"
+    model_path = f"sssm_{args.controller}_{args.task}_norm.pt"
 
     if args.task == "mujoco-v1":
         sl = 1000
@@ -106,10 +106,17 @@ def main():
         scale=4,
         bias=False,
         dropout=0.0,
-        num_eigh=24,
+        num_eigh=16,
         k_y=2,
         k_u=3,
         learnable_m_y=True,
+        alpha=0.9,
+        use_ar_y=False,
+        use_ar_u=True,
+        use_hankel_L=False,
+        moe=False,
+        num_experts=3,
+        num_experts_per_timestep=2,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
         device=device,
@@ -127,8 +134,39 @@ def main():
         base_path = f"data/{args.task}/{args.controller}/"
         test_inputs = np.load(f"{base_path}/val_inputs.npy")
         test_targets = np.load(f"{base_path}/val_targets.npy")
+
+        # Define feature groups w.r.t each task
+        if args.controller == "Ant-v1":
+            feature_groups = {
+                "coordinates": (0, 1, 2),
+                "orientations": (3, 4, 5, 6),
+                "angles": (7, 8, 9, 10, 11, 12, 13, 14),
+                "coordinate_velocities": (15, 16, 17, 18, 19, 20),
+                "angular_velocities": (21, 22, 23, 24, 25, 26, 27, 28),
+            }
+        else:
+            feature_groups = {
+                "coordinates": (0, 1),
+                "angles": (2, 3, 4, 5, 6, 7, 8),
+                "coordinate_velocities": (9, 10),
+                "angular_velocities": (11, 12, 13, 14, 15, 16, 17),
+            }
+
+        # Normalize the test data
+        mean = {}
+        std = {}
+        for group_name, indices in feature_groups.items():
+            group_data = np.concatenate([test_targets[:, :, indices], test_inputs[:, :, indices]], axis=0)
+            mean[group_name] = np.mean(group_data, axis=(0, 1), keepdims=True)
+            std[group_name] = np.std(group_data, axis=(0, 1), keepdims=True)
+
+        for group_name, indices in feature_groups.items():
+            test_inputs[:, :, indices] = (test_inputs[:, :, indices] - mean[group_name]) / (std[group_name] + 1e-6)
+            test_targets[:, :, indices] = (test_targets[:, :, indices] - mean[group_name]) / (std[group_name] + 1e-6)
+        
         test_inputs = torch.from_numpy(test_inputs).float().to(device)
         test_targets = torch.from_numpy(test_targets).float().to(device)
+
     elif args.task == "mujoco-v3":
         test_data = torch.load(
             f"data/{args.task}/{args.controller}/{args.controller}_ResNet-18_test.pt",
@@ -207,20 +245,21 @@ def main():
 
     # Save predictions and ground truths
     print("Saved prediction shape:", predicted_states.shape)
+    test_targets = torch.roll(test_targets, shifts=1, dims=1) # shift ground truth by 1
     print(
         "Saved ground truth shape:",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
     print("Saved losses shape:", losses.shape)
     np.save(
-        f"sssm_{args.controller}_{args.task}_predictions.npy",
+        f"sssm_{args.controller}_{args.task}_predictions_norm.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"sssm_{args.controller}_{args.task}_ground_truths.npy",
+        f"sssm_{args.controller}_{args.task}_ground_truths_norm.npy",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
-    np.save(f"sssm_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
+    np.save(f"sssm_{args.controller}_{args.task}_losses_norm.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'sssm_{args.controller}_{args.task}_predictions.npy', 'sssm_{args.controller}_{args.task}_ground_truths.npy', and 'sssm_{args.controller}_{args.task}_losses.npy' respectively."
     )
@@ -244,8 +283,8 @@ def main():
 
         # Plot ground truth
         ax1.plot(
-            range(init, init + steps - 1),
-            test_targets[pred_idx, init : init + steps - 1, feature_idx].cpu().numpy(),
+            range(init, init + steps),
+            test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
             label="Ground Truth",
             color="black",
             linewidth=2,
@@ -254,8 +293,8 @@ def main():
 
         # Plot prediction
         ax1.plot(
-            range(init, init + steps - 1),
-            predicted_states[pred_idx, : steps - 1, feature_idx].cpu().numpy(),
+            range(init, init + steps),
+            predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
             label="Predicted",
             color=colors[pred_idx],
             linewidth=2,
@@ -270,8 +309,8 @@ def main():
         ax2 = fig.add_subplot(gs[pred_idx, 1])
 
         ax2.plot(
-            range(steps - 1),
-            smooth_curve(losses[pred_idx, : steps - 1].cpu().numpy()),
+            range(steps),
+            smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
             label="Total Loss",
             color="black",
             linewidth=2,
@@ -290,7 +329,7 @@ def main():
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     # TODO: Add existok / make if non-existent (results/) directory
     plt.savefig(
-        f"results/sssm_{args.controller}_{args.task}_predictions.png",
+        f"results/sssm_{args.controller}_{args.task}_predictions_norm.png",
         dpi=300,
         bbox_inches="tight",
     )

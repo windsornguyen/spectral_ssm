@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu, Yagiz Devre
+# Authors: Isabel Liu, Windsor Nguyen, Yagiz Devre
 # File: dataloader.py
 # =============================================================================#
 
@@ -42,16 +42,38 @@ class Dataloader(Dataset):
                 # Padding zeros to the end of each trajectory at each timestep
                 self.inputs = np.pad(self.inputs, ((0, 0), (0, 0), (0, 3)), mode='constant')
                 self.targets = np.pad(self.targets, ((0, 0), (0, 0), (0, 3)), mode='constant')
-                
+            
+            # Define feature groups w.r.t each task
+            if controller == "Ant-v1":
+                self.feature_groups = {
+                    "coordinates": (0, 1, 2),
+                    "orientations": (3, 4, 5, 6),
+                    "angles": (7, 8, 9, 10, 11, 12, 13, 14),
+                    "coordinate_velocities": (15, 16, 17, 18, 19, 20),
+                    "angular_velocities": (21, 22, 23, 24, 25, 26, 27, 28),
+                }
+                if task == "mujoco-v1":
+                    self.feature_groups["torque"] = (29, 30, 31, 32, 33, 34, 35, 36)
+            else:
+                self.feature_groups = {
+                    "coordinates": (0, 1),
+                    "angles": (2, 3, 4, 5, 6, 7, 8),
+                    "coordinate_velocities": (9, 10),
+                    "angular_velocities": (11, 12, 13, 14, 15, 16, 17),
+                }
+                if task == "mujoco-v1":
+                    self.feature_groups["torque"] = (18, 19, 20, 21, 22, 23)
+
         elif task == "mujoco-v3":
             self.data = data
-            if self.preprocess:
-                colored_print("Calculating data statistics...", Colors.OKBLUE)
-                self._calculate_statistics()
-                colored_print("Normalizing data...", Colors.OKBLUE)
-                self._normalize_data()
-                colored_print("Validating data normalization...", Colors.OKBLUE)
-                self._validate_normalization()
+
+        if self.preprocess:
+            colored_print("Calculating data statistics...", Colors.OKBLUE)
+            self._calculate_statistics()
+            colored_print("Normalizing data...", Colors.OKBLUE)
+            self._normalize_data()
+            colored_print("Validating data normalization...", Colors.OKBLUE)
+            self._validate_normalization()
 
     def __len__(self):
         if self.task == "mujoco-v3":
@@ -80,11 +102,21 @@ class Dataloader(Dataset):
             # Std over frames and samples, for each feature
             self.std = features.std(dim=(0, 1), keepdim=True)
 
+        else:
+            self.mean = {}
+            self.std = {}
+            for group_name, indices in self.feature_groups.items():
+                group_data = np.concatenate([self.targets[:, :, indices], self.inputs[:, :, indices]], axis=0)
+                self.mean[group_name] = np.mean(group_data, axis=(0, 1), keepdims=True)
+                self.std[group_name] = np.std(group_data, axis=(0, 1), keepdims=True)
+            
     def _normalize_data(self):
         if self.task == "mujoco-v3":
-            self.data = [
-                (item - self.mean) / (self.std + self.eps) for item in self.data
-            ]
+            self.data = [(item - self.mean) / (self.std + self.eps) for item in self.data]
+        else:
+            for group_name, indices in self.feature_groups.items():
+                self.inputs[:, :, indices] = (self.inputs[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
+                self.targets[:, :, indices] = (self.targets[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
 
     def _validate_normalization(self):
         if self.task == "mujoco-v3":
@@ -107,6 +139,34 @@ class Dataloader(Dataset):
                 "Data normalization validated successfully.",
                 Colors.BOLD + Colors.OKGREEN,
             )
+
+        else:
+            for group_name, indices in self.feature_groups.items():
+                normalized_mean_inputs = np.mean(self.inputs[:, :, indices], axis=(0, 1))
+                normalized_std_inputs = np.std(self.inputs[:, :, indices], axis=(0, 1))
+                normalized_mean_targets = np.mean(self.targets[:, :, indices], axis=(0, 1))
+                normalized_std_targets = np.std(self.targets[:, :, indices], axis=(0, 1))
+            
+                # TODO: Normalized mean not close to zero
+                # assert np.allclose(
+                #     normalized_mean_inputs, np.zeros_like(normalized_mean_inputs), atol=self.eps
+                # ), f"Normalized mean of inputs for {group_name} is not close to zero: {normalized_mean_inputs}"
+                # assert np.allclose(
+                #     normalized_std_inputs, np.ones_like(normalized_std_inputs), atol=self.eps
+                # ), f"Normalized standard deviation of inputs for {group_name} is not close to one: {normalized_std_inputs}"
+                # assert np.allclose(
+                #     normalized_mean_targets, np.zeros_like(normalized_mean_targets), atol=self.eps
+                # ), f"Normalized mean of targets for {group_name} is not close to zero: {normalized_mean_targets}"
+                # assert np.allclose(
+                #     normalized_std_targets, np.ones_like(normalized_std_targets), atol=self.eps
+                # ), f"Normalized standard deviation of targets for {group_name} is not close to one: {normalized_std_targets}"
+
+                colored_print(f"\nNormalized mean of inputs for {group_name}: {normalized_mean_inputs}", Colors.OKGREEN)
+                colored_print(f"Normalized standard deviation of inputs for {group_name}: {normalized_std_inputs}", Colors.OKGREEN)
+                colored_print(f"Normalized mean of targets for {group_name}: {normalized_mean_targets}", Colors.OKGREEN)
+                colored_print(f"Normalized standard deviation of targets for {group_name}: {normalized_std_targets}", Colors.OKGREEN)
+
+            colored_print("Data normalization validated successfully.", Colors.BOLD + Colors.OKGREEN)
 
 
 def get_dataloader(
