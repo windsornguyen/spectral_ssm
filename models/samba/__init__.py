@@ -1,6 +1,6 @@
 # ==============================================================================#
-# Author:  Windsor Nguyen
+# Authors: Windsor Nguyen
 # File: __init__.py
 # ==============================================================================#
 
-"""Package for the Spectral State Space Model repository."""
+"""Samba: An SSM-Attention Hybrid."""

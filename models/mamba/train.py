@@ -159,7 +159,7 @@ def main() -> None:
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 8 if use_mem_eff_path else 1
-    n_layers: int = 2
+    n_layers: int = 6
     bias: bool = False
     conv_bias: bool = True
     loss_fn = nn.MSELoss()

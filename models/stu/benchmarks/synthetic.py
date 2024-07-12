@@ -214,7 +214,7 @@ def generate_associative_recall(
 
     Args:
       num_examples: Number of examples to generate.
-      sequence_len: Length of each sequence.
+      sequence_len: Length of each sequence (adjusted to be even).
       vocab_size: Size of the vocabulary.
       seed: Seed for random number generator.
 

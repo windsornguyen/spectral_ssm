@@ -1,5 +1,0 @@
-Training completed for the spectral SSM on mujoco-v2 with Ant-v1 at: 2024-07-11 15:51:08.242157
-Best model step: 1168
-Best model validation loss: 2.8626
-Best model checkpoint saved at: checkpoints/sssm-Ant-v1-model_step-1168-2024-07-11-15-50-43.pt
-Best model's extra info data saved at: checkpoints/sssm-Ant-v1-other_step-1168-2024-07-11-15-50-43.pt

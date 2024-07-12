@@ -184,7 +184,7 @@ class Mamba2(nn.Module):
 
         # Report the number of parameters
         print(
-            "Mamba2 Model Parameter Count (excl. pos. emb.): %.2fM"
+            "Mamba-2 Model Parameter Count (excl. pos. emb.): %.2fM"
             % (self.get_num_params() / 1e6,)
         )
 

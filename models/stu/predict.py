@@ -97,7 +97,7 @@ def main():
         raise ValueError("Invalid task")
 
     configs = SpectralSSMConfigs(
-        n_layers=6,
+        n_layers=2,
         n_embd=n_embd,
         d_in=n_embd,  # TODO: Fix later, d_in \neq n_embd
         d_out=d_out,
@@ -105,7 +105,7 @@ def main():
         sl=sl,
         scale=4,
         bias=False,
-        dropout=0.10,
+        dropout=0.0,
         num_eigh=24,
         k_y=2,
         k_u=3,

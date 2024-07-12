@@ -208,12 +208,12 @@ def main() -> None:
     xpos_scale_base = args.xpos_scale_base
     rms_norm_eps = args.rms_norm_eps
     multiway = args.multiway
-    
+
     # General training settings
     n_layers: int = 2
     scale: int = 4
     bias: bool = False
-    dropout: float = 0.10 # Convert all these into argparses eventually
+    dropout: float = 0.0 # Convert all these into argparses eventually
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":

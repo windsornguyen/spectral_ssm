@@ -140,14 +140,14 @@ def main() -> None:
     n_layers: int = 2
     scale: int = 4
     bias: bool = False
-    dropout: float = 0.1
-    num_eigh: int = 24
+    dropout: float = 0.0
+    num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
     learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     use_ar_y: bool = False
-    use_ar_u: bool = False
+    use_ar_u: bool = True
     use_hankel_L: bool = False
 
     if not task["mujoco-v3"]:
@@ -297,7 +297,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     train_loader = get_dataloader(
-        model="spectral_ssm",
+        # TODO: Generalize model= to argparse 
+        # and in general make a training script file 
+        # that argparses everything and runs the right file based off that.
+        model="spectral_ssm", 
         data=train_data,
         task=args.task,
         controller=args.controller,
