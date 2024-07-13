@@ -151,7 +151,7 @@ def main() -> None:
     use_hankel_L: bool = False
 
     # MoE
-    moe: bool = False
+    moe: bool = True
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -177,70 +177,13 @@ def main() -> None:
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
-
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v1", "controller": controller},
-            device=device,
-        )
-
     elif task["mujoco-v2"]:
         n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_out = n_embd
         d_proj = n_embd
         sl: int = 1000
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
-
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v2", "controller": controller},
-            device=device,
-        )
-
+        
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
@@ -249,35 +192,35 @@ def main() -> None:
         d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
         d_proj = n_embd
         sl: int = 300
+    
+    configs = SpectralSSMConfigs(
+        n_layers=n_layers,
+        n_embd=n_embd,
+        d_in=d_in,
+        d_out=d_out,
+        d_proj=d_proj,
+        sl=sl,
+        scale=scale,
+        bias=bias,
+        dropout=dropout,
+        num_eigh=num_eigh,
+        k_y=k_y,
+        k_u=k_u,
+        learnable_m_y=learnable_m_y,
+        alpha=alpha,
+        use_ar_y=use_ar_y,
+        use_ar_u=use_ar_u,
+        use_hankel_L=use_hankel_L,
 
-        configs = SpectralSSMConfigs(
-            n_layers=n_layers,
-            n_embd=n_embd,
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            sl=sl,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
 
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v3", "controller": controller},
-            device=device,
-        )
+        loss_fn=loss_fn,
+        controls={"task": args.task, "controller": controller},
+        device=device,
+    )
 
     model = SpectralSSM(configs).to(device)
     # model = torch.compile(model)

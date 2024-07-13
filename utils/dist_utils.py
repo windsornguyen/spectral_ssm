@@ -1,14 +1,22 @@
 # =============================================================================#
 # Authors: Windsor Nguyen
 # File: utils.py
-# Utilities for the distributed training of the Transformer model.
-# Adapted from torchscale/component/utils.py @ https://github.com/microsoft/torchscale.
 # =============================================================================#
 
+"""
+Utilities for the distributed training of the Transformer model.
+Adapted from torchscale/component/utils.py @ https://github.com/microsoft/torchscale.
+"""
 
 import torch
 import torch.distributed as dist
 
+
+def padding_to_multiple_of(n, mult):
+    remainder = n % mult
+    if remainder == 0:
+        return 0
+    return mult - remainder
 
 def get_data_parallel_group():
     if torch.distributed.is_initialized():

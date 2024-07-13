@@ -221,8 +221,8 @@ class Experiment:
         t0 = time()
 
         inputs, targets = inputs.to(self.device), targets.to(self.device)
-        # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-        preds, loss_info = self.model(inputs, targets)
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            preds, loss_info = self.model(inputs, targets)
 
         if isinstance(loss_info, tuple):
             loss, *step_metrics = loss_info
@@ -319,8 +319,8 @@ class Experiment:
             for inputs, targets in dataloader:
                 t0 = time()
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                preds, loss_info = self.model(inputs, targets)
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    preds, loss_info = self.model(inputs, targets)
 
                 if isinstance(loss_info, tuple):
                     loss, *step_metrics = loss_info

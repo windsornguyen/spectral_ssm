@@ -19,32 +19,38 @@ class MultiheadAttention(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.configs = configs
-        self.n_embd = self.configs.n_embd
-        self.n_heads = self.configs.n_heads
+        self.n_embd = configs.n_embd
+        self.n_heads = configs.n_heads
         assert self.n_embd % self.n_heads == 0
-        self.head_dim = self.configs.n_embd // self.n_heads
+        self.head_dim = self.n_embd // self.n_heads
+        self.dropout = configs.dropout
+        self.bias = configs.bias
         self.scaling = self.head_dim**-0.5
-        self.dropout = self.configs.dropout
-        self.sub_rn = self.configs.sub_rn
-        self.bias = self.configs.bias
 
-        self.k_proj = MultiwayWrapper(configs, nn.Linear(self.n_embd, self.n_embd, bias=self.bias))
-        self.v_proj = MultiwayWrapper(configs, nn.Linear(self.n_embd, self.n_embd, bias=self.bias))
-        self.q_proj = MultiwayWrapper(configs, nn.Linear(self.n_embd, self.n_embd, bias=self.bias))
-        self.out_proj = MultiwayWrapper(
-            self.configs, nn.Linear(self.n_embd, self.n_embd, bias=self.bias)
-        )
-        self.inner_attn_rn = (
-            MultiwayWrapper(self.configs, RMSNorm(self.n_embd, eps=self.configs.rms_norm_eps))
-            if self.sub_rn
-            else None
-        )
-        self.dropout_module = torch.nn.Dropout(self.dropout)
-        self.xpos = (
-            XPOS(self.head_dim, self.configs.xpos_scale_base)
-            if self.configs.xpos_rel_pos
-            else None
-        )
+        # Combined projection for Q, K, V
+        self.c_attn = MultiwayWrapper(configs, nn.Linear(self.n_embd, 3 * self.n_embd, bias=self.bias))
+        
+        # Output projection
+        self.c_proj = MultiwayWrapper(configs, nn.Linear(self.n_embd, self.n_embd, bias=self.bias))
+        
+        self.attn_dropout = nn.Dropout(self.dropout)
+        self.resid_dropout = nn.Dropout(self.dropout)
+
+        # Optional RMSNorm
+        self.inner_attn_rn = MultiwayWrapper(configs, RMSNorm(self.n_embd, eps=configs.rms_norm_eps)) if configs.sub_rn else None
+
+        # Optional XPOS
+        self.xpos = XPOS(self.head_dim, configs.xpos_scale_base) if configs.xpos_rel_pos else None
+
+        # Flash attention support
+        self.flash_attn = configs.flash_attn and hasattr(nn.functional, "scaled_dot_product_attention")
+
+        if not self.flash_attn:
+            print("WARNING: Using slow attention. Flash Attention requires PyTorch >= 2.0 and configs.flash_attn=True")
+            self.register_buffer(
+                "mask",
+                torch.tril(torch.ones(configs.sl, configs.sl)).view(1, 1, configs.sl, configs.sl),
+            )
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
@@ -54,7 +60,7 @@ class MultiheadAttention(nn.Module):
         nn.init.constant_(self.out_proj.bias, 0.0)
 
     def attention_ops(self, q, k, v, key_padding_mask=None, attn_mask=None, rel_pos=None, is_causal=False):
-        if not self.configs.flash_attn:
+        if not self.flash_attn:
             q *= self.scaling
             attn_weights = torch.bmm(q, k.transpose(1, 2))
 
@@ -75,10 +81,8 @@ class MultiheadAttention(nn.Module):
                 rel_pos = rel_pos.view(attn_weights.size())
                 attn_weights = attn_weights + rel_pos
 
-            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(
-                attn_weights
-            )
-            attn_probs = self.dropout_module(attn_weights)
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).type_as(attn_weights)
+            attn_probs = self.attn_dropout(attn_weights)
 
             attn = torch.bmm(attn_probs, v)
             attn = rearrange(attn, '(b h) l d -> b l (h d)', h=self.n_heads)
@@ -96,9 +100,7 @@ class MultiheadAttention(nn.Module):
 
     def forward(
         self,
-        query,
-        key,
-        value,
+        x: torch.Tensor,
         incremental_state=None,
         key_padding_mask=None,
         attn_mask=None,
@@ -106,54 +108,33 @@ class MultiheadAttention(nn.Module):
         is_first_step=False,
         is_causal=False,
     ):
-        bsz, tgt_len, n_embd = query.size()
-        src_len = tgt_len
-        assert n_embd == self.n_embd, f"query dim {n_embd} != {self.n_embd}"
+        bsz, sl, _ = x.size()
 
-        key_bsz, src_len, _ = key.size()
-        assert key_bsz == bsz, f"{query.size(), key.size()}"
-        assert value is not None
-        assert bsz, src_len == value.shape[:2]
+        # Combined Q, K, V projection
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
 
-        q = self.q_proj(query)
-        k = self.k_proj(key)
-        v = self.v_proj(value)
-
+        # Reshape for multi-head attention
         q = rearrange(q, 'b l (h d) -> (b h) l d', h=self.n_heads)
         k = rearrange(k, 'b l (h d) -> (b h) l d', h=self.n_heads)
         v = rearrange(v, 'b l (h d) -> (b h) l d', h=self.n_heads)
 
-        if incremental_state is not None:
-            if "prev_key" in incremental_state:
-                prev_key = incremental_state["prev_key"].view(
-                    bsz * self.n_heads, -1, self.head_dim
-                )
-                prev_value = incremental_state["prev_value"].view(
-                    bsz * self.n_heads, -1, self.head_dim
-                )
-                k = torch.cat([prev_key, k], dim=1)
-                v = torch.cat([prev_value, v], dim=1)
-            incremental_state["prev_key"] = k.view(
-                bsz, self.n_heads, -1, self.head_dim
-            )
-            incremental_state["prev_value"] = v.view(
-                bsz, self.n_heads, -1, self.head_dim
-            )
-            src_len = k.size(1)
-
+        # Apply XPOS if configured
         if self.xpos is not None:
-            if incremental_state is not None and not is_first_step:
-                offset = src_len - 1
-            else:
-                offset = 0
+            offset = sl - 1 if incremental_state is not None and not is_first_step else 0
             k = self.xpos(k, offset=0, downscale=True)
             q = self.xpos(q, offset=offset, downscale=False)
 
-        attn, attn_weights = self.attention_ops(q, k, v, key_padding_mask=key_padding_mask, attn_mask=attn_mask, rel_pos=rel_pos, is_causal=is_causal)
+        # Attention calculation
+        y, attn_weights = self.attention_ops(q, k, v, key_padding_mask, attn_mask, is_causal=attn_mask is None)
 
+        # Reshape and apply output projection
+        y = rearrange(y, 'b l (h d) -> b l h d', h=self.n_heads)
+        y = rearrange(y, 'b l h d -> b l (h d)')
+        
         if self.inner_attn_rn is not None:
-            attn = self.inner_attn_rn(attn)
+            y = self.inner_attn_rn(y)
 
-        attn = self.out_proj(attn)
+        y = self.resid_dropout(self.c_proj(y))
 
-        return attn, attn_weights
+        return y, attn_weights

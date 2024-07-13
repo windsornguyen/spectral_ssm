@@ -86,6 +86,45 @@ class FFN(nn.Module):
         x = self.dropout(x)
         return x
 
+class GatedFFN(nn.Module):
+    """
+    Gated feed-forward network using SiLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            n_embd (int): Input and output embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.in_features = configs.n_embd
+        self.out_features = configs.n_embd
+        self.hidden_features = int(configs.scale * configs.n_embd)
+
+        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.activation = torch.nn.functional.silu
+        self.dropout = nn.Dropout(configs.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the GatedFFN.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        y = self.fc1(x)
+        y, gate = y.chunk(2, dim=-1)
+        y = y * self.activation(gate)
+        y = self.fc2(y)
+        return self.dropout(y)
+
 class TransformerBlock(nn.Module):
     """
     Single block of the Transformer.
@@ -93,15 +132,16 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
+        self.configs = configs
         self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
         self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
 
         self.ffn_1 = MoE(
             configs,
-            experts=[FFN(configs) for _ in range(configs.num_experts)],
+            experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else FFN(configs)
+        ) if configs.moe else GatedFFN(configs)
 
     def _get_attn_type(self, configs):
         if configs.dilated_attn:
@@ -110,7 +150,8 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = x + self.attn(self.rn_1(x))
+        x = self.rn_1(x) if not self.configs.dilated_attn else x
+        x = x + self.attn(x)
         x = x + self.ffn_1(self.rn_2(x))
         return x
 
@@ -220,7 +261,7 @@ class Transformer(nn.Module):
 
         # Add positional embeddings to the input
         x = inputs + pos_emb
-        
+
         incremental_state = None # 
         if self.configs.dilated_attn:
             incremental_state = {}

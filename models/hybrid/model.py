@@ -49,8 +49,7 @@ class SpectralHybridConfigs:
     use_sq_relu: bool = False
     
     # MoE
-    moe_1: bool = False
-    moe_2: bool = True
+    moe: bool = True
     num_experts: int = 8
     num_experts_per_timestep: int = 2
 
@@ -192,6 +191,45 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+class GatedMLP(nn.Module):
+    """
+    Gated multi-layer perceptron network using SiLU activation.
+
+    Args:
+        configs: Configuration object containing the following attributes:
+            n_embd (int): Input and output embedding dimension.
+            scale (float): Scaling factor for hidden dimension.
+            bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
+    """
+
+    def __init__(self, configs):
+        super().__init__()
+        self.in_features = configs.n_embd
+        self.out_features = configs.n_embd
+        self.chunks = 2
+        self.hidden_features = int(configs.scale * configs.n_embd)
+
+        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
+        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.silu = nn.SiLU()
+        self.dropout = nn.Dropout(configs.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the GatedMLP.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        y = self.fc_1(x)
+        y, gate = y.chunk(self.chunks, dim=-1)
+        y = y * self.silu(gate)
+        y = self.fc_2(y)
+        return self.dropout(y)
 
 class HybridBlock(nn.Module):
     """
@@ -211,21 +249,20 @@ class HybridBlock(nn.Module):
 
         self.mlp_1 = MoE(
             configs,
-            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe_1 else MLP(configs)
+        ) if configs.moe else GatedMLP(configs)
 
         self.mlp_2 = MoE(
             configs,
-            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe_2 else MLP(configs)
+        ) if configs.moe else GatedMLP(configs)
 
-        #self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_1 = RMSNorm(configs.n_embd)
         self.rn_2 = RMSNorm(configs.n_embd)
         self.rn_3 = RMSNorm(configs.n_embd)
         self.rn_4 = RMSNorm(configs.n_embd)
-        self.rn_5 = RMSNorm(configs.n_embd)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -239,12 +276,12 @@ class HybridBlock(nn.Module):
         """
         # STU portion
         z = x
-        x = self.stu(self.rn_2(x))
-        x = x + self.mlp_1(self.rn_3(x)) + z
+        x = self.stu(self.rn_1(x))
+        x = x + self.mlp_1(self.rn_2(x)) + z
 
         # Attention portion
-        x = x + self.attn(self.rn_4(x))
-        x = x + self.mlp_2(self.rn_5(x)) + z
+        x = x + self.attn(self.rn_3(x))
+        x = x + self.mlp_2(self.rn_4(x)) + z
 
         return x
 
@@ -306,7 +343,7 @@ class SpectralHybrid(nn.Module):
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("\STU-Attention Hybrid Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print("\nSTU-Attention Hybrid Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
 
     def forward(self, inputs, targets):
         """
@@ -511,7 +548,6 @@ class SpectralHybrid(nn.Module):
         init: int = 950,
         steps: int = 50,
         rollout_steps: int = 20,
-        window_size: int = 900,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -536,36 +572,39 @@ class SpectralHybrid(nn.Module):
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, _, d_out = targets.size()
+        num_traj, total_steps, d_out = targets.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
-        # To track what the model hallucinates
-        hallucinated_steps = torch.zeros(num_traj, steps, d_out, device=device)
+        # Track model hallucinations
+        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
 
-        # To track the MSE loss between rollout vs ground truth for each trajectory
+        # Track loss between rollout vs ground truth
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
+        # Initialize cost function
+        mse_loss = MSELoss()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step # Start at init
-            window_start = current_step - window_size
+            current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, window_start:current_step], targets[:, window_start:current_step]
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
-            mse_loss = MSELoss()
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
-            hallucinated_steps[:, step] = step_preds[:, -1].squeeze(1)
+            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
             # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
             # next_input = torch.cat([next_input, next_action], dim=2)
             # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-        return hallucinated_steps, (avg_loss, traj_losses)
+        return predicted_steps, (avg_loss, traj_losses)

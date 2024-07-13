@@ -54,6 +54,11 @@ class Mamba2Configs:
     dtype: Optional[any] = None
     world_size: int = 1
 
+    # MoE
+    moe: bool = True
+    num_experts: int = 8
+    num_experts_per_timestep: int = 2
+
     # TODO: Experiment-specific hyperparameters
     loss_fn: Optional[any] = nn.SiLU()
     controls: dict = field(
@@ -75,7 +80,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -140,7 +145,11 @@ class MambaBlock(nn.Module):
         super(MambaBlock, self).__init__()
         self.mamba = MambaLayer(configs)
         self.rn = RMSNorm(configs.d_model)
-        self.mlp = GatedMLP(configs)
+        self.mlp = MoE(
+            configs,
+            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+        ) if configs.moe else MLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -397,7 +406,7 @@ class Mamba2(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step + 1 - rollout_steps) : (current_step + 1), :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting

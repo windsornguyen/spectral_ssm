@@ -15,7 +15,7 @@ from utils.colors import Colors, colored_print
 
 # TODO: Write generic dataset downloading and saving script for the user.
 class Dataloader(Dataset):
-    def __init__(self, model, data, task, controller, shift=1, preprocess=True, eps=1e-6):
+    def __init__(self, model, data, task, controller, shift=1, preprocess=True, eps=1e-5):
         self.model = model
         self.task = task
         self.controller = controller
@@ -106,17 +106,24 @@ class Dataloader(Dataset):
             self.mean = {}
             self.std = {}
             for group_name, indices in self.feature_groups.items():
-                group_data = np.concatenate([self.targets[:, :, indices], self.inputs[:, :, indices]], axis=0)
+                if group_name == "torque":
+                    group_data = self.inputs[:, :, indices]
+                else:
+                    group_data = np.concatenate([self.targets[:, :, indices], self.inputs[:, :, indices]], axis=0)
+
                 self.mean[group_name] = np.mean(group_data, axis=(0, 1), keepdims=True)
                 self.std[group_name] = np.std(group_data, axis=(0, 1), keepdims=True)
-            
+                
     def _normalize_data(self):
         if self.task == "mujoco-v3":
             self.data = [(item - self.mean) / (self.std + self.eps) for item in self.data]
         else:
             for group_name, indices in self.feature_groups.items():
-                self.inputs[:, :, indices] = (self.inputs[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
-                self.targets[:, :, indices] = (self.targets[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
+                if group_name == "torque":
+                    self.inputs[:, :, indices] = (self.inputs[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
+                else:
+                    self.inputs[:, :, indices] = (self.inputs[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
+                    self.targets[:, :, indices] = (self.targets[:, :, indices] - self.mean[group_name]) / (self.std[group_name] + self.eps)
 
     def _validate_normalization(self):
         if self.task == "mujoco-v3":
@@ -142,12 +149,18 @@ class Dataloader(Dataset):
 
         else:
             for group_name, indices in self.feature_groups.items():
-                normalized_mean_inputs = np.mean(self.inputs[:, :, indices], axis=(0, 1))
-                normalized_std_inputs = np.std(self.inputs[:, :, indices], axis=(0, 1))
-                normalized_mean_targets = np.mean(self.targets[:, :, indices], axis=(0, 1))
-                normalized_std_targets = np.std(self.targets[:, :, indices], axis=(0, 1))
-            
-                # TODO: Normalized mean not close to zero
+                if group_name == "torque":
+                    normalized_mean_inputs = np.mean(self.inputs[:, :, indices], axis=(0, 1))
+                    normalized_std_inputs = np.std(self.inputs[:, :, indices], axis=(0, 1))
+                    colored_print(f"\nNormalized mean of inputs for {group_name}: {normalized_mean_inputs}", Colors.OKGREEN)
+                    colored_print(f"Normalized standard deviation of inputs for {group_name}: {normalized_std_inputs}", Colors.OKGREEN)
+                else:
+                    normalized_mean_inputs = np.mean(self.inputs[:, :, indices], axis=(0, 1))
+                    normalized_std_inputs = np.std(self.inputs[:, :, indices], axis=(0, 1))
+                    normalized_mean_targets = np.mean(self.targets[:, :, indices], axis=(0, 1))
+                    normalized_std_targets = np.std(self.targets[:, :, indices], axis=(0, 1))
+
+                # # TODO: Normalized mean not close to zero
                 # assert np.allclose(
                 #     normalized_mean_inputs, np.zeros_like(normalized_mean_inputs), atol=self.eps
                 # ), f"Normalized mean of inputs for {group_name} is not close to zero: {normalized_mean_inputs}"
@@ -161,10 +174,10 @@ class Dataloader(Dataset):
                 #     normalized_std_targets, np.ones_like(normalized_std_targets), atol=self.eps
                 # ), f"Normalized standard deviation of targets for {group_name} is not close to one: {normalized_std_targets}"
 
-                colored_print(f"\nNormalized mean of inputs for {group_name}: {normalized_mean_inputs}", Colors.OKGREEN)
-                colored_print(f"Normalized standard deviation of inputs for {group_name}: {normalized_std_inputs}", Colors.OKGREEN)
-                colored_print(f"Normalized mean of targets for {group_name}: {normalized_mean_targets}", Colors.OKGREEN)
-                colored_print(f"Normalized standard deviation of targets for {group_name}: {normalized_std_targets}", Colors.OKGREEN)
+                    colored_print(f"\nNormalized mean of inputs for {group_name}: {normalized_mean_inputs}", Colors.OKGREEN)
+                    colored_print(f"Normalized standard deviation of inputs for {group_name}: {normalized_std_inputs}", Colors.OKGREEN)
+                    colored_print(f"Normalized mean of targets for {group_name}: {normalized_mean_targets}", Colors.OKGREEN)
+                    colored_print(f"Normalized standard deviation of targets for {group_name}: {normalized_std_targets}", Colors.OKGREEN)
 
             colored_print("Data normalization validated successfully.", Colors.BOLD + Colors.OKGREEN)
 

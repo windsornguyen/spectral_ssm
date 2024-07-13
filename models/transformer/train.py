@@ -135,8 +135,8 @@ def main() -> None:
     parser.add_argument(
         "--xpos_rel_pos",
         type=bool,
-        default=True,
-        help="Whether to use relative positional embeddings. Defaults to True.",
+        default=False,
+        help="Whether to use relative positional embeddings. Defaults to False.",
     )
     parser.add_argument(
         "--xpos_scale_base",
@@ -194,9 +194,9 @@ def main() -> None:
     use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
 
     # MoE
-    moe: bool = False
-    num_experts: int = 2
-    num_experts_per_timestep: int = 1
+    moe: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
 
     # Dilated Attention
     dilated_attn = args.dilated_attn
@@ -225,73 +225,11 @@ def main() -> None:
         n_embd: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
         sl: int = 1000
-        configs = TransformerConfigs(
-            # General Transformer settings
-            n_layers=n_layers,
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sl=sl,
-            scale=scale,
-            sub_rn=sub_rn,
-            bias=bias,
-            dropout=dropout,
-            flash_attn=flash_attn,
-            use_sq_relu=use_sq_relu,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v1", "controller": controller},
-            device=device,
-
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-        )
 
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
         n_heads: int = 9 if controller != "Ant-v1" else 1
         sl: int = 1000
-        configs = TransformerConfigs(
-            # General Transformer settings
-            n_layers=n_layers,
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sl=sl,
-            scale=scale,
-            sub_rn=sub_rn,
-            bias=bias,
-            dropout=dropout,
-            flash_attn=flash_attn,
-            use_sq_relu=use_sq_relu,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v2", "controller": controller},
-            device=device,
-            
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-            
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-        )
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -300,37 +238,37 @@ def main() -> None:
         n_heads: int = 16
         sl: int = 300
 
-        configs = TransformerConfigs(
-            # General Transformer settings
-            n_layers=n_layers,
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sl=sl,
-            scale=scale,
-            sub_rn=sub_rn,
-            bias=bias,
-            dropout=dropout,
-            flash_attn=flash_attn,
-            use_sq_relu=use_sq_relu,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v3", "controller": controller},
-            device=device,
-            
-            # MoE
-            moe=moe,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
+    configs = TransformerConfigs(
+        # General Transformer settings
+        n_layers=n_layers,
+        n_embd=n_embd,
+        n_heads=n_heads,
+        sl=sl,
+        scale=scale,
+        sub_rn=sub_rn,
+        bias=bias,
+        dropout=dropout,
+        flash_attn=flash_attn,
+        use_sq_relu=use_sq_relu,
+        loss_fn=loss_fn,
+        controls={"task": "mujoco-v1", "controller": controller},
+        device=device,
 
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-        )
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
+
+        # Dilated Attention
+        dilated_attn=dilated_attn,
+        segment_lengths=segment_lengths,
+        dilated_ratios=dilated_ratios,
+        seq_parallel=seq_parallel,
+        xpos_rel_pos=xpos_rel_pos,
+        xpos_scale_base=xpos_scale_base,
+        rms_norm_eps=rms_norm_eps,
+        multiway=multiway,
+    )
 
     model = Transformer(configs).to(device)
     # model = torch.compile(model)

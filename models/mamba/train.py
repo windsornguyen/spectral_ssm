@@ -156,10 +156,15 @@ def main() -> None:
     sequence_parallel: bool = True
     dtype: torch.dtype = torch.float32
 
+    # MoE
+    moe: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 8 if use_mem_eff_path else 1
-    n_layers: int = 6
+    n_layers: int = 2
     bias: bool = False
     conv_bias: bool = True
     loss_fn = nn.MSELoss()
@@ -188,77 +193,12 @@ def main() -> None:
         d_out: int = 18 if controller != "Ant-v1" else 32
         sl: int = 1000
 
-        configs = Mamba2Configs(
-            bsz=bsz,
-            n_layers=n_layers,
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            conv_init=conv_init,
-            expand=expand,
-            headdim=headdim,
-            d_ssm=d_ssm,
-            ngroups=ngroups,
-            A_init_range=A_init_range,
-            activation=activation,
-            D_has_hdim=D_has_hdim,
-            rmsnorm=rmsnorm,
-            norm_before_gate=norm_before_gate,
-            dt_min=dt_min,
-            dt_max=dt_max,
-            dt_init_floor=dt_init_floor,
-            dt_limit=dt_limit,
-            bias=bias,
-            conv_bias=conv_bias,
-            chunk_size=chunk_size,
-            use_mem_eff_path=use_mem_eff_path,
-            process_group=process_group,
-            sequence_parallel=sequence_parallel,
-            loss_fn=loss_fn,
-            d_out=d_out,
-            device=device,
-            dtype=dtype,
-            world_size=world_size
-        )
-
     elif task["mujoco-v2"]:
         d_model: int = 18 if controller != "Ant-v1" else 32
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
         sl: int = 1000
-        configs = Mamba2Configs(
-            bsz=bsz,
-            n_layers=n_layers,
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            conv_init=conv_init,
-            expand=expand,
-            headdim=headdim,
-            d_ssm=d_ssm,
-            ngroups=ngroups,
-            A_init_range=A_init_range,
-            activation=activation,
-            D_has_hdim=D_has_hdim,
-            rmsnorm=rmsnorm,
-            norm_before_gate=norm_before_gate,
-            dt_min=dt_min,
-            dt_max=dt_max,
-            dt_init_floor=dt_init_floor,
-            dt_limit=dt_limit,
-            bias=bias,
-            conv_bias=conv_bias,
-            chunk_size=chunk_size,
-            use_mem_eff_path=use_mem_eff_path,
-            process_group=process_group,
-            sequence_parallel=sequence_parallel,
-            loss_fn=loss_fn,
-            d_out=d_out,
-            device=device,
-            dtype=dtype,
-            world_size=world_size
-        )
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -268,38 +208,45 @@ def main() -> None:
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
-        configs = Mamba2Configs(
-            bsz=bsz,
-            n_layers=n_layers,
-            d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            conv_init=conv_init,
-            expand=expand,
-            headdim=headdim,
-            d_ssm=d_ssm,
-            ngroups=ngroups,
-            A_init_range=A_init_range,
-            activation=activation,
-            D_has_hdim=D_has_hdim,
-            rmsnorm=rmsnorm,
-            norm_before_gate=norm_before_gate,
-            dt_min=dt_min,
-            dt_max=dt_max,
-            dt_init_floor=dt_init_floor,
-            dt_limit=dt_limit,
-            bias=bias,
-            conv_bias=conv_bias,
-            chunk_size=chunk_size,
-            use_mem_eff_path=use_mem_eff_path,
-            process_group=process_group,
-            sequence_parallel=sequence_parallel,
-            loss_fn=loss_fn,
-            d_out=d_out,
-            device=device,
-            dtype=dtype,
-            world_size=world_size
-        )
+    configs = Mamba2Configs(
+        bsz=bsz,
+        n_layers=n_layers,
+        d_model=d_model,
+        d_out=d_out,
+        d_state=d_state,
+        d_conv=d_conv,
+        conv_init=conv_init,
+        expand=expand,
+        headdim=headdim,
+        d_ssm=d_ssm,
+        ngroups=ngroups,
+        A_init_range=A_init_range,
+        activation=activation,
+        D_has_hdim=D_has_hdim,
+        rmsnorm=rmsnorm,
+        norm_before_gate=norm_before_gate,
+        dt_min=dt_min,
+        dt_max=dt_max,
+        dt_init_floor=dt_init_floor,
+        dt_limit=dt_limit,
+        bias=bias,
+        conv_bias=conv_bias,
+        chunk_size=chunk_size,
+        use_mem_eff_path=use_mem_eff_path,
+        process_group=process_group,
+        sequence_parallel=sequence_parallel,
+
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
+
+        loss_fn=loss_fn,
+        controls={"task": args.task, "controller": controller},
+        device=device,
+        dtype=dtype,
+        world_size=world_size
+    )
 
     model = Mamba2(configs).to(device)
     # model = torch.compile(model) TODO: torch.compile is not well-supported with Mamba-2

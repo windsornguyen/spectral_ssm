@@ -171,7 +171,7 @@ class MLP(nn.Module):
 
 class GatedMLP(nn.Module):
     """
-    Gated Multi-layer perceptron network using SiLU activation.
+    Gated multi-layer perceptron network using SiLU activation.
 
     Args:
         configs: Configuration object containing the following attributes:
@@ -208,6 +208,7 @@ class GatedMLP(nn.Module):
         y = self.fc2(y)
         return self.dropout(y)
 
+
 class Block(nn.Module):
     """
     A single block of the spectral SSM model composed of STU and MLP layers.
@@ -221,10 +222,8 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
-        self.rn_2 = RMSNorm(configs.n_embd)
+        self.rn = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
-        self.rn_3 = RMSNorm(configs.n_embd)
 
         self.mlp = MoE(
             configs,
@@ -243,8 +242,8 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = self.stu(self.rn_2(x))
-        x = x + self.mlp(self.rn_3(x)) + z
+        x = self.stu(self.rn(x))
+        x = x + self.mlp(x) + z
 
         return x
 

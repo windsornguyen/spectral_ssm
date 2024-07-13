@@ -3,7 +3,7 @@
 # File: plot_predict.py
 # =============================================================================#
 
-"""Plotting script for spectral SSM v. Transformer sequence prediction."""
+"""Plotting script for Spectral SSM v. Transformer v. Mamba-2 v. Spectral Hybrid sequence prediction."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -38,31 +38,28 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-
-def load_data(filename):
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"The file {filename} does not exist.")
-    return np.load(filename)
-
-
 # Load data
 try:
-    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions_norm.npy")
-    transformer = load_data(
-        f"transformer_{args.controller}_{args.task}_predictions_norm.npy"
-    )
-    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths_norm.npy")
-    transformer_ground_truth = load_data(
-        f"transformer_{args.controller}_{args.task}_ground_truths_norm.npy"
-    )
-    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses_norm.npy")
-    transformer_losses = load_data(f"transformer_{args.controller}_{args.task}_losses_norm.npy")
+    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions.npy")
+    transformer = load_data(f"transformer_{args.controller}_{args.task}_predictions.npy")
+    mamba = load_data(f"mamba_{args.controller}_{args.task}_predictions.npy")
+    hybrid = load_data(f"hybrid_{args.controller}_{args.task}_predictions.npy")
+
+    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
+    transformer_ground_truth = load_data(f"transformer_{args.controller}_{args.task}_ground_truths.npy")
+    mamba_ground_truth = load_data(f"mamba_{args.controller}_{args.task}_ground_truths.npy")
+    hybrid_ground_truth = load_data(f"hybrid_{args.controller}_{args.task}_ground_truths.npy")
+
+    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses.npy")
+    transformer_losses = load_data(f"transformer_{args.controller}_{args.task}_losses.npy")
+    mamba_losses = load_data(f"mamba_{args.controller}_{args.task}_losses.npy")
+    hybrid_losses = load_data(f"hybrid_{args.controller}_{args.task}_losses.npy")
 except FileNotFoundError as e:
     print(f"Error loading data: {e}")
     exit(1)
 
 # Check if they are the same to ensure we are comparing the right data
-if np.array_equal(ground_truth, transformer_ground_truth):
+if np.array_equal(ground_truth, transformer_ground_truth) and np.array_equal(ground_truth, mamba_ground_truth) and np.array_equal(ground_truth, hybrid_ground_truth):
     print("The ground truth arrays are the same.")
 else:
     print("The ground truth arrays are not the same.")
@@ -70,10 +67,10 @@ else:
 num_preds, time_steps, num_features = sssm.shape
 
 # Assert if they are not of the same shape
-print(sssm.shape, transformer.shape, ground_truth.shape)
+print(sssm.shape, transformer.shape, mamba.shape, hybrid.shape, ground_truth.shape)
 assert (
-    sssm.shape == transformer.shape == ground_truth.shape
-), "The shapes of Spectral SSM, Transformer, and Ground Truths are not the same."
+    sssm.shape == transformer.shape == mamba.shape == hybrid.shape == ground_truth.shape
+), "The shapes of Spectral SSM, Transformer, Mamba, Hybrid, and Ground Truths are not the same."
 
 # Choose features to plot the predicted states (embeddings) v. ground truth states
 if args.task in ["mujoco-v1", "mujoco-v2"]:
@@ -104,18 +101,13 @@ else:
     raise ValueError("Invalid task")
 
 # Plotting
-colors = ["b", "g", "r"]  # blue for Spectral SSM, green for Transformer, red for Ground Truth
+colors = ["b", "g", "r", "c", "m"]  # blue for Spectral SSM, green for Transformer, red for Ground Truth, cyan for Mamba, magenta for Hybrid
 for pred_idx in range(num_preds):
     # Compute and plot the mean losses
     print(f"Plotting mean loss for prediction {pred_idx + 1}")
 
     # One figure for each prediction
     fig, ax = plt.subplots(figsize=(7, 5))
-
-    # sssm_mean_loss = np.mean(np.abs(ground_truth[pred_idx] - sssm[pred_idx]), axis=1)
-    # transformer_mean_loss = np.mean(
-    #     np.abs(ground_truth[pred_idx] - transformer[pred_idx]), axis=1
-    # )
 
     ax.plot(
         range(time_steps),
@@ -131,13 +123,27 @@ for pred_idx in range(num_preds):
         color=colors[1],
         linewidth=2,
     )
+    ax.plot(
+        range(time_steps),
+        mamba_losses[pred_idx, : time_steps],
+        label=f"Prediction {pred_idx+1} Mamba Mean Loss",
+        color=colors[3],
+        linewidth=2,
+    )
+    ax.plot(
+        range(time_steps),
+        hybrid_losses[pred_idx, : time_steps],
+        label=f"Prediction {pred_idx+1} Hybrid Mean Loss",
+        color=colors[4],
+        linewidth=2,
+    )
 
     ax.legend()
     ax.set_xlabel("Time Step")
     ax.set_ylabel("Mean Absolute Error")
     ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
     # Save the mean loss figures
-    plt.savefig(f"plots/losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}_norm.png")
+    plt.savefig(f"plots/losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}.png")
     plt.close(fig)
 
 # Perform PCA
@@ -148,6 +154,12 @@ if args.task == "mujoco-v3":
         num_preds, time_steps, -1
     )
     transformer = pca.transform(transformer.reshape(-1, num_features)).reshape(
+        num_preds, time_steps, -1
+    )
+    mamba = pca.transform(mamba.reshape(-1, num_features)).reshape(
+        num_preds, time_steps, -1
+    )
+    hybrid = pca.transform(hybrid.reshape(-1, num_features)).reshape(
         num_preds, time_steps, -1
     )
     ground_truth = pca.transform(ground_truth.reshape(-1, num_features)).reshape(
@@ -184,6 +196,20 @@ for pred_idx in range(num_preds):
             color=colors[1],
             linewidth=2,
         )
+        axs[i].plot(
+            range(time_steps),
+            mamba[pred_idx, : time_steps, feature_idx],
+            label="Mamba",
+            color=colors[3],
+            linewidth=2,
+        )
+        axs[i].plot(
+            range(time_steps),
+            hybrid[pred_idx, : time_steps, feature_idx],
+            label="Hybrid",
+            color=colors[4],
+            linewidth=2,
+        )
         axs[i].set_xlabel("Time Step")
         axs[i].set_ylabel(f"Feature {feature_idx+1} Value")
         axs[i].set_title(
@@ -191,21 +217,12 @@ for pred_idx in range(num_preds):
         )
         axs[i].legend()
 
-        # # Plot the Feature losses
-        # sssm_loss = np.abs(
-        #     ground_truth[pred_idx, :, feature_idx] - sssm[pred_idx, :, feature_idx]
-        # )
-        # transformer_loss = np.abs(
-        #     ground_truth[pred_idx, :, feature_idx]
-        #     - transformer[pred_idx, :, feature_idx]
-        # )
-
     plt.suptitle(
         f"Predictions for {args.controller} on {args.task}", fontsize=16
     )
     plt.tight_layout()
 
     # Save the figures
-    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_norm_{args.feature}.png")
+    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}.png")
     plt.show()
     plt.close(fig)

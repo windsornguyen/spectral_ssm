@@ -200,8 +200,7 @@ def main() -> None:
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
 
     # MoE
-    moe_1: bool = True
-    moe_2: bool = True
+    moe: bool = True
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -243,52 +242,6 @@ def main() -> None:
         d_out = d_in    # before projection d_in = d_out
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
-        configs = SpectralHybridConfigs(
-            # STU settings
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
-
-            # Transformer settings
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sub_rn=sub_rn,
-            flash_attn=flash_attn,
-            
-            # MoE
-            moe_1=moe_1,
-            moe_2=moe_2,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-            
-            # General training settings
-            sl=sl,
-            n_layers=n_layers,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v1", "controller": controller},
-            device=device,
-        )
 
     elif task["mujoco-v2"]:
         n_embd: int = 18 if controller != "Ant-v1" else 29
@@ -297,52 +250,6 @@ def main() -> None:
         d_out = n_embd
         d_proj = n_embd
         sl: int = 1000
-        configs = SpectralHybridConfigs(
-            # STU settings
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
-
-            # Transformer settings
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sub_rn=sub_rn,
-            flash_attn=flash_attn,
-
-            # MoE
-            moe_1=moe_1,
-            moe_2=moe_2,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-            
-            # General training settings
-            sl=sl,
-            n_layers=n_layers,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v1", "controller": controller},
-            device=device,
-        )
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -354,52 +261,51 @@ def main() -> None:
         d_proj = n_embd
         sl: int = 300
 
-        configs = SpectralHybridConfigs(
-            # STU settings
-            d_in=d_in,
-            d_out=d_out,
-            d_proj=d_proj,
-            num_eigh=num_eigh,
-            k_y=k_y,
-            k_u=k_u,
-            learnable_m_y=learnable_m_y,
-            alpha=alpha,
-            use_ar_y=use_ar_y,
-            use_ar_u=use_ar_u,
-            use_hankel_L=use_hankel_L,
+    configs = SpectralHybridConfigs(
+        # STU settings
+        d_in=d_in,
+        d_out=d_out,
+        d_proj=d_proj,
+        num_eigh=num_eigh,
+        k_y=k_y,
+        k_u=k_u,
+        learnable_m_y=learnable_m_y,
+        alpha=alpha,
+        use_ar_y=use_ar_y,
+        use_ar_u=use_ar_u,
+        use_hankel_L=use_hankel_L,
 
-            # Transformer settings
-            n_embd=n_embd,
-            n_heads=n_heads,
-            sub_rn=sub_rn,
-            flash_attn=flash_attn,
+        # Transformer settings
+        n_embd=n_embd,
+        n_heads=n_heads,
+        sub_rn=sub_rn,
+        flash_attn=flash_attn,
+        
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
 
-            # MoE
-            moe_1=moe_1,
-            moe_2=moe_2,
-            num_experts=num_experts,
-            num_experts_per_timestep=num_experts_per_timestep,
-
-            # Dilated Attention
-            dilated_attn=dilated_attn,
-            segment_lengths=segment_lengths,
-            dilated_ratios=dilated_ratios,
-            seq_parallel=seq_parallel,
-            xpos_rel_pos=xpos_rel_pos,
-            xpos_scale_base=xpos_scale_base,
-            rms_norm_eps=rms_norm_eps,
-            multiway=multiway,
-            
-            # General training settings
-            sl=sl,
-            n_layers=n_layers,
-            scale=scale,
-            bias=bias,
-            dropout=dropout,
-            loss_fn=loss_fn,
-            controls={"task": "mujoco-v1", "controller": controller},
-            device=device,
-        )
+        # Dilated Attention
+        dilated_attn=dilated_attn,
+        segment_lengths=segment_lengths,
+        dilated_ratios=dilated_ratios,
+        seq_parallel=seq_parallel,
+        xpos_rel_pos=xpos_rel_pos,
+        xpos_scale_base=xpos_scale_base,
+        rms_norm_eps=rms_norm_eps,
+        multiway=multiway,
+        
+        # General training settings
+        sl=sl,
+        n_layers=n_layers,
+        scale=scale,
+        bias=bias,
+        dropout=dropout,
+        loss_fn=loss_fn,
+        controls={"task": args.task, "controller": controller},
+        device=device,
+    )
 
     model = SpectralHybrid(configs).to(device)
     # model = torch.compile(model)
