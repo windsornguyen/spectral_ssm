@@ -25,7 +25,7 @@ parser.add_argument(
 parser.add_argument(
     "--task",
     type=str,
-    default="mujoco-v3",
+    default="mujoco-v1",
     choices=["mujoco-v1", "mujoco-v2", "mujoco-v3"],
     help="Task to run inference on.",
 )
@@ -37,6 +37,11 @@ parser.add_argument(
     help="Features to plot the trajectory across timesteps."
 )
 args = parser.parse_args()
+
+def load_data(filename):
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f"The file {filename} does not exist.")
+    return np.load(filename)
 
 # Load data
 try:
@@ -57,6 +62,11 @@ try:
 except FileNotFoundError as e:
     print(f"Error loading data: {e}")
     exit(1)
+
+if args.controller == "Ant-v1":
+    # Remove zero-padding for Mamba-2
+    mamba = mamba[:, :, :-3]
+    mamba_ground_truth = mamba_ground_truth[:, :, :-3]
 
 # Check if they are the same to ensure we are comparing the right data
 if np.array_equal(ground_truth, transformer_ground_truth) and np.array_equal(ground_truth, mamba_ground_truth) and np.array_equal(ground_truth, hybrid_ground_truth):

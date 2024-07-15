@@ -164,7 +164,7 @@ def main() -> None:
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 8 if use_mem_eff_path else 1
-    n_layers: int = 2
+    n_layers: int = 6
     bias: bool = False
     conv_bias: bool = True
     loss_fn = nn.MSELoss()
@@ -190,7 +190,8 @@ def main() -> None:
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
-        d_out: int = 18 if controller != "Ant-v1" else 32
+        d_out: int = 24 if controller != "Ant-v1" else 40
+        d_proj: int = 18 if controller != "Ant-v1" else 32
         sl: int = 1000
 
     elif task["mujoco-v2"]:
@@ -198,6 +199,7 @@ def main() -> None:
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
+        d_proj = d_model
         sl: int = 1000
 
     elif task["mujoco-v3"]:
@@ -205,6 +207,7 @@ def main() -> None:
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         d_model = d_out
+        d_proj = d_model
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
@@ -213,6 +216,7 @@ def main() -> None:
         n_layers=n_layers,
         d_model=d_model,
         d_out=d_out,
+        d_proj=d_proj,
         d_state=d_state,
         d_conv=d_conv,
         conv_init=conv_init,

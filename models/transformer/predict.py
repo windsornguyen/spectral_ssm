@@ -59,7 +59,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
-    model_path = f"transformer_{args.controller}_{args.task}_norm.pt"
+    model_path = f"transformer_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
         sl = 1000
@@ -113,9 +113,9 @@ def main():
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
         device=device,
-        moe=False,
-        num_experts=2,
-        num_experts_per_timestep=1,
+        moe=True,
+        num_experts=3,
+        num_experts_per_timestep=2,
     )
 
     # Initialize and load the model
@@ -251,14 +251,14 @@ def main():
     )
     print("Saved losses shape:", losses.shape)
     np.save(
-        f"transformer_{args.controller}_{args.task}_predictions_norm.npy",
+        f"transformer_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"transformer_{args.controller}_{args.task}_ground_truths_norm.npy",
+        f"transformer_{args.controller}_{args.task}_ground_truths.npy",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
-    np.save(f"transformer_{args.controller}_{args.task}_losses_norm.npy", losses.cpu().numpy())
+    np.save(f"transformer_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'transformer_{args.controller}_{args.task}_predictions.npy', 'transformer_{args.controller}_{args.task}_ground_truths.npy', and 'transformer_{args.controller}_{args.task}_losses.npy' respectively."
     )
@@ -329,7 +329,7 @@ def main():
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     # TODO: Add existok / make if non-existent (results/) directory
     plt.savefig(
-        f"results/transformer_{args.controller}_{args.task}_predictions_norm.png",
+        f"results/transformer_{args.controller}_{args.task}_predictions.png",
         dpi=300,
         bbox_inches="tight",
     )

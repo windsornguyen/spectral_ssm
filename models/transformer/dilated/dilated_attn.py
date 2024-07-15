@@ -11,7 +11,6 @@ Adapted from torchscale/component/utils.py @ https://github.com/microsoft/torchs
 import math
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from models.transformer.dilated.multihead_attn import MultiheadAttention
@@ -23,43 +22,14 @@ from utils.dist_utils import (
 )
 
 
-class DilatedCausalSelfAttention(nn.Module):
-    def __init__(self, configs):
-        super(DilatedCausalSelfAttention, self).__init__()
-        self.configs = configs
-        assert configs.n_embd % configs.n_heads == 0
+class DilatedCausalSelfAttention(MultiheadAttention):
+    """
+    Dilated causal self-attention layer, as implemented in the LongNet paper
+    (Ding et al., 2023, "LongNet: Scaling Transformers to 1,000,000,000 Tokens").
 
-        # Key, query, value projections for all heads, concatenated
-        self.c_attn = nn.Linear(configs.n_embd, 3 * configs.n_embd, bias=configs.bias)
-
-        # The output projection, concatenated
-        self.c_proj = nn.Linear(configs.n_embd, configs.n_embd, bias=configs.bias)
-        self.c_proj.SCALE_INIT = 1
-
-        # Regularization
-        self.dropout = configs.dropout
-        self.attn_dropout = nn.Dropout(self.dropout)
-        self.resid_dropout = nn.Dropout(self.dropout)
-        self.n_embd = configs.n_embd
-        self.n_heads = configs.n_heads
-
-        # Flash attention makes the GPUs go brrr, but support is only in PyTorch >= 2.0
-        has_flash_attn = hasattr(nn.functional, "scaled_dot_product_attention")
-        self.flash_attn = has_flash_attn and configs.flash_attn
-
-        if not self.flash_attn:
-            if not has_flash_attn:
-                print("WARNING: Using slow attention. Flash Attention requires PyTorch >= 2.0")
-            else:
-                print("WARNING: Using slow attention. Flash Attention is disabled.")
-            
-            # Manual implementation of the causal mask
-            self.register_buffer(
-                "mask",
-                torch.tril(torch.ones(configs.sl, configs.sl)).view(
-                    1, 1, configs.sl, configs.sl
-                ),
-            )
+    This code was adapted from torchscale/component/dilated_attention.py.
+    The repository can be found at https://github.com/microsoft/torchscale.
+    """
 
     def dense_to_sparse(self, x, ratio):
         print(f"Input tensor shape: {x.shape}")
@@ -207,57 +177,83 @@ class DilatedCausalSelfAttention(nn.Module):
         is_first_step=False,
         is_causal=False,
     ):
+        assert self.configs.flash_attn
+        assert rel_pos is None
+
         bsz, sl, n_embd = x.size()
 
         # Combined Q, K, V projection
-        qkv = self.c_attn(x)
+        qkv = self.c_attn(x)        
         q, k, v = qkv.split(self.n_embd, dim=2)
 
         # Reshape for multi-head attention
-        k = k.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(1, 2)
-        q = q.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(1, 2)
-        v = v.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(1, 2)
+        k = k.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # -> (B, nh, sl, hs)
+        q = q.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # (B, nh, sl, hs)
+        v = v.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # (B, nh, sl, hs)
 
-        # Handle incremental state for inference
+        if incremental_state is not None and not is_first_step:
+            offset = src_len - 1
+        else:
+            offset = 0
+
         if incremental_state is not None:
+            # Cache and reuse the previous keys and values
             if "prev_key" in incremental_state:
-                prev_key = incremental_state["prev_key"].view(bsz * self.n_heads, -1, self.n_embd // self.n_heads)
-                prev_value = incremental_state["prev_value"].view(bsz * self.n_heads, -1, self.n_embd // self.n_heads)
+                prev_key = incremental_state["prev_key"].view(
+                    bsz * self.n_heads, -1, self.head_dim
+                )
+                prev_value = incremental_state["prev_value"].view(
+                    bsz * self.n_heads, -1, self.head_dim
+                )
                 k = torch.cat([prev_key, k], dim=1)
                 v = torch.cat([prev_value, v], dim=1)
-            incremental_state["prev_key"] = k.view(bsz, self.n_heads, -1, self.n_embd // self.n_heads)
-            incremental_state["prev_value"] = v.view(bsz, self.n_heads, -1, self.n_embd // self.n_heads)
+            incremental_state["prev_key"] = k.view(
+                bsz, self.n_heads, -1, self.head_dim
+            )
+            incremental_state["prev_value"] = v.view(
+                bsz, self.n_heads, -1, self.head_dim
+            )
+            src_len = k.size(1)
+
+        # Apply XPOS if configured
+        if self.xpos is not None:
+            offset = src_len - 1 if incremental_state is not None and not is_first_step else 0
+            k = self.xpos(k, offset=0, downscale=True)
+            q = self.xpos(q, offset=offset, downscale=False)
+        
+        # Reshape for multi-head attention
+        k = k.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # -> (B, nh, sl, hs)
+        q = q.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # (B, nh, sl, hs)
+        v = v.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(
+            1, 2
+        )  # (B, nh, sl, hs)
 
         outs, lses = [], []
         for sl, dr in zip(self.configs.segment_lengths, self.configs.dilated_ratios):
             ki = self.gathering(k, dr, sl, is_causal=is_causal, offset=0, is_kv=True, seq_parall=self.configs.seq_parallel)
             vi = self.gathering(v, dr, sl, is_causal=is_causal, offset=0, is_kv=True, seq_parall=self.configs.seq_parallel)
-            qi = self.gathering(q, dr, sl, is_causal=is_causal, offset=0 if incremental_state is None else sl - 1, is_kv=False, seq_parall=self.configs.seq_parallel)
+            qi = self.gathering(q, dr, sl, is_causal=is_causal, offset=offset, is_kv=False, seq_parall=self.configs.seq_parallel)
 
-            if self.flash_attn:
-                yi = nn.functional.scaled_dot_product_attention(
-                    qi, ki, vi,
-                    attn_mask=None,
-                    dropout_p=self.dropout if self.training else 0,
-                    is_causal=is_causal
-                )
-                lse = None  # Flash attention doesn't return LSE
-            else:
-                qi = qi * (ki.size(-1) ** -0.5)
-                att = qi @ ki.transpose(-2, -1)
-                if is_causal:
-                    att = att.masked_fill(self.mask[:, :, :sl, :sl] == 0, float("-inf"))
-                att = nn.functional.softmax(att, dim=-1)
-                att = self.attn_dropout(att)
-                yi = att @ vi
-                lse = att.logsumexp(dim=-1, keepdim=True)
+            out, lse = self.attention_ops(qi, ki, vi, key_padding_mask=key_padding_mask, attn_mask=attn_mask, rel_pos=rel_pos, is_causal=is_causal)
 
-            outs.append(yi)
+            outs.append(out)
             lses.append(lse)
 
-        attn = self.scattering(outs, lses, sl, bsz, offset=0 if incremental_state is None else sl - 1)
+        attn = self.scattering(outs, lses, tgt_len, bsz, offset=offset)
 
-        # Output projection
-        attn = self.resid_dropout(self.c_proj(attn))
+        if self.inner_attn_ln is not None:
+            attn = self.inner_attn_ln(attn)
+
+        attn = self.out_proj(attn)
 
         return attn, None

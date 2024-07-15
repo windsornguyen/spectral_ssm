@@ -111,12 +111,11 @@ def main():
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    world_size = torch.distributed.get_world_size()
 
     # Load the trained model
     model_path = f"hybrid_{args.controller}_{args.task}.pt"
 
-    if not task["mujoco-v3"]:
+    if args.task != "mujoco-v3":
         if args.controller == "Ant-v1":
             loss_fn = AntLoss()
         elif args.controller == "HalfCheetah-v1":
@@ -145,7 +144,7 @@ def main():
         d_proj = n_embd
         sl: int = 1000
 
-    elif args.task == "mujoco-v3"
+    elif args.task == "mujoco-v3":
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2

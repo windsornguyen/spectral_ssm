@@ -137,7 +137,7 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 2
+    n_layers: int = 6
     scale: int = 4
     bias: bool = False
     dropout: float = 0.0

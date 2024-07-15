@@ -25,7 +25,8 @@ class Mamba2Configs:
     bsz: int = 8
     n_layers: int = 2
     d_model: int = 32
-    d_out: int = 29
+    d_out: int = 32
+    d_proj: int = 29
     d_state: int = 128
     d_conv: int = 4
     conv_init: Optional[float] = None
@@ -147,9 +148,9 @@ class MambaBlock(nn.Module):
         self.rn = RMSNorm(configs.d_model)
         self.mlp = MoE(
             configs,
-            experts=[MLP(configs) for _ in range(configs.num_experts)],
+            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else MLP(configs)
+        ) if configs.moe else GatedMLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -179,6 +180,7 @@ class Mamba2(nn.Module):
         self.n_layers = self.configs.n_layers
         self.d_model = self.configs.d_model
         self.d_out = self.configs.d_out
+        self.d_proj = configs.d_proj
         self.bias = self.configs.bias
         self.loss_fn = self.configs.loss_fn
         self.controls = self.configs.controls
@@ -189,7 +191,7 @@ class Mamba2(nn.Module):
                     [MambaLayer(self.configs) for _ in range(self.n_layers)]),
             )
         )
-        self.output = nn.Linear(self.d_model, self.d_out, bias=self.bias)
+        self.output = nn.Linear(self.d_model, self.d_proj, bias=self.bias)
 
         # Report the number of parameters
         print(

@@ -60,7 +60,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load the trained model
-    model_path = f"sssm_{args.controller}_{args.task}_norm.pt"
+    model_path = f"sssm_{args.controller}_{args.task}.pt"
 
     if args.task == "mujoco-v1":
         sl = 1000
@@ -114,7 +114,7 @@ def main():
         use_ar_y=False,
         use_ar_u=True,
         use_hankel_L=False,
-        moe=False,
+        moe=True,
         num_experts=3,
         num_experts_per_timestep=2,
         loss_fn=loss_fn,
@@ -252,14 +252,14 @@ def main():
     )
     print("Saved losses shape:", losses.shape)
     np.save(
-        f"sssm_{args.controller}_{args.task}_predictions_norm.npy",
+        f"sssm_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"sssm_{args.controller}_{args.task}_ground_truths_norm.npy",
+        f"sssm_{args.controller}_{args.task}_ground_truths.npy",
         test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
-    np.save(f"sssm_{args.controller}_{args.task}_losses_norm.npy", losses.cpu().numpy())
+    np.save(f"sssm_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'sssm_{args.controller}_{args.task}_predictions.npy', 'sssm_{args.controller}_{args.task}_ground_truths.npy', and 'sssm_{args.controller}_{args.task}_losses.npy' respectively."
     )
@@ -329,7 +329,7 @@ def main():
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     # TODO: Add existok / make if non-existent (results/) directory
     plt.savefig(
-        f"results/sssm_{args.controller}_{args.task}_predictions_norm.png",
+        f"results/sssm_{args.controller}_{args.task}_predictions.png",
         dpi=300,
         bbox_inches="tight",
     )

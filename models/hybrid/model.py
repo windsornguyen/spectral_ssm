@@ -326,15 +326,7 @@ class SpectralHybrid(nn.Module):
             )
         )
         
-        # Adjust output dims based on task and controller
-        self.d_out = configs.n_embd
-        if configs.controls["task"] == "mujoco-v1":
-            if configs.controls["controller"] == "Ant-v1":
-                self.d_out = 29
-            else:
-                self.d_out = 18
-        
-        self.output = nn.Linear(configs.n_embd, self.d_out, bias=configs.bias)
+        self.output = nn.Linear(configs.n_embd, self.d_proj, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
         
         # Initialize all weights
@@ -583,7 +575,7 @@ class SpectralHybrid(nn.Module):
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
         # Initialize cost function
-        mse_loss = MSELoss()
+        mse_loss = nn.MSELoss()
 
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step

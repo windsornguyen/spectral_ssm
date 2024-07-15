@@ -92,19 +92,22 @@ def main():
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
-        d_out: int = 18 if args.controller != "Ant-v1" else 32
+        d_out: int = 24 if args.controller != "Ant-v1" else 40
+        d_proj: int = 18 if args.controller != "Ant-v1" else 32
         sl: int = 1000
     elif args.task == "mujoco-v2":
         d_model: int = 18 if args.controller != "Ant-v1" else 32
         d_state: int = 130 if args.controller != "Ant-v1" else 128
         headdim: int = 1 if args.controller == "HalfCheetah-v1" else 1
         d_out = d_model
+        d_proj = d_model
         sl: int = 1000
     elif args.task == "mujoco-v3":
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         d_model = d_out
+        d_proj = d_model
         expand = 2
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
@@ -113,6 +116,8 @@ def main():
         bsz=8,
         n_layers=2,
         d_model=d_model,
+        d_out=d_out,
+        d_proj=d_proj,
         d_state=d_state,
         d_conv=4,
         conv_init=None,
@@ -140,7 +145,6 @@ def main():
         num_experts_per_timestep=2,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
-        d_out=d_out,
         device=device,
         dtype=torch.float32,
         world_size=world_size
