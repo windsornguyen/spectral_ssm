@@ -153,86 +153,86 @@ for pred_idx in range(num_preds):
     ax.set_ylabel("Mean Absolute Error")
     ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
     # Save the mean loss figures
-    plt.savefig(f"plots/losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}.png")
+    plt.savefig(f"plots/predict_losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}.png")
     plt.close(fig)
 
-# Perform PCA
-if args.task == "mujoco-v3":
-    pca = PCA(n_components=n_components)
-    # Reshape: (num_preds, time_steps, num_features) -> (num_preds * time_steps, num_features) -> (num_preds, time_steps, n_components)
-    sssm = pca.fit_transform(sssm.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    transformer = pca.transform(transformer.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    mamba = pca.transform(mamba.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    hybrid = pca.transform(hybrid.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    ground_truth = pca.transform(ground_truth.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
+# # Perform PCA
+# if args.task == "mujoco-v3":
+#     pca = PCA(n_components=n_components)
+#     # Reshape: (num_preds, time_steps, num_features) -> (num_preds * time_steps, num_features) -> (num_preds, time_steps, n_components)
+#     sssm = pca.fit_transform(sssm.reshape(-1, num_features)).reshape(
+#         num_preds, time_steps, -1
+#     )
+#     transformer = pca.transform(transformer.reshape(-1, num_features)).reshape(
+#         num_preds, time_steps, -1
+#     )
+#     mamba = pca.transform(mamba.reshape(-1, num_features)).reshape(
+#         num_preds, time_steps, -1
+#     )
+#     hybrid = pca.transform(hybrid.reshape(-1, num_features)).reshape(
+#         num_preds, time_steps, -1
+#     )
+#     ground_truth = pca.transform(ground_truth.reshape(-1, num_features)).reshape(
+#         num_preds, time_steps, -1
+#     )
 
-for pred_idx in range(num_preds):
-    print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
-    # One figure for each prediction
-    fig, axs = plt.subplots(n_components, 1, figsize=(15, 5 * n_components))
+# for pred_idx in range(num_preds):
+#     print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
+#     # One figure for each prediction
+#     fig, axs = plt.subplots(n_components, 1, figsize=(15, 5 * n_components))
 
-    # Plot the predicted states (embeddings) and ground truth states
-    for feature_idx in range(feature_start, feature_end):
-        i = feature_idx - feature_start
-        axs[i].plot(
-            range(time_steps),
-            ground_truth[pred_idx, : time_steps, feature_idx],
-            label="Ground Truth",
-            color=colors[2],
-            linewidth=2,
-            linestyle="--",
-        )
-        axs[i].plot(
-            range(time_steps),
-            sssm[pred_idx, : time_steps, feature_idx],
-            label="Spectral SSM",
-            color=colors[0],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            transformer[pred_idx, : time_steps, feature_idx],
-            label="Transformer",
-            color=colors[1],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            mamba[pred_idx, : time_steps, feature_idx],
-            label="Mamba",
-            color=colors[3],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            hybrid[pred_idx, : time_steps, feature_idx],
-            label="Hybrid",
-            color=colors[4],
-            linewidth=2,
-        )
-        axs[i].set_xlabel("Time Step")
-        axs[i].set_ylabel(f"Feature {feature_idx+1} Value")
-        axs[i].set_title(
-            f"Prediction {pred_idx+1}, Feature {feature_idx+1}"
-        )
-        axs[i].legend()
+#     # Plot the predicted states (embeddings) and ground truth states
+#     for feature_idx in range(feature_start, feature_end):
+#         i = feature_idx - feature_start
+#         axs[i].plot(
+#             range(time_steps),
+#             ground_truth[pred_idx, : time_steps, feature_idx],
+#             label="Ground Truth",
+#             color=colors[2],
+#             linewidth=2,
+#             linestyle="--",
+#         )
+#         axs[i].plot(
+#             range(time_steps),
+#             sssm[pred_idx, : time_steps, feature_idx],
+#             label="Spectral SSM",
+#             color=colors[0],
+#             linewidth=2,
+#         )
+#         axs[i].plot(
+#             range(time_steps),
+#             transformer[pred_idx, : time_steps, feature_idx],
+#             label="Transformer",
+#             color=colors[1],
+#             linewidth=2,
+#         )
+#         axs[i].plot(
+#             range(time_steps),
+#             mamba[pred_idx, : time_steps, feature_idx],
+#             label="Mamba",
+#             color=colors[3],
+#             linewidth=2,
+#         )
+#         axs[i].plot(
+#             range(time_steps),
+#             hybrid[pred_idx, : time_steps, feature_idx],
+#             label="Hybrid",
+#             color=colors[4],
+#             linewidth=2,
+#         )
+#         axs[i].set_xlabel("Time Step")
+#         axs[i].set_ylabel(f"Feature {feature_idx+1} Value")
+#         axs[i].set_title(
+#             f"Prediction {pred_idx+1}, Feature {feature_idx+1}"
+#         )
+#         axs[i].legend()
 
-    plt.suptitle(
-        f"Predictions for {args.controller} on {args.task}", fontsize=16
-    )
-    plt.tight_layout()
+#     plt.suptitle(
+#         f"Predictions for {args.controller} on {args.task}", fontsize=16
+#     )
+#     plt.tight_layout()
 
-    # Save the figures
-    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}.png")
-    plt.show()
-    plt.close(fig)
+#     # Save the figures
+#     plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}.png")
+#     plt.show()
+#     plt.close(fig)

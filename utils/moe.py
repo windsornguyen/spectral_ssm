@@ -7,7 +7,7 @@
 # TODO: In general, organize the utils directory better.
 
 """
-The Mixture-of-Experts architecture from 
+Simple Mixture-of-Experts architecture from 
 "Mixtral of Experts" by Jiang et al. (2024).
 """
 
@@ -45,16 +45,39 @@ class MoE(nn.Module):
         self.num_experts_per_timestep = configs.num_experts_per_timestep
 
     def forward(self, inputs: torch.Tensor):
+        # Fuse inputs to process all tokens across all sequences in batch at once
         inputs_fused = inputs.view(-1, inputs.shape[-1]) # (bsz * sl, n_embd)
-        gate_logits = self.gate(inputs_fused)
-        weights, selected_experts = torch.topk(gate_logits, self.num_experts_per_timestep)
+        
+        # Compute logits for each expert
+        gate_logits = self.gate(inputs_fused) # (bsz * sl, num_experts)
+
+        # Select the top num_experts_per_timestep experts and their _raw_ logits
+        weights, selected_experts = torch.topk(
+            gate_logits,
+            self.num_experts_per_timestep
+        ) # Both: (bsz * sl, num_experts_per_timestep)
+
+        # Normalize the logits to get the "probabilities"
         weights = F.softmax(weights, dim=-1, dtype=torch.float).type_as(inputs)
 
+        # Allocate tensor for final output of the MoE layer
         results = torch.zeros_like(inputs_fused)
-        for i, expert in enumerate(self.experts):
-            batch_idx, nth_expert = torch.where(selected_experts == i)
-            results[batch_idx] += weights[batch_idx, nth_expert, None] * expert(
-                inputs_fused[batch_idx]
-            )
 
+        # For each expert, determine which tokens are selected for that expert
+        for idx, expert in enumerate(self.experts):
+            # Find all positions where current expert was selected as a top expert
+            batch_idx, nth_expert = torch.where(selected_experts == idx)
+
+            # Select inputs and weights for current expert
+            expert_inputs = inputs_fused[batch_idx]
+            expert_weights = weights[batch_idx, nth_expert, None]
+            
+            # Apply expert to selected inputs
+            expert_outputs = expert(expert_inputs)
+            
+            # Weight the expert output and add to results
+            weighted_output = expert_weights * expert_outputs
+            results[batch_idx] += weighted_output
+        
+        # Reshape results back to original shape
         return results.view_as(inputs)

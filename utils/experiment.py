@@ -19,6 +19,8 @@ from tqdm import tqdm
 from torch.optim import AdamW
 from utils.colors import Colors, colored_print
 
+from models.stu.model import SimpleGateMoe
+
 
 class Experiment:
     """
@@ -87,51 +89,63 @@ class Experiment:
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
         m_y_params = []
+        stu_params = {f'stu_{i}': [] for i in range(1, 5)}
         default_params = []
+
+        # Define different learning rates for each STU
+        stu_lr_multipliers = {
+            'stu_1': 1.0,
+            'stu_2': 0.7,
+            'stu_3': 0.4,
+            'stu_4': 0.1
+        }
 
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name.startswith("m_y"):
                     m_y_params.append(param)
+                elif any(f"stu_{i}" in name for i in range(1, 5)):
+                    stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
+                    stu_params[f'stu_{stu_number}'].append(param)
                 else:
                     default_params.append(param)
 
+        # Add parameter groups for STUs with their specific learning rates
+        for stu_name, params in stu_params.items():
+            if params:
+                stu_lr = lr * stu_lr_multipliers[stu_name]
+                param_groups.append({
+                    "name": stu_name,
+                    "params": params,
+                    "lr": stu_lr,
+                    "weight_decay": weight_decay,
+                })
+
+        # Add parameter groups for m_y and default params
         if m_y_params:
-            param_groups.extend(
-                [
-                    {
-                        "name": "default",
-                        "params": default_params,
-                        "lr": self.max_lr,
-                        "weight_decay": self.weight_decay,
-                    },
-                    {
-                        "name": "m_y",
-                        "params": m_y_params,
-                        "lr": self.m_y_learning_rate,
-                        "weight_decay": self.m_y_weight_decay,
-                    },
-                ]
-            )
-        else:
-            decay_params = [p for p in default_params if p.dim() >= 2]
-            nodecay_params = [p for p in default_params if p.dim() < 2]
-            param_groups.extend(
-                [
-                    {
-                        "name": "decay",
-                        "params": decay_params,
-                        "lr": self.max_lr,
-                        "weight_decay": self.weight_decay,
-                    },
-                    {
-                        "name": "no_decay",
-                        "params": nodecay_params,
-                        "lr": self.max_lr,
-                        "weight_decay": 0.0,
-                    },
-                ]
-            )
+            param_groups.append({
+                "name": "m_y",
+                "params": m_y_params,
+                "lr": self.m_y_learning_rate,
+                "weight_decay": self.m_y_weight_decay,
+            })
+
+        decay_params = [p for p in default_params if p.dim() >= 2]
+        nodecay_params = [p for p in default_params if p.dim() < 2]
+        param_groups.extend([
+            {
+                "name": "decay",
+                "params": decay_params,
+                "lr": self.max_lr,
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "name": "no_decay",
+                "params": nodecay_params,
+                "lr": self.max_lr,
+                "weight_decay": 0.0,
+            },
+        ])
 
         if self.main_process:
             for group in param_groups:
@@ -142,6 +156,12 @@ class Experiment:
                     f'lr: {group["lr"]}, weight_decay: {group["weight_decay"]}',
                     Colors.HEADER,
                 )
+
+            lr_reports = []
+            for param_group in param_groups:
+                lr_reports.append(f"{param_group['name']}: {param_group['lr']:.6f}")
+            lr_report = "Learning Rates: " + " | ".join(lr_reports)
+            colored_print(lr_report, Colors.OKCYAN)
 
         fused_available = "fused" in inspect.signature(AdamW).parameters
         use_fused = fused_available and self.device.type == "cuda"
@@ -158,6 +178,7 @@ class Experiment:
             amsgrad=use_amsgrad,
             fused=use_fused,
         )
+
 
     def get_lr(
         self,

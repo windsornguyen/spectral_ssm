@@ -215,7 +215,7 @@ def main() -> None:
     multiway = args.multiway
 
     # General training settings
-    n_layers: int = 6
+    n_layers: int = 2
     scale: int = 4
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually

@@ -185,11 +185,12 @@ class GatedMLP(nn.Module):
         super().__init__()
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
+        self.chunks = 2
         self.hidden_features = int(configs.scale * configs.n_embd)
 
-        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.fc1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
         self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
-        self.activation = torch.nn.functional.silu
+        self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -203,11 +204,58 @@ class GatedMLP(nn.Module):
             torch.Tensor: Output tensor
         """
         y = self.fc1(x)
-        y, gate = y.chunk(2, dim=-1)
-        y = y * self.activation(gate)
+        y, gate = y.chunk(self.chunks, dim=-1)
+        y = y * self.silu(gate)
         y = self.fc2(y)
         return self.dropout(y)
 
+class SimpleGateMoe(nn.Module):
+    """
+    A single block of the spectral SSM model composed of STU and MLP layers,
+    with a gating mechanism for input-dependent selectivity.
+
+    Args:
+        configs: Configuration object for STU and MLP layers
+        sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors.
+        padded_sl (int): Padded sequence length for FFT operations.
+    """
+
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
+        super(SimpleGateMoe, self).__init__()
+        self.rn = RMSNorm(configs.n_embd)
+        self.stu_1 = STU(configs, sigma, V, padded_sl)
+        self.stu_2 = STU(configs, sigma, V, padded_sl)
+        self.stu_3 = STU(configs, sigma, V, padded_sl)
+        self.stu_4 = STU(configs, sigma, V, padded_sl)
+        self.d_out = configs.d_out
+        self.gate = nn.Linear(configs.n_embd, 4, bias=configs.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Block with gated STU computation.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        z = x
+        s1 = self.stu_1(x)
+        s2 = self.stu_2(x)
+        s3 = self.stu_3(x)
+        s4 = self.stu_4(x)
+
+        # Stack the outputs
+        outputs = torch.stack([s1, s2, s3], dim=-1)
+
+        # Compute the gating weights
+        weights = nn.functional.softmax(self.gate(x), dim=-1).unsqueeze(2)
+
+        # Apply the gating weights to the outputs and sum them
+        output = (outputs * weights).sum(dim=-1)
+        return output + z
 
 class Block(nn.Module):
     """
@@ -224,6 +272,7 @@ class Block(nn.Module):
         super(Block, self).__init__()
         self.rn = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
+        # self.stu = SimpleGateMoe(configs, sigma, V, padded_sl)
 
         self.mlp = MoE(
             configs,
@@ -277,7 +326,7 @@ class SpectralSSM(nn.Module):
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-        
+
         self.spectral_ssm = nn.ModuleDict(
             dict(
                 dropout=nn.Dropout(self.dropout),
@@ -310,7 +359,6 @@ class SpectralSSM(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        _, sl, n_embd = inputs.size()
         x = self.spectral_ssm.dropout(inputs)
         for block in self.spectral_ssm.hidden:
             x = block(x)

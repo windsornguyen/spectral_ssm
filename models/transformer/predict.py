@@ -7,19 +7,21 @@
 
 import argparse
 import torch
+from torch.nn import HuberLoss, MSELoss
 import numpy as np
 import matplotlib.pyplot as plt
+import random
 from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
 import seaborn as sns
 from matplotlib.gridspec import GridSpec
 
 from models.transformer.model import Transformer, TransformerConfigs
-from torch.nn import MSELoss
-
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
+from utils.dataloader import get_dataloader
+
 
 
 def smooth_curve(points, sigma=2):
@@ -53,6 +55,18 @@ def main():
         default="mujoco-v3",
         choices=["mujoco-v1", "mujoco-v2", "mujoco-v3"],
         help="Task to run inference on.",
+    )
+    parser.add_argument(
+        "--bsz",
+        type=int,
+        default=1,
+        help="Batch size.",
+    )
+    parser.add_argument(
+        "--shift",
+        type=int,
+        default=1,
+        help="Number of time steps to shift the targets from the inputs by.",
     )
     args = parser.parse_args()
 
@@ -129,64 +143,51 @@ def main():
     # Load the test data
     if args.task in ["mujoco-v1", "mujoco-v2"]:
         base_path = f"data/{args.task}/{args.controller}/"
-        test_inputs = np.load(f"{base_path}/val_inputs.npy")
-        test_targets = np.load(f"{base_path}/val_targets.npy")
-
-
-        # Define feature groups w.r.t each task
-        if args.controller == "Ant-v1":
-            feature_groups = {
-                "coordinates": (0, 1, 2),
-                "orientations": (3, 4, 5, 6),
-                "angles": (7, 8, 9, 10, 11, 12, 13, 14),
-                "coordinate_velocities": (15, 16, 17, 18, 19, 20),
-                "angular_velocities": (21, 22, 23, 24, 25, 26, 27, 28),
-            }
-        else:
-            feature_groups = {
-                "coordinates": (0, 1),
-                "angles": (2, 3, 4, 5, 6, 7, 8),
-                "coordinate_velocities": (9, 10),
-                "angular_velocities": (11, 12, 13, 14, 15, 16, 17),
-            }
-
-        # Normalize the test data
-        mean = {}
-        std = {}
-        for group_name, indices in feature_groups.items():
-            group_data = np.concatenate([test_targets[:, :, indices], test_inputs[:, :, indices]], axis=0)
-            mean[group_name] = np.mean(group_data, axis=(0, 1), keepdims=True)
-            std[group_name] = np.std(group_data, axis=(0, 1), keepdims=True)
-
-        for group_name, indices in feature_groups.items():
-            test_inputs[:, :, indices] = (test_inputs[:, :, indices] - mean[group_name]) / (std[group_name] + 1e-6)
-            test_targets[:, :, indices] = (test_targets[:, :, indices] - mean[group_name]) / (std[group_name] + 1e-6)
-        
-        test_inputs = torch.from_numpy(test_inputs).float().to(device)
-        test_targets = torch.from_numpy(test_targets).float().to(device)
-
+        test_data = {
+            "inputs": f"{base_path}/val_inputs.npy",
+            "targets": f"{base_path}/val_targets.npy"
+        }
     elif args.task == "mujoco-v3":
         test_data = torch.load(
-            f"data/{args.task}/{args.controller}/{args.controller}_ResNet-18_test.pt",
+            f"data/{args.task}/{args.controller}/{args.controller}_ResNet-18_val.pt",
             map_location=device,
         )
-        test_inputs = test_data
-        test_targets = test_data  # For mujoco-v3, inputs and targets are the same
     else:
         raise ValueError("Invalid task")
 
+    # Get test data loader
+    test_loader = get_dataloader(
+        model="transformer",
+        data=test_data,
+        task=args.task,
+        controller=args.controller,
+        bsz=args.bsz,
+        shift=args.shift,
+        preprocess=True,
+        shuffle=False,
+        pin_memory=True,
+        distributed=False,
+        local_rank=0,
+        world_size=1,
+        device=device,
+    )
+
     # Run inference
-    num_preds = 5
+    num_preds = 500
     predicted_states = []
     losses = []
-    metrics = {}
     init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
-    steps = len(test_inputs[1]) - init
+    
+    # Get the first batch to determine the steps
+    first_batch = next(iter(test_loader))
+    steps = first_batch[0].shape[1] - init
 
     with torch.no_grad():
-        for i in range(num_preds):
-            inputs = test_inputs[i : i + 1]
-            targets = test_targets[i : i + 1]
+        for i, (inputs, targets) in enumerate(test_loader):
+            if i >= num_preds:
+                break
+
+            inputs, targets = inputs.to(device), targets.to(device)
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
                 (
@@ -195,11 +196,10 @@ def main():
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,  # Use the first 100 steps as context
+                    init=init,
                     steps=steps,  # Predict the next steps
-                    rollout_steps=20,
+                    rollout_steps=1,
                 )
-
             elif args.task == "mujoco-v3":
                 (
                     pred_states,
@@ -207,8 +207,8 @@ def main():
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,
-                    steps=steps,  # Predict the next 5 steps
+                    init=init,  # Use the first 295 steps as context
+                    steps=steps,  # Predict the next steps
                     rollout_steps=1,
                 )
 
@@ -244,10 +244,14 @@ def main():
 
     # Save predictions and ground truths
     print("Saved prediction shape:", predicted_states.shape)
-    test_targets = torch.roll(test_targets, shifts=1, dims=1) # shift ground truth by 1
+    
+    # Get all targets from the dataloader
+    all_targets = torch.cat([targets for _, targets in test_loader], dim=0)
+    all_targets = torch.roll(all_targets, shifts=1, dims=1)  # shift ground truth by 1
+    
     print(
         "Saved ground truth shape:",
-        test_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
+        all_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
     )
     print("Saved losses shape:", losses.shape)
     np.save(
@@ -256,84 +260,85 @@ def main():
     )
     np.save(
         f"transformer_{args.controller}_{args.task}_ground_truths.npy",
-        test_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
+        all_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
     np.save(f"transformer_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'transformer_{args.controller}_{args.task}_predictions.npy', 'transformer_{args.controller}_{args.task}_ground_truths.npy', and 'transformer_{args.controller}_{args.task}_losses.npy' respectively."
     )
 
-    # Plotting
-    plt.style.use("seaborn-v0_8-whitegrid")
-    sns.set_context("paper", font_scale=1.5)
-    colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
 
-    fig = plt.figure(figsize=(20, 8 * num_preds))
-    gs = GridSpec(
-        num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
-    )
+    # # Plotting
+    # plt.style.use("seaborn-v0_8-whitegrid")
+    # sns.set_context("paper", font_scale=1.5)
+    # colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
 
-    for pred_idx in range(num_preds):
-        print(f"Plotting prediction {pred_idx + 1}")
+    # fig = plt.figure(figsize=(20, 8 * num_preds))
+    # gs = GridSpec(
+    #     num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
+    # )
 
-        # Plot predicted states vs ground truth
-        ax1 = fig.add_subplot(gs[pred_idx, 0])
-        feature_idx = 0
+    # for pred_idx in range(num_preds):
+    #     print(f"Plotting prediction {pred_idx + 1}")
 
-        # Plot ground truth
-        ax1.plot(
-            range(init, init + steps),
-            test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
-            label="Ground Truth",
-            color="black",
-            linewidth=2,
-            linestyle="--",
-        )
+    #     # Plot predicted states vs ground truth
+    #     ax1 = fig.add_subplot(gs[pred_idx, 0])
+    #     feature_idx = 0
 
-        # Plot prediction
-        ax1.plot(
-            range(init, init + steps),
-            predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
-            label="Predicted",
-            color=colors[pred_idx],
-            linewidth=2,
-        )
+    #     # Plot ground truth
+    #     ax1.plot(
+    #         range(init, init + steps),
+    #         test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
+    #         label="Ground Truth",
+    #         color="black",
+    #         linewidth=2,
+    #         linestyle="--",
+    #     )
 
-        ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
-        ax1.set_xlabel("Time Step")
-        ax1.set_ylabel("State Value")
-        ax1.legend()
+    #     # Plot prediction
+    #     ax1.plot(
+    #         range(init, init + steps),
+    #         predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
+    #         label="Predicted",
+    #         color=colors[pred_idx],
+    #         linewidth=2,
+    #     )
 
-        # Plot losses and metrics
-        ax2 = fig.add_subplot(gs[pred_idx, 1])
+    #     ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
+    #     ax1.set_xlabel("Time Step")
+    #     ax1.set_ylabel("State Value")
+    #     ax1.legend()
 
-        # Plot losses
-        ax2.plot(
-            range(steps),
-            smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
-            label="Total Loss",
-            color="black",
-            linewidth=2,
-        )
+    #     # Plot losses and metrics
+    #     ax2 = fig.add_subplot(gs[pred_idx, 1])
 
-        ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
-        ax2.set_xlabel("Time Step")
-        ax2.set_ylabel("Value")
-        ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-        ax2.set_yscale("log")  # Use log scale for better visibility
+    #     # Plot losses
+    #     ax2.plot(
+    #         range(steps),
+    #         smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
+    #         label="Total Loss",
+    #         color="black",
+    #         linewidth=2,
+    #     )
 
-    plt.suptitle(
-        f"Transformer Predictions for {args.controller} on {args.task}\n",
-        fontsize=16,
-    )
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    # TODO: Add existok / make if non-existent (results/) directory
-    plt.savefig(
-        f"results/transformer_{args.controller}_{args.task}_predictions.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-    plt.show()
+    #     ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
+    #     ax2.set_xlabel("Time Step")
+    #     ax2.set_ylabel("Value")
+    #     ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+    #     ax2.set_yscale("log")  # Use log scale for better visibility
+
+    # plt.suptitle(
+    #     f"Transformer Predictions for {args.controller} on {args.task}\n",
+    #     fontsize=16,
+    # )
+    # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # # TODO: Add existok / make if non-existent (results/) directory
+    # plt.savefig(
+    #     f"results/transformer_{args.controller}_{args.task}_predictions.png",
+    #     dpi=300,
+    #     bbox_inches="tight",
+    # )
+    # plt.show()
 
 
 if __name__ == "__main__":

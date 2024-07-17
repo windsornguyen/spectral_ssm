@@ -185,7 +185,7 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 6
+    n_layers: int = 2
     scale: int = 16
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False

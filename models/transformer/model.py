@@ -133,8 +133,8 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
+        self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
 
         self.ffn_1 = MoE(
@@ -150,7 +150,7 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = self.rn_1(x) if not self.configs.dilated_attn else x
+        x = self.rn_1(x)
         x = x + self.attn(x)
         x = x + self.ffn_1(self.rn_2(x))
         return x
@@ -388,7 +388,7 @@ class Transformer(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting

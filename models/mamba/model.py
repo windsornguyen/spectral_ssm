@@ -408,7 +408,7 @@ class Mamba2(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting

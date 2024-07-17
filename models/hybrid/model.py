@@ -281,7 +281,7 @@ class HybridBlock(nn.Module):
 
         # Attention portion
         x = x + self.attn(self.rn_3(x))
-        x = x + self.mlp_2(self.rn_4(x)) + z
+        x = x + self.mlp_2(self.rn_4(x))
 
         return x
 
@@ -587,7 +587,7 @@ class SpectralHybrid(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
