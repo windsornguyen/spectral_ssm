@@ -45,6 +45,8 @@ class SpectralHybridConfigs:
     # Transformer settings
     n_embd: int = 37 # Constraint: n_heads % n_embd == 0
     n_heads: int = 16 # Constraint: n_heads % n_embd == 0
+    sub_rn: bool = True
+    pct_attn: float = 0.08 # Percentage of layers using attention
     flash_attn: bool = True
     use_sq_relu: bool = False
     
@@ -54,8 +56,6 @@ class SpectralHybridConfigs:
     num_experts_per_timestep: int = 2
 
     # Dilated Attention settings
-    sub_rn: bool = True
-    flash_attn: bool = True
     dilated_attn: bool = False
     segment_lengths: list[int] = field(default_factory=lambda: [128])
     dilated_ratios: list[int] = field(default_factory=lambda: [1])
@@ -242,18 +242,17 @@ class HybridBlock(nn.Module):
         padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs, sigma, V, padded_sl, layer_type) -> None:
         super(HybridBlock, self).__init__()
-        self.stu = STU(configs, sigma, V, padded_sl)
-        self.attn = CausalSelfAttention(configs)
+        self.layer_type = layer_type
+        if self.layer_type == "STU":
+            self.stu = STU(configs, sigma, V, padded_sl)
+        elif self.layer_type == "Attention":
+            self.attn = CausalSelfAttention(configs)
+        else:
+            raise ValueError("Invalid layer type")
 
-        self.mlp_1 = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
-
-        self.mlp_2 = MoE(
+        self.mlp = MoE(
             configs,
             experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
@@ -261,8 +260,6 @@ class HybridBlock(nn.Module):
 
         self.rn_1 = RMSNorm(configs.n_embd)
         self.rn_2 = RMSNorm(configs.n_embd)
-        self.rn_3 = RMSNorm(configs.n_embd)
-        self.rn_4 = RMSNorm(configs.n_embd)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -274,14 +271,12 @@ class HybridBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        # STU portion
         z = x
-        x = self.stu(self.rn_1(x))
-        x = x + self.mlp_1(self.rn_2(x)) + z
-
-        # Attention portion
-        x = x + self.attn(self.rn_3(x))
-        x = x + self.mlp_2(self.rn_4(x)) + z
+        if self.layer_type == "STU":
+            x = x + self.stu(self.rn_1(x))
+        elif self.layer_type == "Attention":
+            x = x + self.attn(self.rn_1(x))
+        x = x + self.mlp(self.rn_2(x)) + z
 
         return x
 
@@ -314,21 +309,39 @@ class SpectralHybrid(nn.Module):
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.controls = configs.controls
+        self.pct_attn = configs.pct_attn
         
+        if configs.moe:
+            print("\nMoE?: Enabled | Using {configs.num_experts} experts.")
+        else:
+            print("\nMoE?: Disabled")
+        
+        attn_layers = int(self.n_layers * self.pct_attn)
+        stu_layers = self.n_layers - attn_layers
+        print(f"No. attn layers={attn_layers}, No. stu layers={stu_layers}")
+
+        # Calculate the number of STU layers between each Attention layer
+        stu_per_attn = stu_layers // attn_layers if attn_layers !=0 else 0
+        
+        blocks = []
+        for _ in range(attn_layers):
+            blocks.extend([HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "STU") for _ in range(stu_per_attn)])
+            blocks.append(HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "Attention"))
+        
+        # Add any remaining STU layers at the end
+        blocks.extend([HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "STU") for _ in range(stu_layers % stu_per_attn)])
+        print(blocks)
         self.hybrid = nn.ModuleDict(
             dict(
                 wpe=nn.Embedding(configs.sl, configs.n_embd),
                 dropout=nn.Dropout(self.dropout),
-                hidden=nn.ModuleList(
-                    [HybridBlock(
-                        self.configs, self.sigma, self.V, self.padded_sl
-                    ) for _ in range(self.n_layers)]),
+                hidden=nn.ModuleList(blocks),
             )
         )
         
         self.output = nn.Linear(configs.n_embd, self.d_proj, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
-        
+
         # Initialize all weights
         self.m_x = self.d_out**-0.5
         self.std = self.n_embd**-0.5
@@ -351,15 +364,6 @@ class SpectralHybrid(nn.Module):
             - Tuple containing loss and metrics (if applicable)
         """
         _, sl, n_embd = inputs.size()
-        
-        # Generate positional embeddings for the sequence
-        pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
-
-        # Position embeddings of shape (sl, n_embd)
-        pos_emb = self.hybrid.wpe(pos)  # -> (sl, n_embd)
-
-        # Add positional embeddings to the input
-        x = inputs + pos_emb
         
         x = self.hybrid.dropout(inputs)
         for block in self.hybrid.hidden:
@@ -539,8 +543,7 @@ class SpectralHybrid(nn.Module):
         targets: torch.Tensor,
         init: int = 950,
         steps: int = 50,
-        rollout_steps: int = 1,
-        truth: int = 0
+        rollout_steps: int = 20,
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -555,9 +558,6 @@ class SpectralHybrid(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
-            rollout_steps (int): Number of predicted steps to calculate the mean loss over
-            truth (int): Interval at which to ground predictions to true targets.
-                If 0, no grounding is performed.
 
         Returns:
         tuple: Contains the following elements:
@@ -569,7 +569,6 @@ class SpectralHybrid(nn.Module):
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
-        _, _, d_in = inputs.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
         assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
@@ -582,15 +581,12 @@ class SpectralHybrid(nn.Module):
         # Initialize cost function
         mse_loss = nn.MSELoss()
 
-        # Initialize autoregressive inputs with all available context
-        ar_inputs = inputs[:, :init].clone()
-
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                ar_inputs[:, :current_step], targets[:, :current_step]
+                inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
@@ -601,16 +597,10 @@ class SpectralHybrid(nn.Module):
             # Store the last prediction step for plotting
             predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # Decide whether to use the prediction or ground truth as the next input
-            if truth == 0 or (step + 1) % truth == 0:
-                # Concatenate the autoregressive predictions of states and the ground truth actions
-                next_input = step_preds[:, -1:].detach()
-                next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-                next_input = torch.cat([next_input, next_action], dim=2)
-                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
-            else:
-                next_input = inputs[:, current_step:current_step+1, :]
-                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
+            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+            # next_input = torch.cat([next_input, next_action], dim=2)
+            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
         return predicted_steps, (avg_loss, traj_losses)

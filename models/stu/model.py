@@ -28,12 +28,11 @@ from tqdm import tqdm
 @dataclass
 class SpectralSSMConfigs:
     d_in: int = 37
-    d_out: int = 37
     d_proj: int = 29
     n_layers: int = 2
     n_embd: int = 37
     sl: int = 1_000
-    scale: int = 4
+    mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -78,7 +77,8 @@ class STU(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
-        self.d_out = configs.d_out
+        self.d_proj = configs.d_proj
+        self.n_embd = configs.n_embd
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -92,15 +92,15 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
         
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.d_out, self.k_y, self.d_out))
+            self.M_y = nn.Parameter(torch.zeros(self.n_embd, self.k_y, self.n_embd))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
+            self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
 
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -149,7 +149,7 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
+        self.h_dim = configs.mlp_scale * configs.n_embd
         self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -185,7 +185,7 @@ class GatedMLP(nn.Module):
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
         self.chunks = 2
-        self.hidden_features = int(configs.scale * configs.n_embd)
+        self.hidden_features = int(configs.mlp_scale * configs.n_embd)
 
         self.fc1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
         self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
@@ -227,7 +227,6 @@ class SimpleGateMoe(nn.Module):
         self.stu_2 = STU(configs, sigma, V, padded_sl)
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
-        self.d_out = configs.d_out
         self.gate = nn.Linear(configs.n_embd, 4, bias=configs.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -290,7 +289,7 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = self.stu(self.rn(x))
+        x = x + self.stu(self.rn(x))
         x = x + self.mlp(x) + z
 
         return x
@@ -309,7 +308,6 @@ class SpectralSSM(nn.Module):
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
         self.d_in = configs.d_in
-        self.d_out = configs.d_out
         self.d_proj = configs.d_proj
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
@@ -326,6 +324,8 @@ class SpectralSSM(nn.Module):
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
 
+        self.input_proj = nn.Linear(self.d_in, self.n_embd, bias=self.bias)
+
         self.spectral_ssm = nn.ModuleDict(
             dict(
                 dropout=nn.Dropout(self.dropout),
@@ -335,10 +335,10 @@ class SpectralSSM(nn.Module):
                     ) for _ in range(self.n_layers)]),
             )
         )
-        self.output = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
+        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
-        self.m_x = self.d_out**-0.5
+        self.m_x = self.n_embd**-0.5
         self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
@@ -358,10 +358,11 @@ class SpectralSSM(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        x = self.spectral_ssm.dropout(inputs)
+        x = self.input_proj(inputs)
+        x = self.spectral_ssm.dropout(x)
         for block in self.spectral_ssm.hidden:
             x = block(x)
-        preds = self.output(x)
+        preds = self.output_proj(x)
 
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (
@@ -394,7 +395,7 @@ class SpectralSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_out)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.n_embd)
 
     def get_num_params(self):
         """

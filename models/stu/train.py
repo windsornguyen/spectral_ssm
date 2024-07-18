@@ -138,7 +138,8 @@ def main() -> None:
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
     n_layers: int = 2
-    scale: int = 4
+    embd_scale: int = 2
+    mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.0
     num_eigh: int = 16
@@ -171,36 +172,32 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        n_embd: int = 24 if controller != "Ant-v1" else 37
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = d_in    # before projection d_in = d_out
+        d_in: int = 24 if controller != "Ant-v1" else 37
+        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
-        n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = n_embd
-        d_proj = n_embd
+        d_in: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
+        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
+        d_proj = d_in
         sl: int = 1000
-        
+
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
-        d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd = d_out
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_proj = n_embd
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        n_embd = embd_scale * d_in
+        d_proj = d_in
         sl: int = 300
     
     configs = SpectralSSMConfigs(
         n_layers=n_layers,
         n_embd=n_embd,
         d_in=d_in,
-        d_out=d_out,
         d_proj=d_proj,
         sl=sl,
-        scale=scale,
+        mlp_scale=mlp_scale,
         bias=bias,
         dropout=dropout,
         num_eigh=num_eigh,
@@ -230,7 +227,7 @@ def main() -> None:
     flops, mfu = None, None
 
     # Data loader hyperparameters
-    bsz: int = 8
+    bsz: int = 2
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -262,6 +259,10 @@ def main() -> None:
 
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
+    eps=1e-5,
+    noise = 0.5
+    noise_frequency = 0.2
+
     train_loader = get_dataloader(
         # TODO: Generalize model= to argparse 
         # and in general make a training script file 
@@ -278,6 +279,10 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=None,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -294,6 +299,10 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=None,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 

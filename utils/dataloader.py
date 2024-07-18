@@ -15,13 +15,28 @@ from utils.colors import Colors, colored_print
 
 # TODO: Write generic dataset downloading and saving script for the user.
 class Dataloader(Dataset):
-    def __init__(self, model, data, task, controller, shift=1, preprocess=True, eps=1e-5):
+    def __init__(
+        self, 
+        model, 
+        data, 
+        task, 
+        controller, 
+        shift=1, 
+        preprocess=True, 
+        sl=None,
+        noise=0.0,
+        noise_frequency=0.2,
+        eps=1e-5,
+        device=None,
+    ):
         self.model = model
         self.task = task
         self.controller = controller
         self.shift = shift
         self.preprocess = preprocess
+        self.sl = sl
         self.eps = eps
+        self.rng = np.random.default_rng() # Already seeded in main training script.
 
         if task in ["mujoco-v1", "mujoco-v2"]:
             # For .txt files
@@ -42,7 +57,7 @@ class Dataloader(Dataset):
                 # Padding zeros to the end of each trajectory at each timestep
                 self.inputs = np.pad(self.inputs, ((0, 0), (0, 0), (0, 3)), mode='constant')
                 self.targets = np.pad(self.targets, ((0, 0), (0, 0), (0, 3)), mode='constant')
-            
+
             # Define feature groups w.r.t each task
             if controller == "Ant-v1":
                 self.feature_groups = {
@@ -67,8 +82,18 @@ class Dataloader(Dataset):
         elif task == "mujoco-v3":
             self.data = data
 
+        # Apply noise first
+        self.noise = noise
+        self.noise_frequency = noise_frequency
+        if self.noise > 0:
+            print(f"\nApply Gaussian noise to data?: Enabled | Using noise={self.noise}, noise_frequency={self.noise_frequency}")
+            self.apply_noise()
+        else:
+            print("\nApply Gaussian noise to data?: Disabled")
+
+        # Finally, normalize the data
         if self.preprocess:
-            colored_print("Calculating data statistics...", Colors.OKBLUE)
+            colored_print("\nCalculating data statistics...", Colors.OKBLUE)
             self._calculate_statistics()
             colored_print("Normalizing data...", Colors.OKBLUE)
             self._normalize_data()
@@ -82,17 +107,21 @@ class Dataloader(Dataset):
             return len(self.inputs)
 
     def __getitem__(self, index):
-        if self.task in ["mujoco-v1", "mujoco-v2"]:
-            # MuJoCo-v1 and MuJoCo-v2 data are already offset by one
-            x_t = torch.tensor(self.inputs[index], dtype=torch.float32)
-            x_t_plus_1 = torch.tensor(self.targets[index], dtype=torch.float32)
-            return x_t, x_t_plus_1
-        elif self.task == "mujoco-v3":
+        if self.task == "mujoco-v3":
             # MuJoCo-v3 data does not come offset by one
             features = self.data[index]
             input_frames = features[:-self.shift]
             target_frames = features[self.shift:]
             return input_frames, target_frames
+
+        if self.sl:
+            x_t = torch.tensor(self.inputs[index, :sl], dtype=torch.float32)
+            x_t_plus_1 = torch.tensor(self.targets[index, :sl], dtype=torch.float32)
+        else:
+            # MuJoCo-v1 and MuJoCo-v2 data are already offset by one
+            x_t = torch.tensor(self.inputs[index], dtype=torch.float32)
+            x_t_plus_1 = torch.tensor(self.targets[index], dtype=torch.float32)
+        return x_t, x_t_plus_1
 
     def _calculate_statistics(self):
         if self.task == "mujoco-v3":
@@ -181,6 +210,14 @@ class Dataloader(Dataset):
 
             colored_print("Data normalization validated successfully.", Colors.BOLD + Colors.OKGREEN)
 
+    def apply_noise(self):
+        if self.task in ["mujoco-v1", "mujoco-v2"]:
+            num_samples, num_timesteps, _ = self.inputs.shape
+            noise_mask = self.rng.random((num_samples, num_timesteps)) < self.noise_frequency
+
+            # Apply noise to inputs only
+            noise_input = self.rng.standard_normal(self.inputs.shape) * self.noise
+            self.inputs += noise_input * noise_mask[..., np.newaxis]
 
 def get_dataloader(
     model,
@@ -195,10 +232,14 @@ def get_dataloader(
     distributed=True,
     local_rank=0,
     world_size=1,
+    sl=None,
+    noise=0.0,
+    noise_frequency=0.2,
+    eps=1e-5,
     device="cpu",
 ):
     colored_print(f"\nCreating dataloader on {device} for task: {task}", Colors.OKBLUE)
-    dataset = Dataloader(model, data, task, controller, shift, preprocess)
+    dataset = Dataloader(model, data, task, controller, shift, preprocess, sl, noise, noise_frequency, eps)
     pin_memory = device == "cpu"
 
     sampler = (
@@ -224,7 +265,7 @@ def get_dataloader(
     return dataloader
 
 
-def split_data(dataset, train_ratio=0.8, random_seed=1337):
+def split_data(dataset, train_ratio=0.8):
     if isinstance(dataset, Dataloader) and dataset.task in ["mujoco-v1", "mujoco-v2"]:
         num_samples = len(dataset)
         indices = torch.randperm(num_samples)

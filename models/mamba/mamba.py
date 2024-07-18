@@ -22,6 +22,11 @@ except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None, None
 
 try:
+    from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states
+except ImportError:
+    causal_conv1d_varlen_states = None
+
+try:
     from ops.triton.selective_state_update import selective_state_update
 except ImportError:
     selective_state_update = None
@@ -229,6 +234,7 @@ class MambaLayer(nn.Module):
         inputs: torch.Tensor,
         sl: int = None,
         seq_idx: int = None, 
+        cu_sl: int = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         inputs: (bsz, sl, hdim) if sl=None.
@@ -263,6 +269,7 @@ class MambaLayer(nn.Module):
                 A=A,
                 seq_idx=seq_idx,
                 dt_limit_kwargs=dt_limit_kwargs,
+                cu_sl=cu_sl,
             )
 
         return preds
@@ -307,6 +314,7 @@ class MambaLayer(nn.Module):
         A: torch.Tensor,
         seq_idx: int,
         dt_limit_kwargs: dict,
+        cu_sl: int = None,
     ) -> torch.Tensor:
         d_mlp = (
             zxbcdt.shape[-1]
@@ -328,10 +336,19 @@ class MambaLayer(nn.Module):
 
         # If we just take xBC[:, :, -self.d_conv :], it will error if sl < self.d_conv
         # Instead F.pad will pad with zeros if sl < self.d_conv, and truncate otherwise.
-        xBC_t = rearrange(xBC, "b l d -> b d l")
-        self.conv_state.copy_(F.pad(xBC_t, (self.configs.d_conv - xBC_t.shape[-1], 0)))
+        if cu_sl is None:
+            xBC_t = rearrange(xBC, "b l d -> b d l")
+            self.conv_state.copy_(F.pad(xBC_t, (self.configs.d_conv - xBC_t.shape[-1], 0))) # Update state (B D W)
+        else:
+            assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
+            assert bsz == 1, "varlen inference only supports batch dimension 1"
+            conv_varlen_states = causal_conv1d_varlen_states(
+                xBC.squeeze(0), cu_sl, state_len=self.conv_state.shape[-1]
+            )
+            self.conv_state.copy_(conv_varlen_states)
 
         xBC = self._apply_conv(xBC, seq_idx)
+
         x, B, C = torch.split(
             xBC,
             [
@@ -342,7 +359,7 @@ class MambaLayer(nn.Module):
             dim=-1,
         )
 
-        y = self._apply_ssm(x, dt, A, B, C, seq_idx, self.ssm_state, z, dt_limit_kwargs, cu_sl=None)
+        y = self._apply_ssm(x, dt, A, B, C, seq_idx, z, dt_limit_kwargs, cu_sl=None)
 
         if self.configs.rmsnorm:
             y = self.norm(y, z)
@@ -439,7 +456,7 @@ class MambaLayer(nn.Module):
             dim=-1,
         )
 
-        xBC = self._step_conv(xBC, self.conv_state, dtype)
+        xBC = self._step_conv(xBC, dtype)
 
         x, B, C = torch.split(
             xBC,
@@ -453,7 +470,7 @@ class MambaLayer(nn.Module):
         A = -torch.exp(self.A_log.float()) # (nheads,)
 
         # SSM Step
-        y = self._step_ssm(x, dt, A, B, C, self.ssm_state, z, dtype)
+        y = self._step_ssm(x, dt, A, B, C, z, dtype)
 
         if self.configs.rmsnorm:
             y = self.norm(y, z)
