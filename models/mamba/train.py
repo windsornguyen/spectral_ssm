@@ -196,7 +196,7 @@ def main() -> None:
 
     elif task["mujoco-v2"]:
         d_model: int = 18 if controller != "Ant-v1" else 32
-        d_state: int = 130 if controller != "Ant-v1" else 128
+        d_state: int = 130 if controller != "Ant-v1" else 512
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
         d_proj = d_model

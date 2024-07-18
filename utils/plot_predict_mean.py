@@ -1,9 +1,9 @@
 # =============================================================================#
 # Authors: Isabel Liu
-# File: plot_predict.py
+# File: plot_predict_mean.py
 # =============================================================================#
 
-"""Plotting script for Spectral SSM v. Transformer v. Mamba-2 v. Spectral Hybrid sequence prediction."""
+"""Plotting the mean losses and predictions for Spectral SSM v. Transformer v. Mamba-2 v. Spectral Hybrid sequence prediction."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -104,135 +104,123 @@ if args.task in ["mujoco-v1", "mujoco-v2"]:
             feature_start, feature_end = 9, 11
         else:
             feature_start, feature_end = 11, 18
-    n_components = feature_end - feature_start
-elif args.task == "mujoco-v3":
-    n_components = 3  # to perform PCA
-else:
-    raise ValueError("Invalid task")
+
+# Compute the mean across all trajectories
+mean_sssm = sssm.mean(axis=0)
+mean_transformer = transformer.mean(axis=0)
+mean_mamba = mamba.mean(axis=0)
+mean_hybrid = hybrid.mean(axis=0)
+
+mean_ground_truth = ground_truth.mean(axis=0)
+
+mean_sssm_losses = sssm_losses.mean(axis=0)
+mean_transformer_losses = transformer_losses.mean(axis=0)
+mean_mamba_losses = mamba_losses.mean(axis=0)
+mean_hybrid_losses = hybrid_losses.mean(axis=0)
 
 # Plotting
 colors = ["b", "g", "r", "c", "m"]  # blue for Spectral SSM, green for Transformer, red for Ground Truth, cyan for Mamba, magenta for Hybrid
-for pred_idx in range(num_preds):
-    # Compute and plot the mean losses
-    print(f"Plotting mean loss for prediction {pred_idx + 1}")
 
-    # One figure for each prediction
-    fig, ax = plt.subplots(figsize=(7, 5))
+# Compute and plot the mean losses
+print(f"Plotting mean loss for averaged predictions")
 
-    ax.plot(
+# One figure for each prediction
+fig, ax = plt.subplots(figsize=(7, 5))
+
+ax.plot(
+    range(time_steps),
+    mean_sssm_losses[: time_steps],
+    label=f"Averaged Spectral SSM Mean Loss",
+    color=colors[0],
+    linewidth=2,
+)
+ax.plot(
+    range(time_steps),
+    mean_transformer_losses[: time_steps],
+    label=f"Averaged Transformer Mean Loss",
+    color=colors[1],
+    linewidth=2,
+)
+ax.plot(
+    range(time_steps),
+    mean_mamba_losses[: time_steps],
+    label=f"Averaged Mamba Mean Loss",
+    color=colors[3],
+    linewidth=2,
+)
+ax.plot(
+    range(time_steps),
+    mean_hybrid_losses[: time_steps],
+    label=f"Averaged Hybrid Mean Loss",
+    color=colors[4],
+    linewidth=2,
+)
+
+ax.legend()
+ax.set_xlabel("Time Step")
+ax.set_ylabel("Mean Absolute Error")
+ax.set_title(f"Mean Loss for Averaged Predictions")
+# Save the mean loss figures
+plt.savefig(f"plots/predict_losses/mean_losses_averaged_{args.controller}_{args.task}_ar.png")
+plt.close(fig)
+
+
+# Plot ground truth v. prediction for each feature
+fig, axs = plt.subplots(feature_end - feature_start, 1, figsize=(15, 5 * (feature_end - feature_start)))
+print(f"Plotting averaged predictions")
+
+for feature_idx in range(feature_start, feature_end):
+    i = feature_idx - feature_start
+
+    # Plot the mean ground truth and prediction for each feature
+    axs[i].plot(
         range(time_steps),
-        sssm_losses[pred_idx, : time_steps],
-        label=f"Prediction {pred_idx+1} Spectral SSM Mean Loss",
+        mean_ground_truth[: time_steps, feature_idx],
+        label="Mean Ground Truth",
+        color=colors[2],
+        linewidth=2,
+        linestyle="--",
+    )
+    axs[i].plot(
+        range(time_steps),
+        mean_sssm[: time_steps, feature_idx],
+        label="Mean Spectral SSM Prediction",
         color=colors[0],
         linewidth=2,
     )
-    ax.plot(
+    axs[i].plot(
         range(time_steps),
-        transformer_losses[pred_idx, : time_steps],
-        label=f"Prediction {pred_idx+1} Transformer Mean Loss",
+        mean_transformer[: time_steps, feature_idx],
+        label="Mean Transformer Prediction",
         color=colors[1],
         linewidth=2,
     )
-    ax.plot(
+    axs[i].plot(
         range(time_steps),
-        mamba_losses[pred_idx, : time_steps],
-        label=f"Prediction {pred_idx+1} Mamba Mean Loss",
+        mean_mamba[: time_steps, feature_idx],
+        label="Mean Mamba Prediction",
         color=colors[3],
         linewidth=2,
     )
-    ax.plot(
+    axs[i].plot(
         range(time_steps),
-        hybrid_losses[pred_idx, : time_steps],
-        label=f"Prediction {pred_idx+1} Hybrid Mean Loss",
+        mean_hybrid[: time_steps, feature_idx],
+        label="Mean Hybrid Prediction",
         color=colors[4],
         linewidth=2,
     )
 
-    ax.legend()
-    ax.set_xlabel("Time Step")
-    ax.set_ylabel("Mean Absolute Error")
-    ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
-    # Save the mean loss figures
-    plt.savefig(f"plots/predict_losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}_ar.png")
-    plt.close(fig)
+    axs[i].legend()
+    axs[i].set_xlabel("Time Step")
+    axs[i].set_ylabel(f"Feature {feature_idx+1} Value")
+    axs[i].set_title(f"Mean Ground Truth vs. Mean Predictions for Feature {feature_idx+1}")
 
-# Perform PCA
-if args.task == "mujoco-v3":
-    pca = PCA(n_components=n_components)
-    # Reshape: (num_preds, time_steps, num_features) -> (num_preds * time_steps, num_features) -> (num_preds, time_steps, n_components)
-    sssm = pca.fit_transform(sssm.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    transformer = pca.transform(transformer.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    mamba = pca.transform(mamba.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    hybrid = pca.transform(hybrid.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
-    ground_truth = pca.transform(ground_truth.reshape(-1, num_features)).reshape(
-        num_preds, time_steps, -1
-    )
+plt.suptitle(
+    f"Mean Ground Truth vs. Mean Predictions for {args.controller} on {args.task}", fontsize=16
+)
+plt.tight_layout()
 
-for pred_idx in range(num_preds):
-    print(f"Plotting prediction {pred_idx + 1} over {time_steps} time steps")
-    # One figure for each prediction
-    fig, axs = plt.subplots(n_components, 1, figsize=(15, 5 * n_components))
-
-    # Plot the predicted states (embeddings) and ground truth states
-    for feature_idx in range(feature_start, feature_end):
-        i = feature_idx - feature_start
-        axs[i].plot(
-            range(time_steps),
-            ground_truth[pred_idx, : time_steps, feature_idx],
-            label="Ground Truth",
-            color=colors[2],
-            linewidth=2,
-            linestyle="--",
-        )
-        axs[i].plot(
-            range(time_steps),
-            sssm[pred_idx, : time_steps, feature_idx],
-            label="Spectral SSM",
-            color=colors[0],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            transformer[pred_idx, : time_steps, feature_idx],
-            label="Transformer",
-            color=colors[1],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            mamba[pred_idx, : time_steps, feature_idx],
-            label="Mamba",
-            color=colors[3],
-            linewidth=2,
-        )
-        axs[i].plot(
-            range(time_steps),
-            hybrid[pred_idx, : time_steps, feature_idx],
-            label="Hybrid",
-            color=colors[4],
-            linewidth=2,
-        )
-        axs[i].set_xlabel("Time Step")
-        axs[i].set_ylabel(f"Feature {feature_idx+1} Value")
-        axs[i].set_title(
-            f"Prediction {pred_idx+1}, Feature {feature_idx+1}"
-        )
-        axs[i].legend()
-
-    plt.suptitle(
-        f"Predictions for {args.controller} on {args.task}", fontsize=16
-    )
-    plt.tight_layout()
-
-    # Save the figures
-    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}_ar.png")
-    plt.show()
-    plt.close(fig)
+# Save the figure with all subplots
+plt.savefig(f"plots/preds/mean_preds_{args.controller}_{args.task}_{args.feature}_ar.png")
+plt.show()
+plt.close(fig)

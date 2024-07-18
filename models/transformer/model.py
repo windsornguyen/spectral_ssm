@@ -340,7 +340,8 @@ class Transformer(nn.Module):
         targets: torch.Tensor,
         init: int = 950,
         steps: int = 50,
-        rollout_steps: int = 20,
+        rollout_steps: int = 1,
+        truth: int = 0
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -355,6 +356,9 @@ class Transformer(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
+            rollout_steps (int): Number of predicted steps to calculate the mean loss over
+            truth (int): Interval at which to ground predictions to true targets.
+                If 0, no grounding is performed.
 
         Returns:
         tuple: Contains the following elements:
@@ -366,6 +370,7 @@ class Transformer(nn.Module):
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
+        _, _, d_in = inputs.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
         assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
@@ -378,26 +383,35 @@ class Transformer(nn.Module):
         # Initialize cost function
         mse_loss = nn.MSELoss()
 
+        # Initialize autoregressive inputs with all available context
+        ar_inputs = inputs[:, :init].clone()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, :current_step], targets[:, :current_step]
+                ar_inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
             predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
-            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-            # next_input = torch.cat([next_input, next_action], dim=2)
-            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            # Decide whether to use the prediction or ground truth as the next input
+            if truth == 0 or (step + 1) % truth == 0:
+                # Concatenate the autoregressive predictions of states and the ground truth actions
+                next_input = step_preds[:, -1:].detach()
+                next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+                next_input = torch.cat([next_input, next_action], dim=2)
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            else:
+                next_input = inputs[:, current_step:current_step+1, :]
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
         return predicted_steps, (avg_loss, traj_losses)

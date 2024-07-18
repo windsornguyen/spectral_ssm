@@ -199,6 +199,7 @@ def main():
                     init=init,
                     steps=steps,  # Predict the next steps
                     rollout_steps=1,
+                    truth=0,
                 )
             elif args.task == "mujoco-v3":
                 (
@@ -210,6 +211,7 @@ def main():
                     init=init,  # Use the first 295 steps as context
                     steps=steps,  # Predict the next steps
                     rollout_steps=1,
+                    truth=0,
                 )
 
             predicted_states.append(pred_states)
@@ -255,14 +257,14 @@ def main():
     )
     print("Saved losses shape:", losses.shape)
     np.save(
-        f"transformer_{args.controller}_{args.task}_predictions.npy",
+        f"transformer_{args.controller}_{args.task}_predictions_ar.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"transformer_{args.controller}_{args.task}_ground_truths.npy",
+        f"transformer_{args.controller}_{args.task}_ground_truths_ar.npy",
         all_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
     )
-    np.save(f"transformer_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
+    np.save(f"transformer_{args.controller}_{args.task}_losses_ar.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'transformer_{args.controller}_{args.task}_predictions.npy', 'transformer_{args.controller}_{args.task}_ground_truths.npy', and 'transformer_{args.controller}_{args.task}_losses.npy' respectively."
     )

@@ -137,7 +137,7 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 6
+    n_layers: int = 2
     scale: int = 4
     bias: bool = False
     dropout: float = 0.0
@@ -323,7 +323,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 1.5e-3
+    max_lr: float = 1.8e-3
     min_lr: float = max_lr * 0.1
 
     # Adam hyperparameters, per the GPT-3 paper
