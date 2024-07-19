@@ -102,11 +102,12 @@ class GatedFFN(nn.Module):
         super().__init__()
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
+        self.chunks = 2
         self.hidden_features = int(configs.scale * configs.n_embd)
 
-        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
-        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
-        self.activation = torch.nn.functional.silu
+        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
+        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -119,10 +120,10 @@ class GatedFFN(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        y = self.fc1(x)
+        y = self.fc_1(x)
         y, gate = y.chunk(2, dim=-1)
-        y = y * self.activation(gate)
-        y = self.fc2(y)
+        y = y * self.silu(gate)
+        y = self.fc_2(y)
         return self.dropout(y)
 
 class TransformerBlock(nn.Module):
@@ -133,9 +134,8 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
-        self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
+        self.rn = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
 
         self.ffn_1 = MoE(
             configs,
@@ -150,9 +150,8 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = self.rn_1(x) if not self.configs.dilated_attn else x
         x = x + self.attn(x)
-        x = x + self.ffn_1(self.rn_2(x))
+        x = x + self.ffn_1(self.rn(x))
         return x
 
 class Transformer(nn.Module):
@@ -251,7 +250,7 @@ class Transformer(nn.Module):
             torch.Tensor: Predicted output tensor of shape (bsz, sl, d_out)
             tuple: Loss (and metrics, if applicable)
         """
-        bsz, sl, d_in = inputs.size()
+        _, sl, d_in = inputs.size()
 
         # Generate positional embeddings for the sequence
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)

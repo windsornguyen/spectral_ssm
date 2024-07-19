@@ -112,7 +112,7 @@ class MultiheadAttention(nn.Module):
 
         # Combined Q, K, V projection
         qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        q, k, v = torch.chunk(qkv, 3, dim=2)
 
         # Reshape for multi-head attention
         q = rearrange(q, 'b l (h d) -> (b h) l d', h=self.n_heads)

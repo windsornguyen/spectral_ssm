@@ -6,17 +6,20 @@
 """The Spectral State Space Model architecture."""
 
 import math
+import os
+import csv
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from dataclasses import dataclass, field
 from models.stu.stu_utils import (
-    get_top_eigh, 
+    get_top_eigh,
     preconvolve,
-    compute_ar_u, 
-    compute_spectral, 
-    compute_ar_y
+    compute_ar_u,
+    compute_spectral,
+    compute_ar_y,
 )
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
@@ -29,12 +32,11 @@ from torch.nn import MSELoss
 @dataclass
 class SpectralSSMConfigs:
     d_in: int = 37
-    d_out: int = 37
     d_proj: int = 29
     n_layers: int = 2
     n_embd: int = 37
     sl: int = 1_000
-    scale: int = 4
+    mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -79,7 +81,8 @@ class STU(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
-        self.d_out = configs.d_out
+        self.d_proj = configs.d_proj
+        self.n_embd = configs.n_embd
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -93,15 +96,15 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
         
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.d_out, self.k_y, self.d_out))
+            self.M_y = nn.Parameter(torch.zeros(self.n_embd, self.k_y, self.n_embd))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
+            self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
 
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -151,7 +154,9 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.swiglu = SwiGLU(
+            dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False
+        )
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -185,11 +190,12 @@ class GatedMLP(nn.Module):
         super().__init__()
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
-        self.hidden_features = int(configs.scale * configs.n_embd)
+        self.chunks = 2
+        self.hidden_features = int(configs.mlp_scale * configs.n_embd)
 
-        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.fc1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
         self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
-        self.activation = torch.nn.functional.silu
+        self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -203,10 +209,179 @@ class GatedMLP(nn.Module):
             torch.Tensor: Output tensor
         """
         y = self.fc1(x)
-        y, gate = y.chunk(2, dim=-1)
-        y = y * self.activation(gate)
+        y, gate = y.chunk(self.chunks, dim=-1)
+        y = y * self.silu(gate)
         y = self.fc2(y)
         return self.dropout(y)
+
+
+class ExponentialLookbackMoE(nn.Module):
+    def __init__(self, configs, sigma, V, padded_sl, temperature=1.0) -> None:
+        super(ExponentialLookbackMoE, self).__init__()
+        self.stu_1 = STU(configs, sigma, V, padded_sl)
+        self.stu_2 = STU(configs, sigma, V, padded_sl)
+        self.stu_3 = STU(configs, sigma, V, padded_sl)
+        self.stu_4 = STU(configs, sigma, V, padded_sl)
+
+        # Initialize log weights as a learnable parameter
+        self.log_weights = nn.Parameter(torch.ones(4))
+        
+        self.temperature = temperature
+        self.log_file = "stu_usage_data.csv"
+        self.step_count = 0  # Track the number of steps
+
+        # Initialize the log file with headers
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, "w", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow(
+                    [
+                        "Forward Pass",
+                        "STU 1 Weight",
+                        "STU 2 Weight",
+                        "STU 3 Weight",
+                        "STU 4 Weight",
+                        "Selected STU"
+                    ]
+                )
+
+    def gumbel_softmax(self, logits, temperature=1.0, hard=False):
+        gumbels = -torch.empty_like(logits).exponential_().log()
+        gumbels = (logits + gumbels) / temperature
+        y_soft = gumbels.softmax(dim=-1)
+
+        if hard:
+            index = y_soft.max(dim=-1, keepdim=True)[1]
+            y_hard = torch.zeros_like(logits).scatter_(-1, index, 1.0)
+            ret = y_hard - y_soft.detach() + y_soft
+        else:
+            ret = y_soft
+        return ret
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.step_count += 1
+        device = x.device
+
+        # Generate expert outputs
+        x1 = x
+        x2 = x[:, : x.shape[1] // 2, :]
+        x3 = x[:, : x.shape[1] // 4, :]
+        x4 = x[:, : x.shape[1] // 8, :]
+
+        # Compute STU outputs
+        s1 = self.stu_1(x1)
+        s2 = F.pad(self.stu_2(x2), (0, 0, 0, x1.shape[1] - x2.shape[1]))
+        s3 = F.pad(self.stu_3(x3), (0, 0, 0, x1.shape[1] - x3.shape[1]))
+        s4 = F.pad(self.stu_4(x4), (0, 0, 0, x1.shape[1] - x4.shape[1]))
+
+        # Apply Gumbel-Softmax to get differentiable one-hot weights
+        weights = self.gumbel_softmax(self.log_weights, temperature=self.temperature, hard=True)
+        print(weights)
+
+        # Combine outputs using the Gumbel-Softmax weights
+        outputs = torch.stack([s1, s2, s3, s4], dim=-1)
+        output = (outputs * weights.view(1, 1, 1, -1)).sum(dim=-1)
+
+        # For logging purposes, we can still track which STU has the highest weight
+        top_stu_index = torch.argmax(weights).item()
+        print(top_stu_index)
+
+        self.log_current_weights(weights, top_stu_index)
+        return output
+
+    def log_current_weights(self, weights, selected_stu):
+        with open(self.log_file, "a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([self.step_count] + weights.tolist() + [selected_stu])
+
+class ExponentialLookbackMoE_InputDependent(nn.Module):
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
+        super(ExponentialLookbackMoE_InputDependent, self).__init__()
+        self.stu_1 = STU(configs, sigma, V, padded_sl)
+        self.stu_2 = STU(configs, sigma, V, padded_sl)
+        self.stu_3 = STU(configs, sigma, V, padded_sl)
+        self.stu_4 = STU(configs, sigma, V, padded_sl)
+        self.gate_1 = nn.Linear(configs.n_embd, 1, bias=configs.bias)
+        self.gate_2 = nn.Linear(configs.n_embd, 1, bias=configs.bias)
+        self.gate_3 = nn.Linear(configs.n_embd, 1, bias=configs.bias)
+        self.gate_4 = nn.Linear(configs.n_embd, 1, bias=configs.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Block with gated STU computation.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        # STU_1 processes the entire input
+        x1 = x
+        # Apply adaptive regret for other STUs
+        x2 = x[:, :x.shape[1]//2, :]  # 1/2 of x
+        x3 = x[:, :x.shape[1]//4, :]  # 1/4 of x
+        x4 = x[:, :x.shape[1]//8, :]  # 1/8 of x
+
+        # Compute STU outputs
+        s1, s2, s3, s4 = self.stu_1(x1), self.stu_2(x2), self.stu_3(x3), self.stu_4(x4)
+
+        # Compute gating weights for each STU
+        g1 = self.gate_1(x1).sigmoid()
+        g2 = self.gate_2(x2).sigmoid()
+        g3 = self.gate_3(x3).sigmoid()
+        g4 = self.gate_4(x4).sigmoid()
+
+        # Apply gates to STU outputs
+        s1 = s1 * g1
+        s2 = s2 * g2
+        s3 = s3 * g3
+        s4 = s4 * g4
+
+        # Pad STU outputs to match x1's shape
+        s2 = F.pad(s2, (0, 0, 0, x1.shape[1] - s2.shape[1]))
+        s3 = F.pad(s3, (0, 0, 0, x1.shape[1] - s3.shape[1]))
+        s4 = F.pad(s4, (0, 0, 0, x1.shape[1] - s4.shape[1]))
+
+        # Sum the gated and padded outputs
+        output = s1 + s2 + s3 + s4
+
+        return output
+
+class SimpleGatedMoe(nn.Module):
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
+        super(SimpleGatedMoe, self).__init__()
+        self.stu_1 = STU(configs, sigma, V, padded_sl)
+        self.stu_2 = STU(configs, sigma, V, padded_sl)
+        self.stu_3 = STU(configs, sigma, V, padded_sl)
+        self.stu_4 = STU(configs, sigma, V, padded_sl)
+        self.d_out = configs.d_out
+        self.gate = nn.Linear(configs.n_embd, 4, bias=configs.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Block with gated STU computation.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        # Compute STU outputs
+        s1, s2, s3, s4 = self.stu_1(x), self.stu_2(x), self.stu_3(x), self.stu_4(x)
+
+        # Compute gating weights
+        gate_logits = self.gate(x)
+        weights = nn.functional.softmax(gate_logits, dim=-1).unsqueeze(2)
+
+        # Stack the outputs
+        outputs = torch.stack([s1, s2, s3, s4], dim=-1)
+
+        # Apply the gating weights to the outputs and sum them
+        output = (outputs * weights).sum(dim=-1)
+
+        return output
 
 
 class Block(nn.Module):
@@ -222,14 +397,20 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn = RMSNorm(configs.n_embd)
-        self.stu = STU(configs, sigma, V, padded_sl)
+        self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_2 = RMSNorm(configs.n_embd)
+        # self.stu = STU(configs, sigma, V, padded_sl)
+        self.stu = ExponentialLookbackMoE(configs, sigma, V, padded_sl)
 
-        self.mlp = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -242,10 +423,10 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = self.stu(self.rn(x))
-        x = x + self.mlp(x) + z
+        x = x + self.stu(self.rn_1(x))
+        x = x + self.mlp(self.rn_2(x))
+        return x + z
 
-        return x
 
 class SpectralSSM(nn.Module):
     """
@@ -261,7 +442,6 @@ class SpectralSSM(nn.Module):
         self.n_layers = configs.n_layers
         self.n_embd = configs.n_embd
         self.d_in = configs.d_in
-        self.d_out = configs.d_out
         self.d_proj = configs.d_proj
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
@@ -277,7 +457,9 @@ class SpectralSSM(nn.Module):
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
-        
+
+        self.input_proj = nn.Linear(self.d_in, self.n_embd, bias=self.bias)
+
         self.spectral_ssm = nn.ModuleDict(
             dict(
                 dropout=nn.Dropout(self.dropout),
@@ -287,10 +469,10 @@ class SpectralSSM(nn.Module):
                     ) for _ in range(self.n_layers)]),
             )
         )
-        self.output = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
+        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
-        self.m_x = self.d_out**-0.5
+        self.m_x = self.n_embd**-0.5
         self.std = self.n_embd**-0.5
         self.apply(self._init_weights)
 
@@ -310,11 +492,11 @@ class SpectralSSM(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        _, sl, n_embd = inputs.size()
-        x = self.spectral_ssm.dropout(inputs)
+        x = self.input_proj(inputs)
+        x = self.spectral_ssm.dropout(x)
         for block in self.spectral_ssm.hidden:
             x = block(x)
-        preds = self.output(x)
+        preds = self.output_proj(x)
 
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (
@@ -347,7 +529,7 @@ class SpectralSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_out)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.n_embd)
 
     def get_num_params(self):
         """
@@ -358,7 +540,7 @@ class SpectralSSM(nn.Module):
         """
         num_params = sum(p.numel() for p in self.parameters())
         return num_params
-    
+
     def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
         """
         Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
@@ -382,7 +564,7 @@ class SpectralSSM(nn.Module):
         for _ in range(L):
             total_flops += self._compute_rmsnorm_flops(D, T) * 2  # 2 RMSNorm per block
             total_flops += self._compute_spectral_flops(T, D, E)
-            
+
             if cfg.use_ar_u:
                 total_flops += 2 * cfg.k_u * D * D * T  # compute_ar_u
             if cfg.use_ar_y:
@@ -419,7 +601,14 @@ class SpectralSSM(nn.Module):
         normalize_flops = D * T  # Division by sqrt(mean + eps)
         scale_flops = D * T  # Multiplication by weight
 
-        return power_flops + sum_flops + mean_flops + sqrt_flops + normalize_flops + scale_flops
+        return (
+            power_flops
+            + sum_flops
+            + mean_flops
+            + sqrt_flops
+            + normalize_flops
+            + scale_flops
+        )
 
     def _compute_spectral_flops(self, T: int, D: int, E: int) -> int:
         """
@@ -468,11 +657,11 @@ class SpectralSSM(nn.Module):
             int: Total FLOPS for SwiGLU computation.
         """
         h_dim = int(scale * D)
-        
+
         linear_flops = 2 * D * h_dim * T * 3  # Three linear layers
         silu_flops = 3 * h_dim * T  # SiLU activation (3 ops per element)
         hadamard_flops = h_dim * T  # Hadamard product
-        
+
         return linear_flops + silu_flops + hadamard_flops
 
     def predict_states(
@@ -481,7 +670,8 @@ class SpectralSSM(nn.Module):
         targets: torch.Tensor,
         init: int = 950,
         steps: int = 50,
-        rollout_steps: int = 20,
+        rollout_steps: int = 1,
+        truth: int = 0
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -496,6 +686,9 @@ class SpectralSSM(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
+            rollout_steps (int): Number of predicted steps to calculate the mean loss over
+            truth (int): Interval at which to ground predictions to true targets.
+                If 0, no grounding is performed.
 
         Returns:
         tuple: Contains the following elements:
@@ -507,6 +700,7 @@ class SpectralSSM(nn.Module):
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
+        _, _, d_in = inputs.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
         assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
 
@@ -517,14 +711,17 @@ class SpectralSSM(nn.Module):
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
         # Initialize cost function
-        mse_loss = MSELoss()
+        mse_loss = nn.MSELoss()
+
+        # Initialize autoregressive inputs with all available context
+        ar_inputs = inputs[:, :init].clone()
 
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, :current_step], targets[:, :current_step]
+                ar_inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
@@ -535,10 +732,16 @@ class SpectralSSM(nn.Module):
             # Store the last prediction step for plotting
             predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
-            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-            # next_input = torch.cat([next_input, next_action], dim=2)
-            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            # Decide whether to use the prediction or ground truth as the next input
+            if truth == 0 or (step + 1) % truth == 0:
+                # Concatenate the autoregressive predictions of states and the ground truth actions
+                next_input = step_preds[:, -1:].detach()
+                next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+                next_input = torch.cat([next_input, next_action], dim=2)
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            else:
+                next_input = inputs[:, current_step:current_step+1, :]
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
         return predicted_steps, (avg_loss, traj_losses)

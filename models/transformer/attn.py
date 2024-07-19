@@ -45,6 +45,7 @@ class CausalSelfAttention(nn.Module):
         self.flash_attn = use_flash_attn
 
         if not use_flash_attn:
+            # TODO: This prints n_layers times. Move it somewhere better.
             if not has_flash_attn:
                 print("WARNING: Using slow attention. Flash Attention requires PyTorch >= 2.0")
             else:
@@ -103,7 +104,7 @@ class CausalSelfAttention(nn.Module):
             q = q * k.size(-1) ** -0.5
             att = q @ k.transpose(-2, -1)
             att = att.masked_fill(self.mask[:, :, :sl, :sl] == 0, float("-inf"))
-            att = nn.Functional.softmax(att, dim=-1)
+            att = nn.functional.softmax(att, dim=-1)
             att = self.attn_dropout(att)
             y = att @ v  # (bsz, nh, sl, sl) x (bsz, nh, sl, hs) -> (bsz, nh, sl, hs)
 

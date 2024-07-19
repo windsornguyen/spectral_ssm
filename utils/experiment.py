@@ -10,6 +10,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 
 from time import time
@@ -18,6 +19,16 @@ from tqdm import tqdm
 
 from torch.optim import AdamW
 from utils.colors import Colors, colored_print
+
+from models.stu.model import SimpleGatedMoe
+
+# Loss landscape visualization
+import copy
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LightSource
+from vtk import vtkStructuredGrid, vtkPoints, vtkDoubleArray, vtkXMLStructuredGridWriter
+from scipy import interpolate
 
 
 class Experiment:
@@ -87,51 +98,69 @@ class Experiment:
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
         m_y_params = []
+        stu_params = {f"stu_{i}": [] for i in range(1, 5)}
         default_params = []
+
+        # Define different learning rates for each STU
+        stu_lr_multipliers = {
+            "stu_1": 1.0,
+            "stu_2": 0.7,
+            "stu_3": 0.4,
+            "stu_4": 0.1,
+        }
 
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name.startswith("m_y"):
                     m_y_params.append(param)
+                elif any(f"stu_{i}" in name for i in range(1, 5)):
+                    stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
+                    stu_params[f"stu_{stu_number}"].append(param)
                 else:
                     default_params.append(param)
 
+        # Add parameter groups for STUs with their specific learning rates
+        for stu_name, params in stu_params.items():
+            if params:
+                stu_lr = lr * stu_lr_multipliers[stu_name]
+                param_groups.append(
+                    {
+                        "name": stu_name,
+                        "params": params,
+                        "lr": stu_lr,
+                        "weight_decay": weight_decay,
+                    }
+                )
+
+        # Add parameter groups for m_y and default params
         if m_y_params:
-            param_groups.extend(
-                [
-                    {
-                        "name": "default",
-                        "params": default_params,
-                        "lr": self.max_lr,
-                        "weight_decay": self.weight_decay,
-                    },
-                    {
-                        "name": "m_y",
-                        "params": m_y_params,
-                        "lr": self.m_y_learning_rate,
-                        "weight_decay": self.m_y_weight_decay,
-                    },
-                ]
+            param_groups.append(
+                {
+                    "name": "m_y",
+                    "params": m_y_params,
+                    "lr": self.m_y_learning_rate,
+                    "weight_decay": self.m_y_weight_decay,
+                }
             )
-        else:
-            decay_params = [p for p in default_params if p.dim() >= 2]
-            nodecay_params = [p for p in default_params if p.dim() < 2]
-            param_groups.extend(
-                [
-                    {
-                        "name": "decay",
-                        "params": decay_params,
-                        "lr": self.max_lr,
-                        "weight_decay": self.weight_decay,
-                    },
-                    {
-                        "name": "no_decay",
-                        "params": nodecay_params,
-                        "lr": self.max_lr,
-                        "weight_decay": 0.0,
-                    },
-                ]
-            )
+
+        decay_params = [p for p in default_params if p.dim() >= 2]
+        nodecay_params = [p for p in default_params if p.dim() < 2]
+        param_groups.extend(
+            [
+                {
+                    "name": "decay",
+                    "params": decay_params,
+                    "lr": self.max_lr,
+                    "weight_decay": self.weight_decay,
+                },
+                {
+                    "name": "no_decay",
+                    "params": nodecay_params,
+                    "lr": self.max_lr,
+                    "weight_decay": 0.0,
+                },
+            ]
+        )
 
         if self.main_process:
             for group in param_groups:
@@ -142,6 +171,12 @@ class Experiment:
                     f'lr: {group["lr"]}, weight_decay: {group["weight_decay"]}',
                     Colors.HEADER,
                 )
+
+            lr_reports = []
+            for param_group in param_groups:
+                lr_reports.append(f"{param_group['name']}: {param_group['lr']:.6f}")
+            lr_report = "Learning Rates: " + " | ".join(lr_reports)
+            colored_print(lr_report, Colors.OKCYAN)
 
         fused_available = "fused" in inspect.signature(AdamW).parameters
         use_fused = fused_available and self.device.type == "cuda"
@@ -193,7 +228,9 @@ class Experiment:
         """
         fwdbwd_per_iter = 1  # Assuming one forward and backward pass per iteration
         avg_time_per_step = self.total_time / self.total_steps
-        flops, flops_promised = self.model.estimate_mfu(fwdbwd_per_iter, avg_time_per_step)
+        flops, flops_promised = self.model.estimate_mfu(
+            fwdbwd_per_iter, avg_time_per_step
+        )
         mfu = flops / flops_promised
 
         # Reset accumulators
@@ -201,7 +238,7 @@ class Experiment:
         self.total_steps = 0
 
         return flops, mfu
-    
+
     def step(
         self, inputs: torch.Tensor, targets: torch.Tensor, relative_step: int
     ) -> dict[str, float]:
@@ -237,19 +274,7 @@ class Experiment:
         # Clip global norm of gradient at 1.0, per the GPT-3 paper
         norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-        self.optimizer.step()
-
-        # Time how long this training step took
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-        t1 = time()
-        dt = t1 - t0
-        toks_processed = self.bsz * self.sl * self.world_size
-        toks_per_sec = toks_processed / dt
-
-        # if self.main_process:
-        #     print(f"\nLearning rates at step {relative_step}:")
-
+        # Update learning rates for each parameter group
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "m_y":
                 param_group["lr"] = self.get_lr(
@@ -259,6 +284,21 @@ class Experiment:
                     self.m_y_learning_rate,
                     self.min_lr,
                 )
+            elif param_group["name"].startswith("stu_"):
+                stu_base_lr = self.get_lr(
+                    relative_step,
+                    self.warmup_steps,
+                    self.num_steps,
+                    self.max_lr,
+                    self.min_lr,
+                )
+                stu_multiplier = {
+                    "stu_1": 1.0,
+                    "stu_2": 0.7,
+                    "stu_3": 0.4,
+                    "stu_4": 0.1,
+                }[param_group["name"]]
+                param_group["lr"] = stu_base_lr * stu_multiplier
             else:
                 param_group["lr"] = self.get_lr(
                     relative_step,
@@ -267,8 +307,16 @@ class Experiment:
                     self.max_lr,
                     self.min_lr,
                 )
-            # if self.main_process:
-            #     print(f"  {param_group['name']}: {param_group['lr']:.6f}")
+
+        self.optimizer.step()
+
+        # Time how long this training step took
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t1 = time()
+        dt = t1 - t0
+        toks_processed = self.bsz * self.sl * self.world_size
+        toks_per_sec = toks_processed / dt
 
         metrics = {
             "loss": loss.item(),
@@ -285,7 +333,7 @@ class Experiment:
                     for k, v in loss_info.items()
                 }
             )
-        
+
         # self.total_time += dt
         # self.total_steps += 1
 
@@ -371,3 +419,303 @@ class Experiment:
                 metrics_avg[key] = metrics_avg[key].item()
 
         return metrics_avg
+
+    """
+    Loss visualization method from Li et al. (2018).
+    Adapted from https://github.com/nreHieW/loss/blob/main/main.py
+    """
+
+    def get_2_directions(self, verbose: bool = True):
+        params = self.model.named_parameters()
+        dx = {}
+        dy = {}
+        for name, param in params:
+            curr_x = torch.randn_like(param)
+            curr_y = torch.randn_like(param)
+            if param.dim() <= 1:  # skip bias
+                curr_x.fill_(0)
+                curr_y.fill_(0)
+            else:
+                curr_x.mul_(param.norm() / (curr_x.norm() + 1e-10))
+                curr_y.mul_(param.norm() / (curr_y.norm() + 1e-10))
+            dx[name] = curr_x
+            dy[name] = curr_y
+        if verbose:
+            _x = torch.cat([dx[name].flatten() for name in dx]).unsqueeze(0)
+            _y = torch.cat([dy[name].flatten() for name in dy]).unsqueeze(0)
+            similarity = F.cosine_similarity(_x, _y)
+            print(f"cosine similarity between x-axis and y-axis: {similarity.item()}")
+        return dx, dy
+
+    def set_weights(
+        self,
+        model: nn.Module,
+        original_state_dict: dict[str, torch.Tensor],
+        dx: dict[str, torch.Tensor],
+        dy: dict[str, torch.Tensor],
+        x_step: float,
+        y_step: float,
+    ) -> nn.Module:
+        for name, param in self.model.named_parameters():
+            change = x_step * dx[name] + y_step * dy[name]
+            param.data = original_state_dict[name].to(self.device) + change.to(
+                self.device
+            )
+
+        return model
+
+    def generate_loss_landscape(
+        self, train_loader, output_path, x_range=(-1, 1, 10), y_range=(-1, 1, 10)
+    ):
+        original_state_dict = copy.deepcopy(self.model.state_dict())
+        dx, dy = self.get_2_directions()
+
+        x_min, x_max, x_num = x_range
+        y_min, y_max, y_num = y_range
+
+        x_coordinates = torch.linspace(x_min, x_max, x_num)
+        y_coordinates = torch.linspace(y_min, y_max, y_num)
+
+        total_iterations = x_num * y_num
+
+        res = {}
+
+        if self.main_process:
+            pbar = tqdm(total=total_iterations, desc="Generating Loss Landscape")
+
+        for i, x in enumerate(x_coordinates):
+            for j, y in enumerate(y_coordinates):
+                self.set_weights(self.model, original_state_dict, dx, dy, x, y)
+                metrics = self.evaluate(train_loader)
+                res[(i, j)] = (metrics["loss"], metrics.get("accuracy", 0.0))
+
+                if self.main_process:
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        {
+                            "x": f"{i+1}/{x_num}",
+                            "y": f"{j+1}/{y_num}",
+                            "coord": f"({x:.2f},{y:.2f})",
+                            "loss": f"{metrics['loss']:.3f}",
+                        }
+                    )
+
+        if self.main_process:
+            pbar.close()
+
+        # Restore original weights
+        self.model.load_state_dict(original_state_dict)
+
+        return res
+
+    def convert_pt_to_vtk(
+        self,
+        pt_file_path,
+        vtk_file_path,
+        surf_name="train_loss",
+        log=False,
+        zmax=-1,
+        interp=-1,
+    ):
+        # Load the PyTorch data
+        data = torch.load(pt_file_path)
+
+        i_coords = data["i_coords"].numpy()
+        j_coords = data["j_coords"].numpy()
+        losses = data[surf_name].numpy()
+
+        # Create meshgrid
+        xcoordinates, ycoordinates = np.meshgrid(
+            np.unique(i_coords), np.unique(j_coords)
+        )
+
+        # Reshape losses to 2D
+        vals = losses.reshape(xcoordinates.shape)
+
+        # Interpolate if requested
+        if interp > 0:
+            m = interpolate.interp2d(
+                xcoordinates[0, :], ycoordinates[:, 0], vals, kind="cubic"
+            )
+            x_array = np.linspace(xcoordinates.min(), xcoordinates.max(), interp)
+            y_array = np.linspace(ycoordinates.min(), ycoordinates.max(), interp)
+            z_array = m(x_array, y_array).ravel()
+            x_array, y_array = np.meshgrid(x_array, y_array)
+        else:
+            x_array, y_array = xcoordinates, ycoordinates
+            z_array = vals
+
+        x_array = x_array.ravel()
+        y_array = y_array.ravel()
+        z_array = z_array.ravel()
+
+        # Apply zmax if specified
+        if zmax > 0:
+            z_array = np.minimum(z_array, zmax)
+
+        # Apply log scale if requested
+        if log:
+            z_array = np.log(z_array + 0.1)
+
+        # Create a structured grid
+        grid = vtkStructuredGrid()
+
+        # Set dimensions
+        grid.SetDimensions(len(np.unique(x_array)), len(np.unique(y_array)), 1)
+
+        # Create points
+        points = vtkPoints()
+        for x, y, z in zip(x_array, y_array, z_array, strict=True):
+            points.InsertNextPoint(x, y, z)
+        grid.SetPoints(points)
+
+        # Create a data array for the loss values
+        loss_array = vtkDoubleArray()
+        loss_array.SetName(surf_name)
+        for z in z_array:
+            loss_array.InsertNextValue(z)
+
+        # Add the loss data to the grid
+        grid.GetPointData().AddArray(loss_array)
+
+        # Write the grid to a VTK file
+        writer = vtkXMLStructuredGridWriter()
+        writer.SetFileName(vtk_file_path)
+        writer.SetInputData(grid)
+        writer.Write()
+
+        print(f"VTK file saved to {vtk_file_path}")
+
+    def save_loss_landscape(
+        self,
+        landscape_data,
+        output_path,
+        convert_to_vtk=True,
+        surf_name="train_loss",
+        log=False,
+        zmax=-1,
+        interp=-1,
+    ):
+        """
+        Save the loss landscape data and optionally convert it to VTK format.
+
+        Args:
+        - landscape_data: The loss landscape data dictionary
+        - output_path: Path to save the PyTorch file
+        - convert_to_vtk: Whether to also save as VTK file for ParaView (default: True)
+        - surf_name: The type of surface to plot (default: 'train_loss')
+        - log: Whether to use log scale for loss values in VTK (default: False)
+        - zmax: Maximum z-value for capping in VTK (default: -1, no capping)
+        - interp: Interpolate the surface to this resolution (default: -1, no interpolation)
+        """
+        # Convert the dictionary to tensors for more efficient storage
+        i_coords, j_coords = zip(*landscape_data.keys(), strict=True)
+        losses, accs = zip(*landscape_data.values(), strict=True)
+
+        save_data = {
+            "i_coords": torch.tensor(i_coords),
+            "j_coords": torch.tensor(j_coords),
+            "train_loss": torch.tensor(losses),
+            "accuracy": torch.tensor(accs),
+        }
+
+        torch.save(save_data, output_path)
+        if self.main_process:
+            colored_print(f"Loss landscape saved to {output_path}", Colors.OKGREEN)
+
+        if convert_to_vtk:
+            vtk_path = output_path.replace(".pt", ".vtp")
+            convert_pt_to_vtk(
+                output_path,
+                vtk_path,
+                surf_name=surf_name,
+                log=log,
+                zmax=zmax,
+                interp=interp,
+            )
+            if self.main_process:
+                colored_print(f"VTK file saved to {vtk_path}", Colors.OKGREEN)
+
+    def visualize_loss_landscape(self, landscape_data_path, output_path):
+        if not self.main_process:
+            return
+
+        # Load the landscape data from the file
+        landscape_data = torch.load(landscape_data_path)
+
+        i_coords = landscape_data["i_coords"].numpy()
+        j_coords = landscape_data["j_coords"].numpy()
+        losses = landscape_data["losses"].numpy()
+
+        i_unique = sorted(set(i_coords))
+        j_unique = sorted(set(j_coords))
+
+        X, Y = np.meshgrid(i_unique, j_unique)
+        Z = np.zeros_like(X, dtype=float)
+
+        for idx, (i, j) in enumerate(zip(i_coords, j_coords, strict=True)):
+            Z[j_unique.index(j), i_unique.index(i)] = losses[idx]
+
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection="3d")
+
+        # Use a perceptually uniform colormap
+        cmap = plt.cm.viridis
+
+        # Plot the surface with enhanced aesthetics
+        surf = ax.plot_surface(
+            X,
+            Y,
+            Z,
+            cmap=cmap,
+            edgecolor="none",
+            alpha=0.9,
+            antialiased=True,
+            shade=True,
+            lightsource=LightSource(azdeg=315, altdeg=45),
+        )
+
+        # Customize the plot
+        ax.set_xlabel("Direction 1", fontsize=14, labelpad=10)
+        ax.set_ylabel("Direction 2", fontsize=14, labelpad=10)
+        ax.set_zlabel("Loss", fontsize=14, labelpad=10)
+
+        # Remove the background color
+        ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+
+        # Make the grid lines lighter
+        ax.xaxis._axinfo["grid"]["color"] = (0.9, 0.9, 0.9, 0.5)
+        ax.yaxis._axinfo["grid"]["color"] = (0.9, 0.9, 0.9, 0.5)
+        ax.zaxis._axinfo["grid"]["color"] = (0.9, 0.9, 0.9, 0.5)
+
+        # Adjust the viewing angle for better visibility of convexity
+        ax.view_init(elev=30, azim=135)
+
+        # Add title with model details
+        plt.title(
+            f"Loss Landscape - {self.__class__.__name__}\n{self.optimizer.__class__.__name__}, Learning Rate: {self.max_lr}",
+            fontsize=16,
+            y=1.02,
+        )
+
+        # Add a color bar
+        cbar = fig.colorbar(surf, ax=ax, shrink=0.6, aspect=10, pad=0.1)
+        cbar.ax.set_ylabel("Loss Value", rotation=270, labelpad=20, fontsize=12)
+
+        # Tighten the layout and adjust margins
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.9)
+
+        # Save the figure with a higher DPI for better quality
+        plt.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+            facecolor="white",
+            edgecolor="none",
+        )
+        plt.close()
+
+        print(f"Loss landscape visualization saved to {output_path}")

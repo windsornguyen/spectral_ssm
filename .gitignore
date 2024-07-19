@@ -19,9 +19,14 @@ results/
 # Training artifacts
 *.slurm
 checkpoints/
+results/
+plots/
 *.python
 *.npy
 *.pt
+*.txt
+*.png
+*.jpg
 *.pth
 training_details.txt
 *.out

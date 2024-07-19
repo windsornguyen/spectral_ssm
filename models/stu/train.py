@@ -13,10 +13,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from safetensors.torch import load_file, save_file
-from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
-from tqdm import tqdm
-from time import time
 
 from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
@@ -24,7 +21,7 @@ from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment as exp, optimizer as opt
+from utils import experiment as exp
 from models.stu.model import SpectralSSM, SpectralSSMConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
@@ -108,6 +105,7 @@ def main() -> None:
         help="Training on the Princeton Della cluster. Defaults to True.",
         # NOTE: You MUST run with `torchrun` for this to work in the general setting.
     )
+
     args = parser.parse_args()
 
     controller = args.controller
@@ -129,16 +127,20 @@ def main() -> None:
 
     # Prepare directories for training and plotting
     checkpoint_dir: str = "checkpoints"
+    landscape_dir: str = "landscapes"
     if main_process:
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir, exist_ok=True)
         if not os.path.exists("results/"):
             os.makedirs("results/")
+        if not os.path.exists(landscape_dir):
+            os.makedirs(landscape_dir, exist_ok=True)
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 6
-    scale: int = 4
+    n_layers: int = 2
+    embd_scale: int = 1
+    mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.0
     num_eigh: int = 16
@@ -171,36 +173,32 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        n_embd: int = 24 if controller != "Ant-v1" else 37
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = d_in    # before projection d_in = d_out
+        d_in: int = 24 if controller != "Ant-v1" else 37
+        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
-        n_embd: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = n_embd
-        d_proj = n_embd
+        d_in: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
+        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
+        d_proj = d_in
         sl: int = 1000
-        
+
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
-        d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd = d_out
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_proj = n_embd
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        n_embd = embd_scale * d_in
+        d_proj = d_in
         sl: int = 300
     
     configs = SpectralSSMConfigs(
         n_layers=n_layers,
         n_embd=n_embd,
         d_in=d_in,
-        d_out=d_out,
         d_proj=d_proj,
         sl=sl,
-        scale=scale,
+        mlp_scale=mlp_scale,
         bias=bias,
         dropout=dropout,
         num_eigh=num_eigh,
@@ -228,7 +226,7 @@ def main() -> None:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
     stu_model = model.module if world_size > 1 else model
     flops, mfu = None, None
-
+        
     # Data loader hyperparameters
     bsz: int = 8
     preprocess: bool = True
@@ -256,17 +254,22 @@ def main() -> None:
         dataset = torch.load(
             f"{mujoco_v3_base}{args.controller}_ResNet-18.pt", map_location=device
         )
-        train_data, val_data = split_data(dataset)
+        train_data, val_data = split_data(dataset, train_ratio=0.8)
+
     else:
         raise ValueError("Invalid task")
 
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
+    eps = (1e-5,)
+    noise = 0.0
+    noise_frequency = 0.2
+
     train_loader = get_dataloader(
-        # TODO: Generalize model= to argparse 
-        # and in general make a training script file 
+        # TODO: Generalize model= to argparse
+        # and in general make a training script file
         # that argparses everything and runs the right file based off that.
-        model="spectral_ssm", 
+        model="spectral_ssm",
         data=train_data,
         task=args.task,
         controller=args.controller,
@@ -278,6 +281,10 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -294,6 +301,10 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -323,7 +334,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 1.5e-3
+    max_lr: float = 1.8e-3
     min_lr: float = max_lr * 0.1
 
     # Adam hyperparameters, per the GPT-3 paper
@@ -474,16 +485,20 @@ def main() -> None:
             # Logging
             if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
-                
-                if 'flops' in train_results:
-                    flops = train_results['flops']
-                
-                if 'mfu' in train_results:
-                    mfu = train_results['mfu']
-                
-                flops_str = f"FLOPS/traj: {flops:.4f}" if flops is not None else "FLOPS/traj: N/A"
+
+                if "flops" in train_results:
+                    flops = train_results["flops"]
+
+                if "mfu" in train_results:
+                    mfu = train_results["mfu"]
+
+                flops_str = (
+                    f"FLOPS/traj: {flops:.4f}"
+                    if flops is not None
+                    else "FLOPS/traj: N/A"
+                )
                 mfu_str = f"Est. MFU: {mfu:.4f}" if mfu is not None else "Est. MFU: N/A"
-                
+
                 colored_print(
                     f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
                     f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f} | "
@@ -531,7 +546,9 @@ def main() -> None:
                 other_data = torch.load(best_model_extra_info_path, map_location="cpu")
                 training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-            print("\nLyla: Here's the best model information for the spectral SSM model:")
+            print(
+                "\nLyla: Here's the best model information for the spectral SSM model:"
+            )
             print(f"    Best model at step {best_model_step}")
             print(f"    Best model validation loss: {best_val_loss:.4f}")
             print(f"    Best model checkpoint saved at: {best_model_path}")
@@ -581,6 +598,36 @@ def main() -> None:
                 "Lyla: It was a pleasure assisting you. Until next time!",
                 Colors.OKGREEN,
             )
+
+    # if main_process:
+    #     colored_print("Generating loss landscape...", Colors.HEADER)
+    #     landscape_output_path = os.path.join(
+    #         landscape_dir, f"loss_landscape_{timestamp}.pt"
+    #     )
+    #     landscape_data = training_run.generate_loss_landscape(
+    #         train_loader, landscape_output_path
+    #     )
+    #     training_run.save_loss_landscape(
+    #         landscape_data, 
+    #         landscape_output_path,
+    #         convert_to_vtk=True, 
+    #         surf_name="train_loss", 
+    #         log=True, 
+    #         zmax=10, 
+    #         interp=1000
+    #     )
+    #     colored_print(
+    #         f"Loss landscape saved to {landscape_output_path}", Colors.OKGREEN
+    #     )
+
+    #     # Generate and save visualization
+    #     vis_output_path = os.path.join(
+    #         landscape_dir, f"loss_landscape_vis_{timestamp}.png"
+    #     )
+    #     training_run.visualize_loss_landscape(landscape_data, vis_output_path)
+    #     colored_print(
+    #         f"Loss landscape visualization saved to {vis_output_path}", Colors.OKGREEN
+    #     )
 
 
 if __name__ == "__main__":

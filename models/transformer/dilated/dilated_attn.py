@@ -184,7 +184,7 @@ class DilatedCausalSelfAttention(MultiheadAttention):
 
         # Combined Q, K, V projection
         qkv = self.c_attn(x)        
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        q, k, v = torch.chunk(qkv, 3, dim=2)
 
         # Reshape for multi-head attention
         k = k.view(bsz, sl, self.n_heads, n_embd // self.n_heads).transpose(

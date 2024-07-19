@@ -151,7 +151,7 @@ def main() -> None:
 
     # Fused kernel and sharding options
     chunk_size: int = 256
-    use_mem_eff_path: bool = True # TODO: Toggle to see if this makes it faster
+    use_mem_eff_path: bool = False
     process_group = get_data_parallel_group()
     sequence_parallel: bool = True
     dtype: torch.dtype = torch.float32
@@ -163,8 +163,8 @@ def main() -> None:
 
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
-    bsz: int = 8 if use_mem_eff_path else 1
-    n_layers: int = 6
+    bsz: int = 2
+    n_layers: int = 4
     bias: bool = False
     conv_bias: bool = True
     loss_fn = nn.MSELoss()
@@ -282,12 +282,18 @@ def main() -> None:
         dataset = torch.load(
             f"{mujoco_v3_base}{args.controller}_ResNet-18.pt", map_location=device
         )
-        train_data, val_data = split_data(dataset)
+        train_data, val_data = split_data(dataset, train_ratio=0.8)
     else:
         raise ValueError("Invalid task")
 
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
+    eps=1e-5,
+    # noise = 0.5
+    # noise_frequency = 0.2
+    noise = 0.0
+    noise_frequency = 0.0
+
     train_loader = get_dataloader(
         model="mamba-2",
         data=train_data,
@@ -301,6 +307,9 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -317,6 +326,9 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -346,7 +358,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 1.5e-3
+    max_lr: float = 1.8e-3
     min_lr: float = max_lr * 0.1
 
     # Adam hyperparameters, per the GPT-3 paper

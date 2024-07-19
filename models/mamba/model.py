@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from dataclasses import dataclass, field
 from utils.nearest_power_of_2 import nearest_power_of_2
+from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
@@ -23,7 +24,7 @@ from models.mamba.mamba import MambaLayer
 @dataclass
 class Mamba2Configs:
     bsz: int = 8
-    n_layers: int = 2
+    n_layers: int = 4
     d_model: int = 32
     d_out: int = 32
     d_proj: int = 29
@@ -185,6 +186,11 @@ class Mamba2(nn.Module):
         self.loss_fn = self.configs.loss_fn
         self.controls = self.configs.controls
 
+        if configs.moe:
+            print(f"\nMoE?: Enabled | Using {configs.num_experts} experts.")
+        else:
+            print("\nMoE?: Disabled")
+            
         self.mamba = nn.ModuleDict(
             dict(
                 hidden=nn.ModuleList(
@@ -387,7 +393,7 @@ class Mamba2(nn.Module):
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
 
         # Track model hallucinations
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)

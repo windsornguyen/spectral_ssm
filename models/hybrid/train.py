@@ -197,6 +197,7 @@ def main() -> None:
 
     # Transformer settings
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
+    pct_attn: float = 0.08 # Percentage of layers using attention
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
 
     # MoE
@@ -215,7 +216,7 @@ def main() -> None:
     multiway = args.multiway
 
     # General training settings
-    n_layers: int = 6
+    n_layers: int = 2
     scale: int = 4
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
@@ -279,8 +280,10 @@ def main() -> None:
         n_embd=n_embd,
         n_heads=n_heads,
         sub_rn=sub_rn,
+        pct_attn=pct_attn,
         flash_attn=flash_attn,
-        
+        use_sq_relu=use_sq_relu,
+
         # MoE
         moe=moe,
         num_experts=num_experts,
@@ -317,7 +320,7 @@ def main() -> None:
     # TODO: Add accumulated gradients to this
     # TODO: Make data loader better
     # TODO: Add print statement reporting our batch size and accumulated batch size
-    bsz: int = 8 // world_size
+    bsz: int = 2 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -343,12 +346,18 @@ def main() -> None:
         dataset = torch.load(
             f"{mujoco_v3_base}{args.controller}_ResNet-18.pt", map_location=device
         )
-        train_data, val_data = split_data(dataset)
+        train_data, val_data = split_data(dataset, train_ratio=0.8)
     else:
         raise ValueError("Invalid task")
 
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
+    eps=1e-5,
+    # noise = 0.5
+    # noise_frequency = 0.2
+    noise = 0.0
+    noise_frequency = 0.0
+
     train_loader = get_dataloader(
         model="hybrid",
         data=train_data,
@@ -362,6 +371,9 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -378,6 +390,9 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        noise=noise,
+        noise_frequency=noise_frequency,
+        eps=eps,
         device=device,
     )
 
@@ -407,7 +422,7 @@ def main() -> None:
 
     # Optimizer hyperparameters
     weight_decay: float = 1e-1
-    max_lr: float = 1.5e-3
+    max_lr: float = 1.8e-3
     min_lr: float = max_lr * 0.1
     betas = (0.9, 0.95)
     eps = 1e-8

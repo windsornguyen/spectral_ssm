@@ -17,7 +17,8 @@ def generate_copy(
     selective: bool = False,
     seed: int = 0,
 ) -> TensorDataset:
-    r"""Generate a copy task.
+    """
+    Generate a copy task.
 
     This copy task is taken from (Arjovsky, Shah, and Bengio, 2016). From their
     paper:
@@ -48,18 +49,35 @@ def generate_copy(
       If selective is True, then shuffle the blank spaces between the array to
       copy.
 
+    Task Description:
+    - Input sequence: [copy_sequence][blank_tokens][delimiter][blank_tokens]
+    - Output sequence: [blank_tokens][copy_sequence]
+
     Args:
-      num_examples: Number of examples to generate.
-      num_categories: Number of token types. One is used as a blank token, one is
-        used as a delimiter, and the remaining are used to choose from for
-        copying.
-      copy_len: Number of tokens to copy.
-      blank_len: Number of blank tokens inbetween copy and paste.
-      selective: Whether to return a selective copy task or not.
-      seed: Seed for random number generator.
+        num_examples (int): Number of examples to generate. Default is 5.
+        num_categories (int): Number of token categories. Default is 10.
+            - Categories 0 to num_categories-3: Tokens to be copied
+            - Category num_categories-2: Blank token
+            - Category num_categories-1: Delimiter token
+        copy_len (int): Length of the sequence to be copied. Default is 10.
+        blank_len (int): Number of blank tokens between copy and paste. Default is 5.
+        selective (bool): If True, generate a selective copy task. Default is False.
+        seed (int): Random seed for reproducibility. Default is 0.
 
     Returns:
-      A PyTorch dataset.
+        TensorDataset: A PyTorch dataset containing input and target tensors.
+            - inputs: Tensor of shape (num_examples, 2*copy_len + blank_len)
+            - targets: Tensor of shape (num_examples, blank_len + copy_len)
+
+    Example:
+        >>> dataset = generate_copy(num_examples=100, copy_len=8, blank_len=3)
+        >>> inputs, targets = dataset[0]
+        >>> print(inputs.shape, targets.shape)
+        torch.Size([19]) torch.Size([11])
+
+    Note:
+        The total length of the input sequence is 2*copy_len + blank_len.
+        The total length of the output sequence is blank_len + copy_len.
     """
     # Assign characters.
     copy_chars = torch.arange(num_categories - 2)
@@ -94,13 +112,13 @@ def generate_copy(
     # Construct dataset.
     return TensorDataset(inputs, outputs)
 
-
 def generate_adding(
     num_examples: int = 5,
     sequence_len: int = 10,
     seed: int = 0,
 ) -> TensorDataset:
-    """Generate an adding task.
+    """
+    Generate an adding task.
 
     This adding task is taken from (Arjovsky, Shah, and Bengio, 2016). From their
     paper:
