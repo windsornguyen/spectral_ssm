@@ -45,20 +45,20 @@ def load_data(filename):
 
 # Load data
 try:
-    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions.npy")
-    transformer = load_data(f"transformer_{args.controller}_{args.task}_predictions.npy")
-    mamba = load_data(f"mamba_{args.controller}_{args.task}_predictions.npy")
-    hybrid = load_data(f"hybrid_{args.controller}_{args.task}_predictions.npy")
+    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions_ar.npy")
+    transformer = load_data(f"transformer_{args.controller}_{args.task}_predictions_ar.npy")
+    mamba = load_data(f"mamba_{args.controller}_{args.task}_predictions_ar.npy")
+    hybrid = load_data(f"hybrid_{args.controller}_{args.task}_predictions_ar.npy")
 
-    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
-    transformer_ground_truth = load_data(f"transformer_{args.controller}_{args.task}_ground_truths.npy")
-    mamba_ground_truth = load_data(f"mamba_{args.controller}_{args.task}_ground_truths.npy")
-    hybrid_ground_truth = load_data(f"hybrid_{args.controller}_{args.task}_ground_truths.npy")
+    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths_ar.npy")
+    transformer_ground_truth = load_data(f"transformer_{args.controller}_{args.task}_ground_truths_ar.npy")
+    mamba_ground_truth = load_data(f"mamba_{args.controller}_{args.task}_ground_truths_ar.npy")
+    hybrid_ground_truth = load_data(f"hybrid_{args.controller}_{args.task}_ground_truths_ar.npy")
 
-    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses.npy")
-    transformer_losses = load_data(f"transformer_{args.controller}_{args.task}_losses.npy")
-    mamba_losses = load_data(f"mamba_{args.controller}_{args.task}_losses.npy")
-    hybrid_losses = load_data(f"hybrid_{args.controller}_{args.task}_losses.npy")
+    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses_ar.npy")
+    transformer_losses = load_data(f"transformer_{args.controller}_{args.task}_losses_ar.npy")
+    mamba_losses = load_data(f"mamba_{args.controller}_{args.task}_losses_ar.npy")
+    hybrid_losses = load_data(f"hybrid_{args.controller}_{args.task}_losses_ar.npy")
 except FileNotFoundError as e:
     print(f"Error loading data: {e}")
     exit(1)
@@ -153,7 +153,7 @@ for pred_idx in range(num_preds):
     ax.set_ylabel("Mean Absolute Error")
     ax.set_title(f"Mean Loss for Prediction {pred_idx+1}")
     # Save the mean loss figures
-    plt.savefig(f"plots/losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}.png")
+    plt.savefig(f"plots/predict_losses/mean_losses_preds_{pred_idx+1}_{args.controller}_{args.task}_ar.png")
     plt.close(fig)
 
 # Perform PCA
@@ -233,6 +233,6 @@ for pred_idx in range(num_preds):
     plt.tight_layout()
 
     # Save the figures
-    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}.png")
+    plt.savefig(f"plots/preds/preds_{pred_idx+1}_{args.controller}_{args.task}_{args.feature}_ar.png")
     plt.show()
     plt.close(fig)

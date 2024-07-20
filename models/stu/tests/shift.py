@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import numpy as np
 import time
 import torch.autograd.profiler as profiler
-from torch.nn import functional as F
 
 def shift_torch(u: torch.Tensor, k: int = 1) -> torch.Tensor:
     """

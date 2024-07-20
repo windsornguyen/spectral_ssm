@@ -8,6 +8,7 @@
 import math
 import os
 import csv
+import time
 
 import torch
 import torch.nn as nn
@@ -26,7 +27,6 @@ from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
-from torch.nn import MSELoss
 
 
 @dataclass
@@ -153,10 +153,8 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(
-            dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False
-        )
+        self.h_dim = configs.mlp_scale * configs.n_embd
+        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -214,28 +212,74 @@ class GatedMLP(nn.Module):
         y = self.fc2(y)
         return self.dropout(y)
 
+class SimpleGateMoe(nn.Module):
+    """
+    A single block of the spectral SSM model composed of STU and MLP layers,
+    with a gating mechanism for input-dependent selectivity.
+
+    Args:
+        configs: Configuration object for STU and MLP layers
+        sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
+        V (torch.Tensor): Precomputed FFT of top K eigenvectors.
+        padded_sl (int): Padded sequence length for FFT operations.
+    """
+
+    def __init__(self, configs, sigma, V, padded_sl) -> None:
+        super(SimpleGateMoe, self).__init__()
+        self.rn = RMSNorm(configs.n_embd)
+        self.stu_1 = STU(configs, sigma, V, padded_sl)
+        self.stu_2 = STU(configs, sigma, V, padded_sl)
+        self.stu_3 = STU(configs, sigma, V, padded_sl)
+        self.stu_4 = STU(configs, sigma, V, padded_sl)
+        self.gate = nn.Linear(configs.n_embd, 4, bias=configs.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the Block with gated STU computation.
+
+        Args:
+            x (torch.Tensor): Input tensor
+
+        Returns:
+            torch.Tensor: Output tensor
+        """
+        z = x
+        s1 = self.stu_1(x)
+        s2 = self.stu_2(x)
+        s3 = self.stu_3(x)
+        s4 = self.stu_4(x)
+
+        # Stack the outputs
+        outputs = torch.stack([s1, s2, s3, s4], dim=-1)
+
+        # Compute the gating weights
+        weights = nn.functional.softmax(self.gate(x), dim=-1).unsqueeze(2)
+
+        # Apply the gating weights to the outputs and sum them
+        output = (outputs * weights).sum(dim=-1)
+        return output + z
 
 class ExponentialLookbackMoE(nn.Module):
-    def __init__(self, configs, sigma, V, padded_sl, temperature=1.0) -> None:
+    def __init__(self, configs, sigma, V, padded_sl, temperature=1.0, log_buffer_size=100) -> None:
         super(ExponentialLookbackMoE, self).__init__()
         self.stu_1 = STU(configs, sigma, V, padded_sl)
         self.stu_2 = STU(configs, sigma, V, padded_sl)
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
 
-        # Initialize log weights as a learnable parameter
         self.log_weights = nn.Parameter(torch.ones(4))
-        
         self.temperature = temperature
         self.log_file = "stu_usage_data.csv"
-        self.step_count = 0  # Track the number of steps
+        self.step_count = 0
+        self.log_buffer = []
+        self.log_buffer_size = log_buffer_size
 
-        # Initialize the log file with headers
         if not os.path.exists(self.log_file):
             with open(self.log_file, "w", newline="") as file:
                 writer = csv.writer(file)
                 writer.writerow(
                     [
+                        "Timestamp",
                         "Forward Pass",
                         "STU 1 Weight",
                         "STU 2 Weight",
@@ -260,39 +304,39 @@ class ExponentialLookbackMoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         self.step_count += 1
-        device = x.device
 
-        # Generate expert outputs
-        x1 = x
-        x2 = x[:, : x.shape[1] // 2, :]
-        x3 = x[:, : x.shape[1] // 4, :]
-        x4 = x[:, : x.shape[1] // 8, :]
+        x1, x2, x3, x4 = x, x[:, :x.shape[1]//2, :], x[:, :x.shape[1]//4, :], x[:, :x.shape[1]//8, :]
 
-        # Compute STU outputs
         s1 = self.stu_1(x1)
         s2 = F.pad(self.stu_2(x2), (0, 0, 0, x1.shape[1] - x2.shape[1]))
         s3 = F.pad(self.stu_3(x3), (0, 0, 0, x1.shape[1] - x3.shape[1]))
         s4 = F.pad(self.stu_4(x4), (0, 0, 0, x1.shape[1] - x4.shape[1]))
 
-        # Apply Gumbel-Softmax to get differentiable one-hot weights
         weights = self.gumbel_softmax(self.log_weights, temperature=self.temperature, hard=True)
-        print(weights)
 
-        # Combine outputs using the Gumbel-Softmax weights
         outputs = torch.stack([s1, s2, s3, s4], dim=-1)
         output = (outputs * weights.view(1, 1, 1, -1)).sum(dim=-1)
 
-        # For logging purposes, we can still track which STU has the highest weight
         top_stu_index = torch.argmax(weights).item()
-        print(top_stu_index)
 
         self.log_current_weights(weights, top_stu_index)
+        if len(self.log_buffer) >= self.log_buffer_size:
+            self.flush_log_buffer()
+
         return output
 
     def log_current_weights(self, weights, selected_stu):
+        timestamp = time.time()
+        self.log_buffer.append([timestamp, self.step_count] + weights.tolist() + [selected_stu + 1])
+
+    def flush_log_buffer(self):
         with open(self.log_file, "a", newline="") as file:
             writer = csv.writer(file)
-            writer.writerow([self.step_count] + weights.tolist() + [selected_stu])
+            writer.writerows(self.log_buffer)
+        self.log_buffer.clear()
+
+    def __del__(self):
+        self.flush_log_buffer()  # Ensure any remaining logs are written
 
 class ExponentialLookbackMoE_InputDependent(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
@@ -702,7 +746,7 @@ class SpectralSSM(nn.Module):
         num_traj, total_steps, d_out = targets.size()
         _, _, d_in = inputs.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
 
         # Track model hallucinations
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)

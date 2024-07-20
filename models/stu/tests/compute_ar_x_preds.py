@@ -6,6 +6,7 @@ import time
 import functools
 import torch.autograd.profiler as profiler
 
+
 def compute_ar_x_preds_torch(
     w: torch.Tensor,
     x: torch.Tensor,
@@ -40,19 +41,17 @@ def compute_ar_x_preds_torch(
     d_out, _, k = w.shape
 
     # Contract over `d_in` to combine weights with input sequences
-    o = torch.einsum('oik,bli->bklo', w, x)  # [bsz, k, l, d_out]
+    o = torch.einsum("oik,bli->bklo", w, x)  # [bsz, k, l, d_out]
 
     # For each `i` in `k`, shift outputs by `i` positions to align for summation.
     rolled_o = torch.stack(
-        [torch.roll(o[:, i], 
-        shifts=i, 
-        dims=1
-    ) for i in range(k)], dim=1) # -> [bsz, k, l, d_out]
+        [torch.roll(o[:, i], shifts=i, dims=1) for i in range(k)], dim=1
+    )  # -> [bsz, k, l, d_out]
 
     # Create a mask that zeros out nothing at `k=0`, the first `(sl, d_out)` at
     # `k=1`, the first two `(sl, dout)`s at `k=2`, etc.
     mask = torch.triu(torch.ones((k, sl), device=w.device))
-    mask = mask.view(k, sl, 1) # Add d_out dim: -> [k, sl, 1]
+    mask = mask.view(k, sl, 1)  # Add d_out dim: -> [k, sl, 1]
 
     # Apply the mask and sum along `k`
     return torch.sum(rolled_o * mask, dim=1)
@@ -70,22 +69,26 @@ def compute_ar_x_preds_jax(
     Returns:
         ar_x_preds: An output of shape [bsz, l, d_out].
     """
-    bsz, l, d_in = x.shape
+    bsz, sl, d_in = x.shape
     d_out, _, k = w.shape
 
     # Contract over `d_in`.
-    o = jnp.einsum('oik,bli->bklo', w, x)
+    o = jnp.einsum("oik,bli->bklo", w, x)
 
     # For each `i` in `k`, roll the `(l, d_out)` by `i` steps for each batch.
-    o = jax.vmap(lambda o_slice: jax.vmap(functools.partial(jnp.roll, axis=0))(o_slice, jnp.arange(k)))(o)
-    
-    # Create a mask that zeros out nothing at `k=0`, the first `(l, d_out)` at
-    # `k=1`, the first two `(l, dout)`s at `k=2`, etc.
-    m = jnp.triu(jnp.ones((k, l)))
+    o = jax.vmap(
+        lambda o_slice: jax.vmap(functools.partial(jnp.roll, axis=0))(
+            o_slice, jnp.arange(k)
+        )
+    )(o)
+
+    # Create a mask that zeros out nothing at `k=0`, the first `(sl, d_out)` at
+    # `k=1`, the first two `(sl, dout)`s at `k=2`, etc.
+    m = jnp.triu(jnp.ones((k, sl)))
     m = jnp.expand_dims(m, axis=-1)
     m = jnp.expand_dims(m, axis=0)  # Expand for the batch dimension
     m = jnp.tile(m, (bsz, 1, 1, d_out))
-    
+
     # Mask and sum along `k`.
     return jnp.sum(o * m, axis=1)
 
@@ -99,7 +102,9 @@ bsz = np.random.randint(1, 16)
 d_out = np.random.randint(1, 37)
 k = np.random.randint(1, 24)
 seq_len = np.random.randint(1, 1000)
-print(f'Testing compute_ar_x_preds function for w of shape [{d_out}, {d_out}, {k}] and x of shape [{seq_len}, {d_out}].')
+print(
+    f"Testing compute_ar_x_preds function for w of shape [{d_out}, {d_out}, {k}] and x of shape [{seq_len}, {d_out}]."
+)
 
 # Create random input data
 w_np = np.random.rand(d_out, d_out, k).astype(np.float32)
@@ -110,7 +115,7 @@ w_jax = jnp.array(w_np)
 x_jax = jnp.array(x_np)
 
 # Get device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 w_torch = w_torch.to(device)
 x_torch = x_torch.to(device)
 
@@ -139,27 +144,27 @@ time_jax = time.time() - start_time_jax
 result_torch = result_torch.cpu()
 
 # Output performance metrics
-print(f'\nExecution Time (PyTorch): {time_torch:.6f}s')
-print(f'Execution Time (JAX): {time_jax:.6f}s')
+print(f"\nExecution Time (PyTorch): {time_torch:.6f}s")
+print(f"Execution Time (JAX): {time_jax:.6f}s")
 
 # Compare the results
-print('\nComparing the results...')
+print("\nComparing the results...")
 
 if np.allclose(result_torch.numpy(), result_jax, atol=1e-8):
-    print('The results from PyTorch and JAX are close enough.')
+    print("The results from PyTorch and JAX are close enough.")
 else:
-    print('The results from PyTorch and JAX differ more than the acceptable tolerance.')
-    
+    print("The results from PyTorch and JAX differ more than the acceptable tolerance.")
+
     # Find the indices where the results differ
     diff_indices = np.where(np.abs(result_torch.numpy() - result_jax) > 1e-8)
-    
+
     # Print the differing indices and values
-    print('Differing indices and values:')
+    print("Differing indices and values:")
     for i in range(len(diff_indices[0])):
         index = tuple(diff_index[i] for diff_index in diff_indices)
-        print(f'Index: {index}')
-        print(f'PyTorch value: {result_torch.numpy()[index]}')
-        print(f'JAX value: {result_jax[index]}')
+        print(f"Index: {index}")
+        print(f"PyTorch value: {result_torch.numpy()[index]}")
+        print(f"JAX value: {result_jax[index]}")
         print()
         if i >= 5:
             break

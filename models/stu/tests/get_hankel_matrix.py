@@ -41,7 +41,7 @@ np.random.seed(0)
 
 # Prepare random data for testing
 n = np.random.randint(1, 1024)  # Random size for the matrix
-print(f'Testing matrix size: {n}x{n}')
+print(f"Testing matrix size: {n}x{n}")
 
 # Warm-up JIT compilation
 _ = get_hankel_matrix(n)
@@ -64,23 +64,23 @@ hankel_numpy = get_hankel_matrix_(n)
 time_numpy = time.time() - start_time_numpy
 
 # Output performance metrics
-print(f'\nExecution Time (PyTorch): {time_torch:.6f}s')
-print(f'Execution Time (NumPy): {time_numpy:.6f}s')
+print(f"\nExecution Time (PyTorch): {time_torch:.6f}s")
+print(f"Execution Time (NumPy): {time_numpy:.6f}s")
 
 # Check outputs and compare
 if not np.allclose(hankel_torch, hankel_numpy, atol=1e-8):
-    print('Values differ more than acceptable tolerance.')
+    print("Values differ more than acceptable tolerance.")
     difference_matrix = np.abs(hankel_torch - hankel_numpy)
-    print('Differing Values (showing first few):')
+    print("Differing Values (showing first few):")
     count_diffs = 0
     for i in range(n):
         for j in range(n):
             if difference_matrix[i][j] > 1e-8:
-                print(f'Index: ({i}, {j}), Torch: {hankel_torch[i][j]}, NumPy: {hankel_numpy[i][j]}, Diff: {difference_matrix[i][j]}')
+                print(f"Index: ({i}, {j}), Torch: {hankel_torch[i][j]}, NumPy: {hankel_numpy[i][j]}, Diff: {difference_matrix[i][j]}")
                 count_diffs += 1
                 if count_diffs > 10:  # Limit to first few differences
                     break
         if count_diffs > 10:
             break
 else:
-    print('Outputs are sufficiently close.')
+    print("Outputs are sufficiently close.")

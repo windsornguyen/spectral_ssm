@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from utils.nearest_power_of_2 import nearest_power_of_2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

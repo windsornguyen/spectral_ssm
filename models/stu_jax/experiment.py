@@ -15,9 +15,7 @@
 
 """Utilities for running an experiment."""
 
-import functools
 from typing import Any
-import os
 
 import chex
 import haiku as hk

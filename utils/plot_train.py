@@ -243,6 +243,7 @@ def main():
             plot_titles,
             plot_xlabels,
             plot_ylabels,
+            strict=True,
         ):
             plot_data(
                 data_list, time_steps_list, labels, title, xlabel, ylabel, ax, smoothing
@@ -270,6 +271,7 @@ def main():
                 plot_titles,
                 plot_xlabels,
                 plot_ylabels,
+                strict=True,
             )
         ):
             fig, ax = plot_data(

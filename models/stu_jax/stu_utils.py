@@ -93,7 +93,7 @@ def shift(
     An array of shape [l, d] where index [0, :] is all zeros and [i, :] is equal
     to x[i - 1, :] for i > 0.
   """
-  return jnp.pad(x, ((1, 0), (0, 0)), mode='constant')[:-1, :]
+  return jnp.pad(x, ((1, 0), (0, 0)), mode="constant")[:-1, :]
 
 
 @jax.jit
@@ -112,7 +112,7 @@ def conv(
   """
   # Convolve two vectors of length l (x.shape[0]) and truncate to the l oldest
   # values.
-  tr_conv = lambda x, y: jax.scipy.signal.convolve(x, y, method='fft')[
+  tr_conv = lambda x, y: jax.scipy.signal.convolve(x, y, method="fft")[
       : x.shape[0]
   ]
 
@@ -169,7 +169,7 @@ def compute_ar_x_preds(
   l = x.shape[0]
 
   # Contract over `d_in`.
-  o = jnp.einsum('oik,li->klo', w, x)
+  o = jnp.einsum("oik,li->klo", w, x)
 
   # For each `i` in `k`, roll the `(l, d_out)` by `i` steps.
   o = jax.vmap(functools.partial(jnp.roll, axis=0))(o, jnp.arange(k))

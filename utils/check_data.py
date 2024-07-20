@@ -1,8 +1,8 @@
 import numpy as np
 
 # Load data
-inputs = np.load('data/mujoco-v1/Walker2D-v1/train_inputs.npy')
-targets = np.load('data/mujoco-v1/Walker2D-v1/train_targets.npy')
+inputs = np.load("data/mujoco-v1/Walker2D-v1/train_inputs.npy")
+targets = np.load("data/mujoco-v1/Walker2D-v1/train_targets.npy")
 
 # Initialize an empty array for shifted inputs
 inputs = inputs[:, :, :18]

@@ -210,54 +210,54 @@ def main():
     deltas_bsz_jax = jnp.array(deltas_bsz_np)
 
     # Get device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     m_y_torch = m_y_torch.to(device)
     deltas_torch = deltas_torch.to(device)
     deltas_bsz_torch = deltas_bsz_torch.to(device)
 
     print(
-        'Testing compute_y_t_jax function for m_y of shape',
+        "Testing compute_y_t_jax function for m_y of shape",
         m_y_np.shape,
-        'and deltas of shape',
+        "and deltas of shape",
         deltas_np.shape,
     )
     print(
-        'Testing compute_y_t_jax_batched function for m_y of shape',
+        "Testing compute_y_t_jax_batched function for m_y of shape",
         m_y_np.shape,
-        'and deltas of shape',
+        "and deltas of shape",
         deltas_bsz_np.shape,
     )
-    print('Shape of m_y_np:', m_y_np.shape)
-    print('Shape of deltas_np:', deltas_np.shape)
-    print('Shape of m_y_jax:', m_y_jax.shape)
-    print('Shape of deltas_jax:', deltas_jax.shape)
-    print('Shape of deltas_bsz_np:', deltas_bsz_np.shape)
+    print("Shape of m_y_np:", m_y_np.shape)
+    print("Shape of deltas_np:", deltas_np.shape)
+    print("Shape of m_y_jax:", m_y_jax.shape)
+    print("Shape of deltas_jax:", deltas_jax.shape)
+    print("Shape of deltas_bsz_np:", deltas_bsz_np.shape)
 
     # Warm up the JIT compilers
     if TEST_TORCH_COMPUTE_Y_T_TORCH_BATCHED:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_TORCH_BATCHED...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_TORCH_BATCHED...")
         _ = compute_y_t_torch_batched(m_y_torch, deltas_bsz_torch)
         torch.cuda.synchronize()
     if TEST_TORCH_COMPUTE_Y_T_STACK_BATCHED:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_STACK_BATCHED...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_STACK_BATCHED...")
         _ = compute_y_t_stack_batched(m_y_torch, deltas_bsz_torch)
         torch.cuda.synchronize()
     if TEST_JAX_BATCHED:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_JAX_BATCHED...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_JAX_BATCHED...")
         _ = compute_y_t_jax_batched(m_y_jax, deltas_bsz_jax).block_until_ready()
     if TEST_JAX:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_JAX...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_JAX...")
         _ = compute_y_t_jax(m_y_jax, deltas_jax).block_until_ready()
 
     # PyTorch tests
     torch_versions = []
     if TEST_TORCH_COMPUTE_Y_T_TORCH_BATCHED:
         torch_versions.append(
-            ('compute_y_t_torch_batched', compute_y_t_torch_batched)
+            ("compute_y_t_torch_batched", compute_y_t_torch_batched)
         )
     if TEST_TORCH_COMPUTE_Y_T_STACK_BATCHED:
         torch_versions.append(
-            ('compute_y_t_stack_batched', compute_y_t_stack_batched)
+            ("compute_y_t_stack_batched", compute_y_t_stack_batched)
         )
 
     results_torch = []
@@ -265,18 +265,18 @@ def main():
 
     for version_name, compute_y_t_version in torch_versions:
         if PROFILE_TORCH:
-            print(f'\nProfiling {version_name}...')
+            print(f"\nProfiling {version_name}...")
             with profiler.profile(with_stack=True, profile_memory=True) as prof:
                 result_torch = compute_y_t_version(m_y_torch, deltas_bsz_torch)
                 torch.cuda.synchronize()
             print(
                 prof.key_averages(group_by_stack_n=5).table(
-                    sort_by='cpu_time_total', row_limit=10
+                    sort_by="cpu_time_total", row_limit=10
                 )
             )
 
         if BENCHMARK_TORCH:
-            print(f'Benchmarking {version_name}...')
+            print(f"Benchmarking {version_name}...")
 
             start_time_torch = time.time()
 
@@ -288,14 +288,14 @@ def main():
 
             execution_times[version_name] = time_torch
 
-            print(f'Execution Time ({version_name}): {time_torch:.6f}s')
+            print(f"Execution Time ({version_name}): {time_torch:.6f}s")
 
         results_torch.append((version_name, result_torch.cpu()))
 
     # JAX tests
 
     if TEST_JAX_BATCHED:
-        print('\nBenchmarking JAX Batched...')
+        print("\nBenchmarking JAX Batched...")
 
         start_time_jax_batched = time.time()
 
@@ -305,12 +305,12 @@ def main():
 
         time_jax_batched = time.time() - start_time_jax_batched
 
-        execution_times['JAX Batched'] = time_jax_batched
+        execution_times["JAX Batched"] = time_jax_batched
 
-        print(f'Execution Time (JAX Batched): {time_jax_batched:.6f}s')
+        print(f"Execution Time (JAX Batched): {time_jax_batched:.6f}s")
 
     if TEST_JAX:
-        print('\nBenchmarking JAX...')
+        print("\nBenchmarking JAX...")
 
         start_time_jax = time.time()
 
@@ -318,26 +318,26 @@ def main():
 
         time_jax = time.time() - start_time_jax
 
-        execution_times['JAX'] = time_jax
+        execution_times["JAX"] = time_jax
 
-        print(f'Execution Time (JAX): {time_jax:.6f}s')
+        print(f"Execution Time (JAX): {time_jax:.6f}s")
 
     # Compare the results
 
     if COMPARE_RESULTS and TEST_JAX_BATCHED and any(torch_versions):
-        print('\nComparing the results...')
+        print("\nComparing the results...")
 
         for version_name, result_torch in results_torch:
-            print(f'\nComparing {version_name} with JAX Batched...')
+            print(f"\nComparing {version_name} with JAX Batched...")
 
             if np.allclose(result_torch.numpy(), result_jax_batched, atol=ATOL):
                 print(
-                    f'The results from {version_name} and JAX Batched are close enough.'
+                    f"The results from {version_name} and JAX Batched are close enough."
                 )
 
             else:
                 print(
-                    f'The results from {version_name} and JAX Batched differ more than the acceptable tolerance.'
+                    f"The results from {version_name} and JAX Batched differ more than the acceptable tolerance."
                 )
 
                 # Find the indices where the results differ
@@ -348,18 +348,18 @@ def main():
 
                 # Print the differing indices and values
 
-                print('Differing indices and values:')
+                print("Differing indices and values:")
 
                 for i in range(len(diff_indices[0])):
                     index = tuple(diff_index[i] for diff_index in diff_indices)
 
-                    print(f'Index: {index}')
+                    print(f"Index: {index}")
 
                     print(
-                        f'{version_name} value: {result_torch.numpy()[index]}'
+                        f"{version_name} value: {result_torch.numpy()[index]}"
                     )
 
-                    print(f'JAX Batched value: {result_jax_batched[index]}')
+                    print(f"JAX Batched value: {result_jax_batched[index]}")
 
                     print()
 
@@ -371,11 +371,11 @@ def main():
     if execution_times:
         ranked_versions = sorted(execution_times.items(), key=lambda x: x[1])
 
-        print('\nVersions ranked by execution time:')
+        print("\nVersions ranked by execution time:")
 
         for i, (version, time) in enumerate(ranked_versions, start=1):
-            print(f'{i}. {version}: {time:.6f}s')
+            print(f"{i}. {version}: {time:.6f}s")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

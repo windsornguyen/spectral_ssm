@@ -24,7 +24,6 @@ from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
-from torch.nn import MSELoss
 
 
 @dataclass
@@ -318,6 +317,7 @@ class SpectralHybrid(nn.Module):
         
         attn_layers = int(self.n_layers * self.pct_attn)
         stu_layers = self.n_layers - attn_layers
+        print(f"No. attn layers={attn_layers}, No. stu layers={stu_layers}")
 
         # Calculate the number of STU layers between each Attention layer
         stu_per_attn = stu_layers // attn_layers if attn_layers !=0 else 0
@@ -329,7 +329,7 @@ class SpectralHybrid(nn.Module):
         
         # Add any remaining STU layers at the end
         blocks.extend([HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "STU") for _ in range(stu_layers % stu_per_attn)])
-            
+        print(blocks)
         self.hybrid = nn.ModuleDict(
             dict(
                 wpe=nn.Embedding(configs.sl, configs.n_embd),
@@ -569,7 +569,7 @@ class SpectralHybrid(nn.Module):
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
 
         # Track model hallucinations
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)

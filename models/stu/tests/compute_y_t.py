@@ -295,41 +295,41 @@ def main():
     deltas_jax = jnp.array(deltas_np)
 
     # Get device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     m_y_torch = m_y_torch.to(device)
     deltas_torch = deltas_torch.to(device)
 
     # Warm up the JIT compilers
     if TEST_TORCH_COMPUTE_Y_T_TORCH:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_TORCH...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_TORCH...")
         _ = compute_y_t_torch(m_y_torch, deltas_torch)
         torch.cuda.synchronize()
     if TEST_TORCH_COMPUTE_Y_T_STACK:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_STACK...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_STACK...")
         _ = compute_y_t_stack(m_y_torch, deltas_torch)
         torch.cuda.synchronize()
     if TEST_TORCH_COMPUTE_Y_T_PSCAN_NAIVE:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_PSCAN (NO FFT)...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_PSCAN (NO FFT)...")
         _ = compute_y_t_pscan(m_y_torch, deltas_torch, use_fft=False)
         torch.cuda.synchronize()
     if TEST_TORCH_COMPUTE_Y_T_PSCAN_FFT:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_PSCAN (FFT)...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_PSCAN (FFT)...")
         _ = compute_y_t_pscan(m_y_torch, deltas_torch, use_fft=True)
         torch.cuda.synchronize()
     if TEST_JAX:
-        print('Warming up the JIT compiler for COMPUTE_Y_T_JAX...')
+        print("Warming up the JIT compiler for COMPUTE_Y_T_JAX...")
         _ = compute_y_t_jax(m_y_jax, deltas_jax).block_until_ready()
 
     # PyTorch tests
     torch_versions = []
     if TEST_TORCH_COMPUTE_Y_T_TORCH:
-        torch_versions.append(('compute_y_t_torch', compute_y_t_torch))
+        torch_versions.append(("compute_y_t_torch", compute_y_t_torch))
     if TEST_TORCH_COMPUTE_Y_T_STACK:
-        torch_versions.append(('compute_y_t_stack', compute_y_t_stack))
+        torch_versions.append(("compute_y_t_stack", compute_y_t_stack))
     if TEST_TORCH_COMPUTE_Y_T_PSCAN_NAIVE:
         torch_versions.append(
             (
-                'compute_y_t_pscan (naive)',
+                "compute_y_t_pscan (naive)",
                 lambda m_y, deltas: compute_y_t_pscan(
                     m_y, deltas, use_fft=False
                 ),
@@ -338,7 +338,7 @@ def main():
     if TEST_TORCH_COMPUTE_Y_T_PSCAN_FFT:
         torch_versions.append(
             (
-                'compute_y_t_pscan (FFT)',
+                "compute_y_t_pscan (FFT)",
                 lambda m_y, deltas: compute_y_t_pscan(
                     m_y, deltas, use_fft=True
                 ),
@@ -350,18 +350,18 @@ def main():
 
     for version_name, compute_y_t_version in torch_versions:
         if PROFILE_TORCH:
-            print(f'\nProfiling {version_name}...')
+            print(f"\nProfiling {version_name}...")
             with profiler.profile(with_stack=True, profile_memory=True) as prof:
                 result_torch = compute_y_t_version(m_y_torch, deltas_torch)
                 torch.cuda.synchronize()
             print(
                 prof.key_averages(group_by_stack_n=5).table(
-                    sort_by='cpu_time_total', row_limit=10
+                    sort_by="cpu_time_total", row_limit=10
                 )
             )
 
         if BENCHMARK_TORCH:
-            print(f'Benchmarking {version_name}...')
+            print(f"Benchmarking {version_name}...")
 
             start_time_torch = time.time()
 
@@ -373,14 +373,14 @@ def main():
 
             execution_times[version_name] = time_torch
 
-            print(f'Execution Time ({version_name}): {time_torch:.6f}s')
+            print(f"Execution Time ({version_name}): {time_torch:.6f}s")
 
         results_torch.append((version_name, result_torch.cpu()))
 
     # JAX test
 
     if TEST_JAX:
-        print('\nBenchmarking JAX...')
+        print("\nBenchmarking JAX...")
 
         start_time_jax = time.time()
 
@@ -388,26 +388,26 @@ def main():
 
         time_jax = time.time() - start_time_jax
 
-        execution_times['JAX'] = time_jax
+        execution_times["JAX"] = time_jax
 
-        print(f'Execution Time (JAX): {time_jax:.6f}s')
+        print(f"Execution Time (JAX): {time_jax:.6f}s")
 
     # Compare the results
 
     if COMPARE_RESULTS and TEST_JAX and any(torch_versions):
-        print('\nComparing the results...')
+        print("\nComparing the results...")
 
         for version_name, result_torch in results_torch:
-            print(f'\nComparing {version_name} with JAX...')
+            print(f"\nComparing {version_name} with JAX...")
 
             if np.allclose(result_torch.numpy(), result_jax, atol=ATOL):
                 print(
-                    f'The results from {version_name} and JAX are close enough.'
+                    f"The results from {version_name} and JAX are close enough."
                 )
 
             else:
                 print(
-                    f'The results from {version_name} and JAX differ more than the acceptable tolerance.'
+                    f"The results from {version_name} and JAX differ more than the acceptable tolerance."
                 )
 
                 # Find the indices where the results differ
@@ -418,18 +418,18 @@ def main():
 
                 # Print the differing indices and values
 
-                print('Differing indices and values:')
+                print("Differing indices and values:")
 
                 for i in range(len(diff_indices[0])):
                     index = tuple(diff_index[i] for diff_index in diff_indices)
 
-                    print(f'Index: {index}')
+                    print(f"Index: {index}")
 
                     print(
-                        f'{version_name} value: {result_torch.numpy()[index]}'
+                        f"{version_name} value: {result_torch.numpy()[index]}"
                     )
 
-                    print(f'JAX value: {result_jax[index]}')
+                    print(f"JAX value: {result_jax[index]}")
 
                     print()
 
@@ -441,11 +441,11 @@ def main():
     if execution_times:
         ranked_versions = sorted(execution_times.items(), key=lambda x: x[1])
 
-        print('\nVersions ranked by execution time:')
+        print("\nVersions ranked by execution time:")
 
         for i, (version, time) in enumerate(ranked_versions, start=1):
-            print(f'{i}. {version}: {time:.6f}s')
+            print(f"{i}. {version}: {time:.6f}s")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

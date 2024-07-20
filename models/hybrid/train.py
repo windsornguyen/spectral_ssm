@@ -14,16 +14,14 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from safetensors.torch import load_file, save_file
-from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
-from tqdm import tqdm
 
 from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment as exp, optimizer as opt
+from utils import experiment as exp
 from models.hybrid.model import SpectralHybrid, SpectralHybridConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
@@ -116,14 +114,14 @@ def main() -> None:
     parser.add_argument(
         "--segment_lengths",
         type=int,
-        nargs='+',
+        nargs="+",
         default=[128, 256, 512],
         help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
     )
     parser.add_argument(
         "--dilated_ratios",
         type=int,
-        nargs='+',
+        nargs="+",
         default=[1, 2, 4],
         help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
     )

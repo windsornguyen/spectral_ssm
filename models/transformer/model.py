@@ -3,20 +3,16 @@
 # File: (Transformer) model.py
 # =============================================================================#
 
-import math
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from einops import rearrange
-from torch.nn import functional as F
 from tqdm import tqdm
 from models.transformer.attn import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
-from utils.dist_utils import all_gather_func, get_data_parallel_rank, get_data_parallel_world_size
 
 
 @dataclass
@@ -121,7 +117,7 @@ class GatedFFN(nn.Module):
             torch.Tensor: Output tensor
         """
         y = self.fc_1(x)
-        y, gate = y.chunk(2, dim=-1)
+        y, gate = y.chunk(self.chunks, dim=-1)
         y = y * self.silu(gate)
         y = self.fc_2(y)
         return self.dropout(y)
@@ -134,8 +130,9 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
+        self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
+        self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
-        self.rn = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
 
         self.ffn_1 = MoE(
             configs,
@@ -150,8 +147,9 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
+        x = self.rn_1(x) if not self.configs.dilated_attn else x
         x = x + self.attn(x)
-        x = x + self.ffn_1(self.rn(x))
+        x = x + self.ffn_1(self.rn_2(x))
         return x
 
 class Transformer(nn.Module):
@@ -171,7 +169,7 @@ class Transformer(nn.Module):
         if configs.moe:
             print(f"\nMoE?: Enabled | Using {configs.num_experts} experts.")
         else:
-            print(f"\nMoE?: Disabled")
+            print("\nMoE?: Disabled")
 
         self.transformer = nn.ModuleDict(
             dict(
@@ -339,7 +337,8 @@ class Transformer(nn.Module):
         targets: torch.Tensor,
         init: int = 950,
         steps: int = 50,
-        rollout_steps: int = 20,
+        rollout_steps: int = 1,
+        truth: int = 0
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -354,6 +353,9 @@ class Transformer(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
+            rollout_steps (int): Number of predicted steps to calculate the mean loss over
+            truth (int): Interval at which to ground predictions to true targets.
+                If 0, no grounding is performed.
 
         Returns:
         tuple: Contains the following elements:
@@ -365,8 +367,9 @@ class Transformer(nn.Module):
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
+        _, _, d_in = inputs.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
 
         # Track model hallucinations
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
@@ -377,12 +380,15 @@ class Transformer(nn.Module):
         # Initialize cost function
         mse_loss = nn.MSELoss()
 
+        # Initialize autoregressive inputs with all available context
+        ar_inputs = inputs[:, :init].clone()
+
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
             step_preds, (_, _) = self.forward(
-                inputs[:, :current_step], targets[:, :current_step]
+                ar_inputs[:, :current_step], targets[:, :current_step]
             )
 
             # Calculate the mean loss of the last rollout_steps predictions
@@ -393,10 +399,16 @@ class Transformer(nn.Module):
             # Store the last prediction step for plotting
             predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
-            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-            # next_input = torch.cat([next_input, next_action], dim=2)
-            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            # Decide whether to use the prediction or ground truth as the next input
+            if truth == 0 or (step + 1) % truth == 0:
+                # Concatenate the autoregressive predictions of states and the ground truth actions
+                next_input = step_preds[:, -1:].detach()
+                next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+                next_input = torch.cat([next_input, next_action], dim=2)
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            else:
+                next_input = inputs[:, current_step:current_step+1, :]
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
         return predicted_steps, (avg_loss, traj_losses)

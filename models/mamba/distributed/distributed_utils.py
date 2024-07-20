@@ -133,7 +133,7 @@ def allreduce_sequence_parallel_grad(model: torch.nn.Module, process_group: Proc
         with torch.no_grad():
             coalesced = torch._utils._flatten_dense_tensors(grads)
             torch.distributed.all_reduce(coalesced, group=process_group)
-            for buf, synced in zip(grads, torch._utils._unflatten_dense_tensors(coalesced, grads)):
+            for buf, synced in zip(grads, torch._utils._unflatten_dense_tensors(coalesced, grads), strict=True):
                 buf.copy_(synced)
 
 

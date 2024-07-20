@@ -6,19 +6,13 @@
 """Benchmarking on synthetic long-context datasets."""
 
 import argparse
-from datetime import datetime
-import os
-
-import numpy as np
 import torch
-import torch.distributed as dist
 from models.stu.benchmarks.model import SpectralSSM, SpectralSSMConfigs
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
 from torch.nn import CrossEntropyLoss
-from utils import experiment as exp, optimizer as opt
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 from models.stu.benchmarks.synthetic import (

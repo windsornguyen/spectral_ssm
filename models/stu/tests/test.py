@@ -30,7 +30,7 @@ def og(m_y: torch.Tensor, deltas: torch.Tensor) -> torch.Tensor:
     )
 
     for i in range(seq_len):
-        output = torch.einsum('ijk,bkj->bi', m_y, carry) + deltas[:, i, :]
+        output = torch.einsum("ijk,bkj->bi", m_y, carry) + deltas[:, i, :]
         ys[:, i, :] = output
         carry = torch.roll(carry, shifts=1, dims=2)
         carry[:, :, 0] = output
@@ -130,9 +130,9 @@ mean1, std1 = measure_time(og, m_y, deltas)
 mean2, std2 = measure_time(bmm, m_y, deltas)
 mean3, std3 = measure_time(evans, m_y, deltas)
 
-print(f'Function 1 (og) - Mean: {mean1:.6f}, Stddev: {std1:.6f}')
-print(f'Function 2 (bmm) - Mean: {mean2:.6f}, Stddev: {std2:.6f}')
-print(f'Function 3 (evans) - Mean: {mean3:.6f}, Stddev: {std3:.6f}')
+print(f"Function 1 (og) - Mean: {mean1:.6f}, Stddev: {std1:.6f}")
+print(f"Function 2 (bmm) - Mean: {mean2:.6f}, Stddev: {std2:.6f}")
+print(f"Function 3 (evans) - Mean: {mean3:.6f}, Stddev: {std3:.6f}")
 
 # Ensure results match
 output1 = og(m_y, deltas)
@@ -148,25 +148,25 @@ def compare_outputs(output1, output2, output3):
                 if not torch.allclose(
                     output1[i, j, k], output2[i, j, k], atol=ATOL
                 ):
-                    print(f'Mismatch at {i}, {j}, {k} for og and bmm:')
+                    print(f"Mismatch at {i}, {j}, {k} for og and bmm:")
                     print(
-                        f'og: {output1[i, j, k]}, bmm: {output2[i, j, k]}, diff: {output1[i, j, k] - output2[i, j, k]}'
+                        f"og: {output1[i, j, k]}, bmm: {output2[i, j, k]}, diff: {output1[i, j, k] - output2[i, j, k]}"
                     )
                     mismatch_count += 1
                 if not torch.allclose(
                     output1[i, j, k], output3[i, j, k], atol=ATOL
                 ):
-                    print(f'Mismatch at {i}, {j}, {k} for og and evans:')
+                    print(f"Mismatch at {i}, {j}, {k} for og and evans:")
                     print(
-                        f'og: {output1[i, j, k]}, evans: {output3[i, j, k]}, diff: {output1[i, j, k] - output3[i, j, k]}'
+                        f"og: {output1[i, j, k]}, evans: {output3[i, j, k]}, diff: {output1[i, j, k] - output3[i, j, k]}"
                     )
                     mismatch_count += 1
                 if not torch.allclose(
                     output2[i, j, k], output3[i, j, k], atol=ATOL
                 ):
-                    print(f'Mismatch at {i}, {j}, {k} for bmm and evans:')
+                    print(f"Mismatch at {i}, {j}, {k} for bmm and evans:")
                     print(
-                        f'bmm: {output2[i, j, k]}, evans: {output3[i, j, k]}, diff: {output2[i, j, k] - output3[i, j, k]}'
+                        f"bmm: {output2[i, j, k]}, evans: {output3[i, j, k]}, diff: {output2[i, j, k] - output3[i, j, k]}"
                     )
                     mismatch_count += 1
                 if mismatch_count >= 5:
@@ -177,10 +177,10 @@ compare_outputs(output1, output2, output3)
 
 assert torch.allclose(
     output1, output2, atol=ATOL
-), 'Output mismatch between function 1 (og) and function 2 (bmm)'
+), "Output mismatch between function 1 (og) and function 2 (bmm)"
 assert torch.allclose(
     output1, output3, atol=ATOL
-), 'Output mismatch between function 1 (og) and function 3 (evans)'
+), "Output mismatch between function 1 (og) and function 3 (evans)"
 assert torch.allclose(
     output2, output3, atol=ATOL
-), 'Output mismatch between function 2 (bmm) and function 3 (evans)'
+), "Output mismatch between function 2 (bmm) and function 3 (evans)"

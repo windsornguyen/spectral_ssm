@@ -1,12 +1,10 @@
 import numpy as np
-import os
-import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 # Load the input and target data
 # controller = "Walker2D-v1"
-input_file = f"data/mujoco-v1/Walker2D-v1/raw_inputs.npy"
-target_file = f"data/mujoco-v1/Walker2D-v1/raw_targets.npy"
+input_file = "data/mujoco-v1/Walker2D-v1/raw_inputs.npy"
+target_file = "data/mujoco-v1/Walker2D-v1/raw_targets.npy"
 # # Ant (in, out) dims: (37, 29)
 # # Walker2D (in, out)  dims: (24, 18)
 # # HalfCheetah (in, out)  dims: (24, 18)

@@ -2,7 +2,6 @@ import math
 
 import torch
 import torch.nn.functional as F
-from dataclasses import dataclass, field
 from torch import nn
 from einops import rearrange
 from models.transformer.dilated.multiway_network import MultiwayWrapper
@@ -70,12 +69,12 @@ class MultiheadAttention(nn.Module):
                 attn_weights += attn_mask
 
             if key_padding_mask is not None:
-                attn_weights = rearrange(attn_weights, '(b h) t s -> b h t s', h=self.n_heads)
+                attn_weights = rearrange(attn_weights, "(b h) t s -> b h t s", h=self.n_heads)
                 attn_weights = attn_weights.masked_fill(
                     key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
                     float("-inf"),
                 )
-                attn_weights = rearrange(attn_weights, 'b h t s -> (b h) t s')
+                attn_weights = rearrange(attn_weights, "b h t s -> (b h) t s")
 
             if rel_pos is not None:
                 rel_pos = rel_pos.view(attn_weights.size())
@@ -85,15 +84,15 @@ class MultiheadAttention(nn.Module):
             attn_probs = self.attn_dropout(attn_weights)
 
             attn = torch.bmm(attn_probs, v)
-            attn = rearrange(attn, '(b h) l d -> b l (h d)', h=self.n_heads)
+            attn = rearrange(attn, "(b h) l d -> b l (h d)", h=self.n_heads)
         else:
             assert flash_attn_func is not None
             assert rel_pos is None
-            q = rearrange(q, '(b h) l d -> b l h d', h=self.n_heads)
-            k = rearrange(k, '(b h) l d -> b l h d', h=self.n_heads)
-            v = rearrange(v, '(b h) l d -> b l h d', h=self.n_heads)
+            q = rearrange(q, "(b h) l d -> b l h d", h=self.n_heads)
+            k = rearrange(k, "(b h) l d -> b l h d", h=self.n_heads)
+            v = rearrange(v, "(b h) l d -> b l h d", h=self.n_heads)
             attn, lse = flash_attn_func(q, k, v, self.dropout, attn_mask, None, is_causal)
-            attn = rearrange(attn, 'b l h d -> b l (h d)')
+            attn = rearrange(attn, "b l h d -> b l (h d)")
             attn_weights = lse[:, :, :attn.size(1)]
 
         return attn, attn_weights
@@ -115,9 +114,9 @@ class MultiheadAttention(nn.Module):
         q, k, v = torch.chunk(qkv, 3, dim=2)
 
         # Reshape for multi-head attention
-        q = rearrange(q, 'b l (h d) -> (b h) l d', h=self.n_heads)
-        k = rearrange(k, 'b l (h d) -> (b h) l d', h=self.n_heads)
-        v = rearrange(v, 'b l (h d) -> (b h) l d', h=self.n_heads)
+        q = rearrange(q, "b l (h d) -> (b h) l d", h=self.n_heads)
+        k = rearrange(k, "b l (h d) -> (b h) l d", h=self.n_heads)
+        v = rearrange(v, "b l (h d) -> (b h) l d", h=self.n_heads)
 
         # Apply XPOS if configured
         if self.xpos is not None:
@@ -129,8 +128,8 @@ class MultiheadAttention(nn.Module):
         y, attn_weights = self.attention_ops(q, k, v, key_padding_mask, attn_mask, is_causal=attn_mask is None)
 
         # Reshape and apply output projection
-        y = rearrange(y, 'b l (h d) -> b l h d', h=self.n_heads)
-        y = rearrange(y, 'b l h d -> b l (h d)')
+        y = rearrange(y, "b l (h d) -> b l h d", h=self.n_heads)
+        y = rearrange(y, "b l h d -> b l (h d)")
         
         if self.inner_attn_rn is not None:
             y = self.inner_attn_rn(y)

@@ -40,15 +40,13 @@
 # print("Output comparison to non-batched version:", identical)
 
 import torch
-import jax
 import numpy as np
-import jax.numpy as jnp
 from jax.scipy.signal import convolve as jax_convolve
 import time
 import torch.nn.functional as F
 
 # Ensure PyTorch uses CUDA if available
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def tr_conv_fft(x, y):
@@ -142,7 +140,7 @@ def jax_tr_conv(x, y):
     Returns:
         numpy.ndarray: Convolution result of shape (seq_len,).
     """
-    return jax_convolve(x, y, method='fft')[: x.shape[0]]
+    return jax_convolve(x, y, method="fft")[: x.shape[0]]
 
 
 def run_benchmarks(seq_len=8012, num_runs=100):
@@ -157,9 +155,9 @@ def run_benchmarks(seq_len=8012, num_runs=100):
     y = torch.randn(seq_len, device=device)
 
     methods = {
-        'PyTorch FFT Convolution': tr_conv_fft,
-        'PyTorch Direct Convolution': tr_conv_direct,
-        'PyTorch Old': tr_conv_old,
+        "PyTorch FFT Convolution": tr_conv_fft,
+        "PyTorch Direct Convolution": tr_conv_direct,
+        "PyTorch Old": tr_conv_old,
     }
 
     # Warm-up runs for fair GPU timing
@@ -180,21 +178,21 @@ def run_benchmarks(seq_len=8012, num_runs=100):
     # Run JAX method
     x_np = np.array(x.cpu())
     y_np = np.array(y.cpu())
-    times['JAX FFT Convolution'] = []
+    times["JAX FFT Convolution"] = []
     for _ in range(num_runs):
         start_time = time.time()
         result_jax = jax_tr_conv(x_np, y_np)
-        times['JAX FFT Convolution'].append(time.time() - start_time)
+        times["JAX FFT Convolution"].append(time.time() - start_time)
 
     # Check correctness
     result_ref = result_jax
     for name, func in methods.items():
         result_py = func(x, y).cpu().numpy()
         if not np.allclose(result_ref, result_py, atol=1e-4):
-            print(f'{name} failed accuracy check.')
-            print(f'Reference result: {result_ref}')
-            print(f'{name} result: {result_py}')
-            print(f'Difference: {np.abs(result_ref - result_py)}')
+            print(f"{name} failed accuracy check.")
+            print(f"Reference result: {result_ref}")
+            print(f"{name} result: {result_py}")
+            print(f"Difference: {np.abs(result_ref - result_py)}")
             print()
 
     # Calculate mean and standard deviation of timings
@@ -205,8 +203,8 @@ def run_benchmarks(seq_len=8012, num_runs=100):
     ranked_methods = sorted(mean_times.items(), key=lambda x: x[1])
     for rank, (name, mean_time) in enumerate(ranked_methods, start=1):
         std_time = std_times[name]
-        print(f'{rank}. {name}: {mean_time:.6f} ± {std_time:.6f} seconds')
+        print(f"{rank}. {name}: {mean_time:.6f} ± {std_time:.6f} seconds")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_benchmarks()

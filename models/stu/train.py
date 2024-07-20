@@ -228,7 +228,7 @@ def main() -> None:
     flops, mfu = None, None
         
     # Data loader hyperparameters
-    bsz: int = 8
+    bsz: int = 2
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -261,7 +261,7 @@ def main() -> None:
 
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
-    eps = (1e-5,)
+    eps = 1e-5
     noise = 0.0
     noise_frequency = 0.2
 

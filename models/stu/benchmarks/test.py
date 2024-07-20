@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from prettytable import PrettyTable
 import time
@@ -90,7 +91,7 @@ def run_benchmarks(model: SpectralSSM, configs: SpectralSSMConfigs):
 
 if __name__ == "__main__":
     # Initialize your model and configurations
-    configs = SSSMConfigs(
+    configs = SpectralSSMConfigs(
         d_in=128,  # Input dimension
         d_out=128,  # Output dimension
         sl=50,  # Sequence length

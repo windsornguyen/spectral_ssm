@@ -103,27 +103,27 @@ def get_optimizer(
     """
     param_groups = [
         {
-            'params': model.parameters(), 
-            'lr': learning_rate, 
-            'weight_decay': weight_decay
+            "params": model.parameters(), 
+            "lr": learning_rate, 
+            "weight_decay": weight_decay
         }
     ]
 
-    if 'stu' in model.__class__.__name__.lower():
+    if "stu" in model.__class__.__name__.lower():
         m_y_params = []
         default_params = []
         for name, param in model.named_parameters():
-            if name.startswith('m_y'):
+            if name.startswith("m_y"):
                 m_y_params.append(param)
             else:
                 default_params.append(param)
 
         param_groups = [
-            {'params': default_params, 'lr': learning_rate, 'weight_decay': weight_decay},
+            {"params": default_params, "lr": learning_rate, "weight_decay": weight_decay},
             {
-                'params': m_y_params,
-                'lr': kwargs.get('m_y_learning_rate', 5e-5),
-                'weight_decay': kwargs.get('m_y_weight_decay', 0),
+                "params": m_y_params,
+                "lr": kwargs.get("m_y_learning_rate", 5e-5),
+                "weight_decay": kwargs.get("m_y_weight_decay", 0),
             },
         ]
 

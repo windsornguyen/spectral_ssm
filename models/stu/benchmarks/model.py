@@ -5,12 +5,11 @@
 
 """The Spectral State Space Model architecture for benchmark tasks."""
 
-import math
 
 import torch
 import torch.nn as nn
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from models.stu.stu_utils import (
     get_top_eigh, 
     preconvolve,
@@ -18,11 +17,9 @@ from models.stu.stu_utils import (
     compute_spectral, 
     compute_ar_y
 )
-from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
-from tqdm import tqdm
 
 
 @dataclass

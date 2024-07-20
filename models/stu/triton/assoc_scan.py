@@ -1,6 +1,4 @@
-import math
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 import jax
@@ -16,12 +14,12 @@ def set_seed(seed):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 128, 'VECSIZE': 2}),
-        triton.Config({'BLOCK_SIZE': 256, 'VECSIZE': 2}),
-        triton.Config({'BLOCK_SIZE': 512, 'VECSIZE': 2}),
-        triton.Config({'BLOCK_SIZE': 1024, 'VECSIZE': 2}),
+        triton.Config({"BLOCK_SIZE": 128, "VECSIZE": 2}),
+        triton.Config({"BLOCK_SIZE": 256, "VECSIZE": 2}),
+        triton.Config({"BLOCK_SIZE": 512, "VECSIZE": 2}),
+        triton.Config({"BLOCK_SIZE": 1024, "VECSIZE": 2}),
     ],
-    key=['N_ROWS'],
+    key=["N_ROWS"],
 )
 @triton.jit
 def roll_zero_kernel(
@@ -52,7 +50,7 @@ def roll_zero_kernel(
 def triton_roll_and_zero(x):
     assert x.size(1) == 2, "Input must have 2 columns"
     y = torch.empty_like(x)
-    grid = lambda meta: (triton.cdiv(x.numel(), meta['BLOCK_SIZE']),)
+    grid = lambda meta: (triton.cdiv(x.numel(), meta["BLOCK_SIZE"]),)
     roll_zero_kernel[grid](x, y, N_ROWS=x.size(0))
     return y
 
@@ -74,7 +72,7 @@ def compute_y_t_triton(m_y, deltas):
         carry = triton_roll_and_zero(carry)
         return carry, output
 
-    initial_carry = torch.zeros((k, d_out), device='cuda')
+    initial_carry = torch.zeros((k, d_out), device="cuda")
     _, ys = tl.associative_scan(scan_op, initial_carry, deltas)
     return ys
 
@@ -96,8 +94,8 @@ def compute_y_t_jax(m_y: jnp.ndarray, deltas: jnp.ndarray) -> jnp.ndarray:
 def compare_implementations(d_out, k, seq_len, num_runs=100):
     # Generate random inputs
     torch.manual_seed(1337)
-    m_y_torch = torch.randn(d_out, k, d_out, device='cuda')
-    deltas_torch = torch.randn(seq_len, d_out, device='cuda')
+    m_y_torch = torch.randn(d_out, k, d_out, device="cuda")
+    deltas_torch = torch.randn(seq_len, d_out, device="cuda")
 
     m_y_jax = jnp.array(m_y_torch.cpu().numpy())
     deltas_jax = jnp.array(deltas_torch.cpu().numpy())

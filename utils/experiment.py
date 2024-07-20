@@ -20,8 +20,6 @@ from tqdm import tqdm
 from torch.optim import AdamW
 from utils.colors import Colors, colored_print
 
-from models.stu.model import SimpleGatedMoe
-
 # Loss landscape visualization
 import copy
 import numpy as np
@@ -193,6 +191,7 @@ class Experiment:
             amsgrad=use_amsgrad,
             fused=use_fused,
         )
+
 
     def get_lr(
         self,
@@ -625,7 +624,7 @@ class Experiment:
 
         if convert_to_vtk:
             vtk_path = output_path.replace(".pt", ".vtp")
-            convert_pt_to_vtk(
+            self.convert_pt_to_vtk(
                 output_path,
                 vtk_path,
                 surf_name=surf_name,

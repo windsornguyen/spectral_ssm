@@ -1,8 +1,8 @@
 import numpy as np
 
 # Load data
-inputs = np.load('testing/train_inputs.npy')
-targets = np.load('testing/train_targets.npy')
+inputs = np.load("testing/train_inputs.npy")
+targets = np.load("testing/train_targets.npy")
 
 # Initialize an empty array for shifted inputs
 inputs = inputs[:, :, :29]

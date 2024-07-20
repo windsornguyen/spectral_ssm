@@ -9,10 +9,6 @@ import torch
 import torch.nn as nn
 
 
-import torch
-import torch.nn as nn
-
-
 class Walker2DLoss(nn.Module):
     def __init__(self):
         super(Walker2DLoss, self).__init__()

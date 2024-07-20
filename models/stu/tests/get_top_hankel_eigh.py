@@ -74,10 +74,10 @@ np.random.seed(1337)
 # Prepare random data for testing
 n = np.random.randint(1, 1024)  # Random size for the matrix
 k = min(n, np.random.randint(1, 50))  # Random number of eigenvalues/eigenvectors to extract
-print(f'Testing top {k} eigenvalues and eigenvectors for a {n}x{n} Hankel matrix.')
+print(f"Testing top {k} eigenvalues and eigenvectors for a {n}x{n} Hankel matrix.")
 
 # Get device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Warm up the JIT compiler
 _ = get_top_hankel_eigh(n, k, device)
@@ -103,8 +103,8 @@ eig_vals_torch = eig_vals_torch.cpu()
 eig_vecs_torch = eig_vecs_torch.cpu()
 
 # Output performance metrics
-print(f'\nExecution Time (PyTorch): {time_torch:.6f}s')
-print(f'Execution Time (NumPy): {time_numpy:.6f}s')
+print(f"\nExecution Time (PyTorch): {time_torch:.6f}s")
+print(f"Execution Time (NumPy): {time_numpy:.6f}s")
 
 # Sorting the eigenvalues and eigenvectors after they are returned, in descending order by eigenvalue magnitude
 sorted_indices_torch = eig_vals_torch.abs().sort(descending=True).indices
@@ -116,22 +116,22 @@ eig_vals_numpy = eig_vals_numpy[sorted_indices_numpy]
 eig_vecs_numpy = eig_vecs_numpy[:, sorted_indices_numpy]
 
 # Compare the top k eigenvalues and eigenvectors
-print('Comparing the top k eigenvalues and eigenvectors...')
+print("Comparing the top k eigenvalues and eigenvectors...")
 
 # Check if the eigenvalues are close enough
 if np.allclose(eig_vals_torch.numpy()[:k], eig_vals_numpy[:k], atol=1e-8):
-    print('Top k eigenvalues are close enough between PyTorch and NumPy.')
+    print("Top k eigenvalues are close enough between PyTorch and NumPy.")
 else:
-    print('Top k eigenvalues differ more than acceptable tolerance between PyTorch and NumPy.')
+    print("Top k eigenvalues differ more than acceptable tolerance between PyTorch and NumPy.")
 
 # Check if the eigenvectors are close enough
 if np.allclose(eig_vecs_torch.numpy()[:, :k], eig_vecs_numpy[:, :k], atol=1e-8):
-    print('Top k eigenvectors are close enough between PyTorch and NumPy.')
+    print("Top k eigenvectors are close enough between PyTorch and NumPy.")
 else:
-    print('Top k eigenvectors differ more than acceptable tolerance between PyTorch and NumPy.')
+    print("Top k eigenvectors differ more than acceptable tolerance between PyTorch and NumPy.")
 
 # Calculate and print the condition number
 cond_number_torch = npla.cond(eig_vecs_torch.numpy())
-print(f'\nCondition number of the Torch matrix: {cond_number_torch}')
+print(f"\nCondition number of the Torch matrix: {cond_number_torch}")
 cond_number_numpy = npla.cond(eig_vecs_numpy)
-print(f'Condition number of the NumPy matrix: {cond_number_numpy}')
+print(f"Condition number of the NumPy matrix: {cond_number_numpy}")

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from torchvision.io import read_video
@@ -207,7 +206,7 @@ def train_vae(model, train_loader, val_loader, num_epochs, learning_rate, beta, 
 
 
 if __name__ == "__main__":
-    dist.init_process_group(backend='nccl')
+    dist.init_process_group(backend="nccl")
 
     # Hyperparameters
     latent_dim = 128

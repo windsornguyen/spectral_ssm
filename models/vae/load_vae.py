@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision.utils import save_image
-from torchvision.transforms import Resize, CenterCrop, Compose, Normalize
+from torchvision.transforms import Resize, CenterCrop, Compose
 from torchvision.io import read_video
 import os
 import random
-import numpy as np
 
 
 class ResBlock(nn.Module):

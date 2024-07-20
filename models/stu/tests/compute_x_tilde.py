@@ -3,7 +3,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import time
-from shift import shift_torch, shift_jax
 from conv import conv_torch, conv_jax
 import torch.autograd.profiler as profiler
 
@@ -72,7 +71,7 @@ batch_size = np.random.randint(1, 10)
 seq_len = np.random.randint(4, 32)
 d_out = np.random.randint(4, 32)
 print(
-    f'Testing compute_x_tilde function for inputs of shape [{batch_size}, {seq_len}, {d_out}] and eig_vals/eig_vecs of shape [{d_out}].'
+    f"Testing compute_x_tilde function for inputs of shape [{batch_size}, {seq_len}, {d_out}] and eig_vals/eig_vecs of shape [{d_out}]."
 )
 
 # Create random input data
@@ -91,7 +90,7 @@ eig_vals_jax = jnp.array(eig_vals_np)
 eig_vecs_jax = jnp.array(eig_vecs_np)
 
 # Get device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 inputs_torch = inputs_torch.to(device)
 eig_vals_torch = eig_vals_torch.to(device)
 eig_vecs_torch = eig_vecs_torch.to(device)
@@ -129,29 +128,29 @@ time_jax = time.time() - start_time_jax
 result_torch = result_torch.cpu()
 
 # Output performance metrics
-print(f'\nExecution Time (PyTorch): {time_torch:.6f}s')
-print(f'Execution Time (JAX): {time_jax:.6f}s')
+print(f"\nExecution Time (PyTorch): {time_torch:.6f}s")
+print(f"Execution Time (JAX): {time_jax:.6f}s")
 
 # Compare the results
-print('\nComparing the results...')
+print("\nComparing the results...")
 
 if np.allclose(result_torch.numpy(), result_jax, atol=1e-4):
-    print('The results from PyTorch and JAX are close enough.')
+    print("The results from PyTorch and JAX are close enough.")
 else:
     print(
-        'The results from PyTorch and JAX differ more than the acceptable tolerance.'
+        "The results from PyTorch and JAX differ more than the acceptable tolerance."
     )
 
     # Find the indices where the results differ
     diff_indices = np.where(np.abs(result_torch.numpy() - result_jax) > 1e-4)
 
     # Print the differing indices and values
-    print('Differing indices and values:')
+    print("Differing indices and values:")
     for i in range(len(diff_indices[0])):
         index = tuple(diff_index[i] for diff_index in diff_indices)
-        print(f'Index: {index}')
-        print(f'PyTorch value: {result_torch.numpy()[index]}')
-        print(f'JAX value: {result_jax[index]}')
+        print(f"Index: {index}")
+        print(f"PyTorch value: {result_torch.numpy()[index]}")
+        print(f"JAX value: {result_jax[index]}")
         print()
         if i >= 5:
             break

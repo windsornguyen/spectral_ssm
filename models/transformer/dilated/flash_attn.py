@@ -80,8 +80,8 @@ if torch.cuda.is_available():
 
                 @staticmethod
                 def deserialize_bias(
-                    attn_bias_ctx, attn_bias_tensor: Optional[torch.Tensor]
-                ) -> Any:
+                    attn_bias_ctx, attn_bias_tensor
+                ) -> any:
                     if attn_bias_tensor is None:
                         return attn_bias_ctx
                     return attn_bias_tensor
