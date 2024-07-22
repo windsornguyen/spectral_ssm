@@ -12,6 +12,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
 
 from models.stu.model import SpectralSSM, SpectralSSMConfigs
 from losses.loss_ant import AntLoss
@@ -108,11 +110,10 @@ def main():
     configs = SpectralSSMConfigs(
         n_layers=2,
         n_embd=n_embd,
-        d_in=n_embd,  # TODO: Fix later, d_in \neq n_embd
-        d_out=d_out,
+        d_in=n_embd,
         d_proj=d_proj,
         sl=sl,
-        scale=4,
+        mlp_scale=4,
         bias=False,
         dropout=0.0,
         num_eigh=16,
@@ -171,7 +172,7 @@ def main():
     )
 
     # Run inference
-    num_preds = 500
+    num_preds = 5
     predicted_states = []
     losses = []
     init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
@@ -197,6 +198,7 @@ def main():
                     init=init,
                     steps=steps,  # Predict the next steps
                     rollout_steps=1,
+                    truth=1000,
                 )
             elif args.task == "mujoco-v3":
                 (
@@ -208,6 +210,7 @@ def main():
                     init=init,  # Use the first 295 steps as context
                     steps=steps,  # Predict the next steps
                     rollout_steps=1,
+                    truth=1000,
                 )
 
             predicted_states.append(pred_states)
@@ -265,76 +268,76 @@ def main():
         f"Predictions, ground truths, and losses saved to 'sssm_{args.controller}_{args.task}_predictions.npy', 'sssm_{args.controller}_{args.task}_ground_truths.npy', and 'sssm_{args.controller}_{args.task}_losses.npy' respectively."
     )
 
-    # # Plotting
-    # plt.style.use("seaborn-v0_8-whitegrid")
-    # sns.set_context("paper", font_scale=1.5)
-    # colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
+    # Plotting
+    plt.style.use("seaborn-v0_8-whitegrid")
+    sns.set_context("paper", font_scale=1.5)
+    colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
 
-    # fig = plt.figure(figsize=(20, 8 * num_preds))
-    # gs = GridSpec(
-    #     num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
-    # )
+    fig = plt.figure(figsize=(20, 8 * num_preds))
+    gs = GridSpec(
+        num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
+    )
 
-    # for pred_idx in range(num_preds):
-    #     print(f"Plotting prediction {pred_idx + 1}")
+    for pred_idx in range(num_preds):
+        print(f"Plotting prediction {pred_idx + 1}")
 
-    #     # Plot predicted states vs ground truth
-    #     ax1 = fig.add_subplot(gs[pred_idx, 0])
-    #     feature_idx = 0
+        # Plot predicted states vs ground truth
+        ax1 = fig.add_subplot(gs[pred_idx, 0])
+        feature_idx = 0
 
-    #     # Plot ground truth
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
-    #         label="Ground Truth",
-    #         color="black",
-    #         linewidth=2,
-    #         linestyle="--",
-    #     )
+        # Plot ground truth
+        ax1.plot(
+            range(init, init + steps),
+            all_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
+            label="Ground Truth",
+            color="black",
+            linewidth=2,
+            linestyle="--",
+        )
 
-    #     # Plot prediction
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
-    #         label="Predicted",
-    #         color=colors[pred_idx],
-    #         linewidth=2,
-    #     )
+        # Plot prediction
+        ax1.plot(
+            range(init, init + steps),
+            predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
+            label="Predicted",
+            color=colors[pred_idx],
+            linewidth=2,
+        )
 
-    #     ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
-    #     ax1.set_xlabel("Time Step")
-    #     ax1.set_ylabel("State Value")
-    #     ax1.legend()
+        ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
+        ax1.set_xlabel("Time Step")
+        ax1.set_ylabel("State Value")
+        ax1.legend()
 
-    #     # Plot losses
-    #     ax2 = fig.add_subplot(gs[pred_idx, 1])
+        # Plot losses
+        ax2 = fig.add_subplot(gs[pred_idx, 1])
 
-    #     ax2.plot(
-    #         range(steps),
-    #         smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
-    #         label="Total Loss",
-    #         color="black",
-    #         linewidth=2,
-    #     )
+        ax2.plot(
+            range(steps),
+            smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
+            label="Total Loss",
+            color="black",
+            linewidth=2,
+        )
 
-    #     ax2.set_title(f"Prediction {pred_idx+1}: Losses")
-    #     ax2.set_xlabel("Time Step")
-    #     ax2.set_ylabel("Value")
-    #     ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    #     ax2.set_yscale("log")  # Use log scale for better visibility
+        ax2.set_title(f"Prediction {pred_idx+1}: Losses")
+        ax2.set_xlabel("Time Step")
+        ax2.set_ylabel("Value")
+        ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
+        ax2.set_yscale("log")  # Use log scale for better visibility
 
-    # plt.suptitle(
-    #     f"Spectral SSM Predictions for {args.controller} on {args.task}\n",
-    #     fontsize=16,
-    # )
-    # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    # # TODO: Add existok / make if non-existent (results/) directory
-    # plt.savefig(
-    #     f"results/sssm_{args.controller}_{args.task}_predictions.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # plt.show()
+    plt.suptitle(
+        f"Spectral SSM Predictions for {args.controller} on {args.task}\n",
+        fontsize=16,
+    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # TODO: Add existok / make if non-existent (results/) directory
+    plt.savefig(
+        f"results/sssm_{args.controller}_{args.task}_predictions.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.show()
 
 
 if __name__ == "__main__":

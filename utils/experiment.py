@@ -1,5 +1,5 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen
+# Authors: Windsor Nguyen, Isabel Liu
 # File: experiment.py
 # ==============================================================================#
 
@@ -96,39 +96,39 @@ class Experiment:
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
         m_y_params = []
-        stu_params = {f"stu_{i}": [] for i in range(1, 5)}
+        # stu_params = {f"stu_{i}": [] for i in range(1, 5)}
         default_params = []
 
         # Define different learning rates for each STU
-        stu_lr_multipliers = {
-            "stu_1": 1.0,
-            "stu_2": 0.7,
-            "stu_3": 0.4,
-            "stu_4": 0.1,
-        }
+        # stu_lr_multipliers = {
+        #     "stu_1": 1.0,
+        #     "stu_2": 0.7,
+        #     "stu_3": 0.4,
+        #     "stu_4": 0.1,
+        # }
 
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name.startswith("m_y"):
                     m_y_params.append(param)
-                elif any(f"stu_{i}" in name for i in range(1, 5)):
-                    stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
-                    stu_params[f"stu_{stu_number}"].append(param)
+                # elif any(f"stu_{i}" in name for i in range(1, 5)):
+                #     stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
+                #     stu_params[f"stu_{stu_number}"].append(param)
                 else:
                     default_params.append(param)
 
         # Add parameter groups for STUs with their specific learning rates
-        for stu_name, params in stu_params.items():
-            if params:
-                stu_lr = lr * stu_lr_multipliers[stu_name]
-                param_groups.append(
-                    {
-                        "name": stu_name,
-                        "params": params,
-                        "lr": stu_lr,
-                        "weight_decay": weight_decay,
-                    }
-                )
+        # for stu_name, params in stu_params.items():
+        #     if params:
+        #         stu_lr = lr * stu_lr_multipliers[stu_name]
+        #         param_groups.append(
+        #             {
+        #                 "name": stu_name,
+        #                 "params": params,
+        #                 "lr": stu_lr,
+        #                 "weight_decay": weight_decay,
+        #             }
+        #         )
 
         # Add parameter groups for m_y and default params
         if m_y_params:
@@ -238,6 +238,7 @@ class Experiment:
 
         return flops, mfu
 
+    #TODO: multiplicative updates for each STU separately
     def step(
         self, inputs: torch.Tensor, targets: torch.Tensor, relative_step: int
     ) -> dict[str, float]:
@@ -261,17 +262,34 @@ class Experiment:
             preds, loss_info = self.model(inputs, targets)
 
         if isinstance(loss_info, tuple):
-            loss, *step_metrics = loss_info
+            all_losses, *step_metrics = loss_info
         else:
-            loss = loss_info
+            all_losses = loss_info
 
-        loss.backward()
+        total_loss = sum(sum(losses) for losses in all_losses)
+        mean_loss = torch.tensor(all_losses).mean()
 
         if self.world_size > 1:
-            dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+            dist.all_reduce(total_loss, op=dist.ReduceOp.AVG)
+        total_loss.backward()
 
         # Clip global norm of gradient at 1.0, per the GPT-3 paper
         norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
+        base_lr = self.get_lr(
+            relative_step,
+            self.warmup_steps,
+            self.num_steps,
+            self.max_lr,
+            self.min_lr,
+        )
+
+        # Update weights for each STU using multiplicative updates
+        # for i, (name, param) in enumerate(self.model.named_parameters()):
+        #     if name.startswith('stu_'):
+        #         with torch.no_grad():
+        #             lr = self.optimizer.param_groups[i]['lr']
+        #             param *= torch.exp(-lr * losses[i])
 
         # Update learning rates for each parameter group
         for param_group in self.optimizer.param_groups:
@@ -283,31 +301,26 @@ class Experiment:
                     self.m_y_learning_rate,
                     self.min_lr,
                 )
-            elif param_group["name"].startswith("stu_"):
-                stu_base_lr = self.get_lr(
-                    relative_step,
-                    self.warmup_steps,
-                    self.num_steps,
-                    self.max_lr,
-                    self.min_lr,
-                )
-                stu_multiplier = {
-                    "stu_1": 1.0,
-                    "stu_2": 0.7,
-                    "stu_3": 0.4,
-                    "stu_4": 0.1,
-                }[param_group["name"]]
-                param_group["lr"] = stu_base_lr * stu_multiplier
+            # elif param_group["name"].startswith("stu_"):
+            #     stu_base_lr = self.get_lr(
+            #         relative_step,
+            #         self.warmup_steps,
+            #         self.num_steps,
+            #         self.max_lr,
+            #         self.min_lr,
+            #     )
+            #     stu_multiplier = {
+            #         "stu_1": 1.0,
+            #         "stu_2": 0.7,
+            #         "stu_3": 0.4,
+            #         "stu_4": 0.1,
+            #     }[param_group["name"]]
+            #     param_group["lr"] = stu_base_lr * stu_multiplier
             else:
-                param_group["lr"] = self.get_lr(
-                    relative_step,
-                    self.warmup_steps,
-                    self.num_steps,
-                    self.max_lr,
-                    self.min_lr,
-                )
+                param_group["lr"] = base_lr
 
         self.optimizer.step()
+        self.model.update_all_stus(all_losses, base_lr)
 
         # Time how long this training step took
         if self.device.type == "cuda":
@@ -318,7 +331,7 @@ class Experiment:
         toks_per_sec = toks_processed / dt
 
         metrics = {
-            "loss": loss.item(),
+            "loss": mean_loss.item(),
             "grad_norm": norm.item(),
             "step_time": dt,
             "tokens_per_sec": toks_per_sec,
@@ -370,12 +383,13 @@ class Experiment:
                     preds, loss_info = self.model(inputs, targets)
 
                 if isinstance(loss_info, tuple):
-                    loss, *step_metrics = loss_info
+                    all_losses, *step_metrics = loss_info
                 else:
-                    loss = loss_info
+                    all_losses = loss_info
 
                 # Accumulate loss
-                metrics_accum["loss"] += loss.item()
+                # metrics_accum["loss"] += loss.item()
+                metrics_accum["loss"] += sum(sum(losses) for losses in all_losses)
 
                 # Accumulate additional metrics if available
                 if isinstance(loss_info, dict):

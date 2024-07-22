@@ -593,6 +593,9 @@ def main() -> None:
             if not task["mujoco-v3"]:
                 for metric, losses in metric_losses.items():
                     save_results(args.task, controller, losses, metric, timestamp)
+            
+            model.save_weights()    # save MoE-STU weights for plotting
+            print("MoE-STU weights saved!")
 
             colored_print(
                 "Lyla: It was a pleasure assisting you. Until next time!",

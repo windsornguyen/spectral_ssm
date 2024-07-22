@@ -13,6 +13,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from dataclasses import dataclass, field
 from models.stu.stu_utils import (
@@ -267,12 +268,38 @@ class ExponentialLookbackMoE(nn.Module):
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
 
+        # Register STUs as buffers
+        self.stu_states = [
+            self.stu_1.state_dict(),
+            self.stu_2.state_dict(),
+            self.stu_3.state_dict(),
+            self.stu_4.state_dict()
+        ]
+
+        self.loss_fn = nn.MSELoss()
+        self.proj_1 = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+        self.proj_2 = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+        self.proj_3 = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+        self.proj_4 = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+
+        # Store STU-specific learning rates
+        self.stu_lr_multipliers = {
+            "stu_1": 1.0,
+            "stu_2": 0.99,
+            "stu_3": 0.98,
+            "stu_4": 0.97,
+        }
+
         self.log_weights = nn.Parameter(torch.ones(4))
         self.temperature = temperature
         self.log_file = "stu_usage_data.csv"
         self.step_count = 0
         self.log_buffer = []
         self.log_buffer_size = log_buffer_size
+
+        self.controls = configs.controls
+        self.weights_history = []   # record the weights for plotting
+        self.weights_path = f'results/{self.controls["task"]}/sssm/sssm-{self.controls["controller"]}-weights.npy'
 
         if not os.path.exists(self.log_file):
             with open(self.log_file, "w", newline="") as file:
@@ -293,6 +320,7 @@ class ExponentialLookbackMoE(nn.Module):
         gumbels = -torch.empty_like(logits).exponential_().log()
         gumbels = (logits + gumbels) / temperature
         y_soft = gumbels.softmax(dim=-1)
+        self.weights_history.append(y_soft.detach().cpu().numpy())
 
         if hard:
             index = y_soft.max(dim=-1, keepdim=True)[1]
@@ -302,28 +330,86 @@ class ExponentialLookbackMoE(nn.Module):
             ret = y_soft
         return ret
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, targets: torch.Tensor = None) -> torch.Tensor:
         self.step_count += 1
 
         x1, x2, x3, x4 = x, x[:, :x.shape[1]//2, :], x[:, :x.shape[1]//4, :], x[:, :x.shape[1]//8, :]
 
-        s1 = self.stu_1(x1)
-        s2 = F.pad(self.stu_2(x2), (0, 0, 0, x1.shape[1] - x2.shape[1]))
-        s3 = F.pad(self.stu_3(x3), (0, 0, 0, x1.shape[1] - x3.shape[1]))
-        s4 = F.pad(self.stu_4(x4), (0, 0, 0, x1.shape[1] - x4.shape[1]))
+        # Compute outputs and losses for each STU
+        self.stu_1.load_state_dict(self.stu_states[0])
+        self.stu_2.load_state_dict(self.stu_states[1])
+        self.stu_3.load_state_dict(self.stu_states[2])
+        self.stu_4.load_state_dict(self.stu_states[3])
 
-        weights = self.gumbel_softmax(self.log_weights, temperature=self.temperature, hard=True)
+        with torch.no_grad():  # Ensure no gradients are computed for STUs
+            s1 = self.stu_1(x1)
+            s2 = F.pad(self.stu_2(x2), (0, 0, 0, x1.shape[1] - x2.shape[1]))
+            s3 = F.pad(self.stu_3(x3), (0, 0, 0, x1.shape[1] - x3.shape[1]))
+            s4 = F.pad(self.stu_4(x4), (0, 0, 0, x1.shape[1] - x4.shape[1]))
+        
+        o1 = self.proj_1(s1)
+        o2 = self.proj_2(s2)
+        o3 = self.proj_3(s3)
+        o4 = self.proj_4(s4)
 
-        outputs = torch.stack([s1, s2, s3, s4], dim=-1)
+        losses = [
+            self.compute_loss(o1, targets, window_size=x1.shape[1]),
+            self.compute_loss(o2, targets, window_size=x2.shape[1]),
+            self.compute_loss(o3, targets, window_size=x3.shape[1]),
+            self.compute_loss(o4, targets, window_size=x4.shape[1]),
+        ]
+
+        weights = self.gumbel_softmax(self.log_weights, temperature=self.temperature, hard=False)
+
+        outputs = torch.stack([o1, o2, o3, o4], dim=-1)
         output = (outputs * weights.view(1, 1, 1, -1)).sum(dim=-1)
 
         top_stu_index = torch.argmax(weights).item()
+        print(top_stu_index)
 
         self.log_current_weights(weights, top_stu_index)
         if len(self.log_buffer) >= self.log_buffer_size:
             self.flush_log_buffer()
 
-        return output
+        return output, losses
+
+    def compute_loss(self, output, targets, window_size):
+        """
+        Compute the loss for an output tensor and a targets tensor,
+        considering only the first `window_size` steps.
+
+        Args:
+            output (torch.Tensor): The output tensor from an STU.
+            targets (torch.Tensor): The targets tensor.
+            window_size (int): The size of the lookback window for the STU.
+
+        Returns:
+            torch.Tensor: The computed loss.
+        """
+        # Select only the first window_size steps from output and targets
+        output = output[:, :window_size]
+        targets = targets[:, :window_size]
+
+        # Compute and return the loss
+        return self.loss_fn(output, targets)
+
+    def update_stus(self, losses, base_lr):
+        with torch.no_grad():
+            for i, (stu_name, stu_state) in enumerate(zip(
+                ['stu_1', 'stu_2', 'stu_3', 'stu_4'],
+                self.stu_states
+            )):
+                stu_lr = base_lr * self.stu_lr_multipliers[stu_name]
+                for param_name, param in stu_state.items():
+                    # Move the loss to the same device as the parameter
+                    loss = losses[i].to(param.device)
+                    param.mul_(torch.exp(-stu_lr * loss))
+
+        # After updating, reload the state dictionaries
+        self.stu_1.load_state_dict(self.stu_states[0])
+        self.stu_2.load_state_dict(self.stu_states[1])
+        self.stu_3.load_state_dict(self.stu_states[2])
+        self.stu_4.load_state_dict(self.stu_states[3])
 
     def log_current_weights(self, weights, selected_stu):
         timestamp = time.time()
@@ -337,6 +423,9 @@ class ExponentialLookbackMoE(nn.Module):
 
     def __del__(self):
         self.flush_log_buffer()  # Ensure any remaining logs are written
+    
+    def save_weights(self):
+        np.save(self.weights_path, self.weights_history)
 
 class ExponentialLookbackMoE_InputDependent(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
@@ -456,7 +545,7 @@ class Block(nn.Module):
             else GatedMLP(configs)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, targets: torch.Tensor = None) -> torch.Tensor:
         """
         Forward pass of the Block.
 
@@ -467,9 +556,11 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp(self.rn_2(x))
-        return x + z
+        x, losses = self.stu(self.rn_1(x), targets)
+        # x = x + self.stu(self.rn_1(x))
+        x = x + self.mlp(x)
+
+        return x + z, losses
 
 
 class SpectralSSM(nn.Module):
@@ -523,6 +614,19 @@ class SpectralSSM(nn.Module):
         # Report the number of parameters
         print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
 
+    def update_all_stus(self, losses, base_lr):
+        """
+        Update STUs in all blocks of the model.
+        
+        Args:
+            losses (list): List of losses for each block
+            base_lr (float): Base learning rate
+        """
+        for block, block_losses in zip(self.spectral_ssm.hidden, losses):
+            if hasattr(block.stu, 'update_stus'):
+                block.stu.update_stus(block_losses, base_lr)
+
+    #TODO: Return the loss of each STU's prediction separately
     def forward(self, inputs, targets):
         """
         Forward pass of the spectral SSM model.
@@ -538,18 +642,21 @@ class SpectralSSM(nn.Module):
         """
         x = self.input_proj(inputs)
         x = self.spectral_ssm.dropout(x)
+        all_losses = []
         for block in self.spectral_ssm.hidden:
-            x = block(x)
+            x, losses = block(x, targets)
+            all_losses.append(losses)
         preds = self.output_proj(x)
 
-        if self.controls["task"] != "mujoco-v3":
-            loss, metrics = (
-                self.loss_fn(preds, targets) if targets is not None else (None, None)
-            )
-            return preds, (loss, metrics)
-        else:
-            loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, loss
+        return preds, all_losses
+        # if self.controls["task"] != "mujoco-v3":
+        #     loss, metrics = (
+        #         self.loss_fn(preds, targets) if targets is not None else (None, None)
+        #     )
+        #     return preds, (loss, metrics)
+        # else:
+        #     loss = self.loss_fn(preds, targets) if targets is not None else None
+        #     return preds, loss
 
     def _init_weights(self, module):
         """
@@ -707,6 +814,10 @@ class SpectralSSM(nn.Module):
         hadamard_flops = h_dim * T  # Hadamard product
 
         return linear_flops + silu_flops + hadamard_flops
+
+    def save_weights(self):
+        for block in self.spectral_ssm.hidden:
+            block.stu.save_weights()
 
     def predict_states(
         self,

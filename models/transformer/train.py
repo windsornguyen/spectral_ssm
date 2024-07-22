@@ -359,7 +359,7 @@ def main() -> None:
 
     # General training hyperparameters
     training_stu = False
-    num_epochs: int = 3
+    num_epochs: int = 1
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
     dilation: int = 1
