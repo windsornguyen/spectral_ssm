@@ -444,26 +444,37 @@ class ResidualSTUs(nn.Module):
                 'norm1': RMSNorm(configs.n_embd),
                 'norm2': RMSNorm(configs.n_embd)
             }))
+        
+        self.output_proj = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        cumulative_preds = torch.zeros_like(inputs)
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+        cumulative_preds = torch.zeros_like(targets)
+        individual_preds = []
+        residuals = []
 
-        for pair in  self.stu_mlp_pairs:
+        for i, pair in enumerate(self.stu_mlp_pairs):
             # STU
-            residual = inputs
-            x = pair['norm1'](inputs)
-            x = pair['stu'](x)
-            x = x + residual
-
-            # MLP
-            residual = x
-            x = pair['norm2'](x)
-            x = pair['mlp'](x)
-            x = x + residual
+            stu_in = pair['norm1'](inputs)
+            stu_out = pair['stu'](stu_in)
             
-            cumulative_preds += x
+            # MLP
+            mlp_in = pair['norm2'](stu_out)
+            mlp_out = pair['mlp'](mlp_in)
+            
+            # Project to output space
+            y_hat = self.output_proj(mlp_out)
+            
+            cumulative_preds += y_hat
+            individual_preds.append(y_hat)
+            
+            # Calculate residual for this STU
+            if i == 0:
+                residual = targets - y_hat
+            else:
+                residual = residuals[-1] - y_hat
+            residuals.append(residual)
 
-        return cumulative_preds
+        return cumulative_preds, individual_preds, residuals
 
 class Block(nn.Module):
     """
@@ -550,7 +561,6 @@ class SpectralSSM(nn.Module):
                     ) for _ in range(self.n_layers)]),
             )
         )
-        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
         self.m_x = self.n_embd**-0.5
@@ -573,20 +583,41 @@ class SpectralSSM(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        x = self.input_proj(inputs)
-        x = self.spectral_ssm.dropout(x)
-        for residual_stus in self.spectral_ssm.hidden:
-            x = residual_stus(x)
-        preds = self.output_proj(x)
+        x = inputs
+        total_loss = 0
+        all_individual_preds = []
+        all_residuals = []
 
+        for layer in self.spectral_ssm.hidden:
+            x, individual_preds, residuals = layer(x, targets)
+            all_individual_preds.extend(individual_preds)
+            all_residuals.extend(residuals)
+
+            # Calculate loss for this layer
+            layer_loss = 0
+            for i, (pred, residual) in enumerate(zip(individual_preds, residuals)):
+                if i == 0:
+                    if self.controls["task"] != "mujoco-v3":
+                        loss, metrics = self.loss_fn(pred, targets)
+                        layer_loss += loss
+                    else:
+                        layer_loss += self.loss_fn(pred, targets)
+                else:
+                    if self.controls["task"] != "mujoco-v3":
+                        loss, metrics = self.loss_fn(pred, residual)
+                        layer_loss += loss
+                    else:
+                        layer_loss += self.loss_fn(pred, residual)
+            total_loss += layer_loss
+
+        # Final loss is the sum of all layer losses plus the loss of the final cumulative prediction
         if self.controls["task"] != "mujoco-v3":
-            loss, metrics = (
-                self.loss_fn(preds, targets) if targets is not None else (None, None)
-            )
-            return preds, (loss, metrics)
+            loss, metrics = self.loss_fn(x, targets)
+            final_loss = total_loss + loss
+            return x, (final_loss, metrics)
         else:
-            loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, loss
+            final_loss = total_loss + self.loss_fn(x, targets)
+            return x, final_loss
 
     def _init_weights(self, module):
         """

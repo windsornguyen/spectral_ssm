@@ -137,7 +137,7 @@ class Experiment:
         #         )
 
         # Add parameter groups for STU-MLP pairs with decreasing learning rates
-        stu_lr_multipliers = [1.0, 0.7, 0.4, 0.1]  # Adjust as needed
+        stu_lr_multipliers = [1.0, 1.0, 1.0, 1.0]  # Adjust as needed
         for pair_index, params in stu_mlp_params.items():
             multiplier = stu_lr_multipliers[pair_index] if pair_index < len(stu_lr_multipliers) else stu_lr_multipliers[-1]
             param_groups.append({
@@ -322,7 +322,7 @@ class Experiment:
                     self.max_lr,
                     self.min_lr,
                 )
-                stu_multiplier = [1.0, 0.7, 0.4, 0.1][pair_index] if pair_index < 4 else 0.1
+                stu_multiplier = [1.0, 1.0, 1.0, 1.0][pair_index] if pair_index < 4 else 0.1
                 param_group["lr"] = stu_base_lr * stu_multiplier
             else:
                 param_group["lr"] = self.get_lr(
