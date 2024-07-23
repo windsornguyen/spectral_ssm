@@ -9,6 +9,7 @@ import math
 import os
 import csv
 import time
+import copy
 
 import torch
 import torch.nn as nn
@@ -47,6 +48,7 @@ class SpectralSSMConfigs:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
+    num_stu_mlp_pairs: int = 3
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -427,6 +429,41 @@ class SimpleGatedMoe(nn.Module):
 
         return output
 
+class ResidualSTUs(nn.Module):
+    def __init__(self, configs, sigma, V, padded_sl):
+        super(ResidualSTUs, self).__init__()
+        self.n_embd = configs.n_embd
+        self.d_proj = configs.d_proj
+        self.k = configs.num_stu_mlp_pairs
+
+        self.stu_mlp_pairs = nn.ModuleList()
+        for _ in range(self.k):
+            self.stu_mlp_pairs.append(nn.ModuleDict({
+                'stu': STU(configs, sigma, V, padded_sl),
+                'mlp': MLP(configs),
+                'norm1': RMSNorm(configs.n_embd),
+                'norm2': RMSNorm(configs.n_embd)
+            }))
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        cumulative_preds = torch.zeros_like(inputs)
+
+        for pair in  self.stu_mlp_pairs:
+            # STU
+            residual = inputs
+            x = pair['norm1'](inputs)
+            x = pair['stu'](x)
+            x = x + residual
+
+            # MLP
+            residual = x
+            x = pair['norm2'](x)
+            x = pair['mlp'](x)
+            x = x + residual
+            
+            cumulative_preds += x
+
+        return cumulative_preds
 
 class Block(nn.Module):
     """
@@ -508,7 +545,7 @@ class SpectralSSM(nn.Module):
             dict(
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
-                    [Block(
+                    [ResidualSTUs(
                         self.configs, self.sigma, self.V, self.padded_sl
                     ) for _ in range(self.n_layers)]),
             )
@@ -538,8 +575,8 @@ class SpectralSSM(nn.Module):
         """
         x = self.input_proj(inputs)
         x = self.spectral_ssm.dropout(x)
-        for block in self.spectral_ssm.hidden:
-            x = block(x)
+        for residual_stus in self.spectral_ssm.hidden:
+            x = residual_stus(x)
         preds = self.output_proj(x)
 
         if self.controls["task"] != "mujoco-v3":

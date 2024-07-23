@@ -1,5 +1,5 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen
+# Authors: Windsor Nguyen, Isabel Liu
 # File: experiment.py
 # ==============================================================================#
 
@@ -96,39 +96,56 @@ class Experiment:
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         param_groups = []
         m_y_params = []
-        stu_params = {f"stu_{i}": [] for i in range(1, 5)}
+        # stu_params = {f"stu_{i}": [] for i in range(1, 5)}
+        stu_mlp_params = {}
         default_params = []
 
-        # Define different learning rates for each STU
-        stu_lr_multipliers = {
-            "stu_1": 1.0,
-            "stu_2": 0.7,
-            "stu_3": 0.4,
-            "stu_4": 0.1,
-        }
+        # # Define different learning rates for each STU
+        # stu_lr_multipliers = {
+        #     "stu_1": 1.0,
+        #     "stu_2": 0.7,
+        #     "stu_3": 0.4,
+        #     "stu_4": 0.1,
+        # }
 
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name.startswith("m_y"):
                     m_y_params.append(param)
-                elif any(f"stu_{i}" in name for i in range(1, 5)):
-                    stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
-                    stu_params[f"stu_{stu_number}"].append(param)
+                # elif any(f"stu_{i}" in name for i in range(1, 5)):
+                #     stu_number = next(i for i in range(1, 5) if f"stu_{i}" in name)
+                #     stu_params[f"stu_{stu_number}"].append(param)
+                elif "stu_mlp_pairs" in name:
+                    pair_index = int(name.split('.')[2])  
+                    if pair_index not in stu_mlp_params:
+                        stu_mlp_params[pair_index] = []
+                    stu_mlp_params[pair_index].append(param)
                 else:
                     default_params.append(param)
 
-        # Add parameter groups for STUs with their specific learning rates
-        for stu_name, params in stu_params.items():
-            if params:
-                stu_lr = lr * stu_lr_multipliers[stu_name]
-                param_groups.append(
-                    {
-                        "name": stu_name,
-                        "params": params,
-                        "lr": stu_lr,
-                        "weight_decay": weight_decay,
-                    }
-                )
+        # # Add parameter groups for STUs with their specific learning rates
+        # for stu_name, params in stu_params.items():
+        #     if params:
+        #         stu_lr = lr * stu_lr_multipliers[stu_name]
+        #         param_groups.append(
+        #             {
+        #                 "name": stu_name,
+        #                 "params": params,
+        #                 "lr": stu_lr,
+        #                 "weight_decay": weight_decay,
+        #             }
+        #         )
+
+        # Add parameter groups for STU-MLP pairs with decreasing learning rates
+        stu_lr_multipliers = [1.0, 0.7, 0.4, 0.1]  # Adjust as needed
+        for pair_index, params in stu_mlp_params.items():
+            multiplier = stu_lr_multipliers[pair_index] if pair_index < len(stu_lr_multipliers) else stu_lr_multipliers[-1]
+            param_groups.append({
+                "name": f"stu_mlp_pair_{pair_index}",
+                "params": params,
+                "lr": lr * multiplier,
+                "weight_decay": weight_decay
+            })
 
         # Add parameter groups for m_y and default params
         if m_y_params:
@@ -170,9 +187,7 @@ class Experiment:
                     Colors.HEADER,
                 )
 
-            lr_reports = []
-            for param_group in param_groups:
-                lr_reports.append(f"{param_group['name']}: {param_group['lr']:.6f}")
+            lr_reports = [f"{group['name']}: {group['lr']:.6f}" for group in param_groups]
             lr_report = "Learning Rates: " + " | ".join(lr_reports)
             colored_print(lr_report, Colors.OKCYAN)
 
@@ -283,7 +298,23 @@ class Experiment:
                     self.m_y_learning_rate,
                     self.min_lr,
                 )
-            elif param_group["name"].startswith("stu_"):
+            # elif param_group["name"].startswith("stu_"):
+            #     stu_base_lr = self.get_lr(
+            #         relative_step,
+            #         self.warmup_steps,
+            #         self.num_steps,
+            #         self.max_lr,
+            #         self.min_lr,
+            #     )
+            #     stu_multiplier = {
+            #         "stu_1": 1.0,
+            #         "stu_2": 0.7,
+            #         "stu_3": 0.4,
+            #         "stu_4": 0.1,
+            #     }[param_group["name"]]
+            #     param_group["lr"] = stu_base_lr * stu_multiplier
+            elif param_group["name"].startswith("stu_mlp_pair_"):
+                pair_index = int(param_group["name"].split('_')[-1])
                 stu_base_lr = self.get_lr(
                     relative_step,
                     self.warmup_steps,
@@ -291,12 +322,7 @@ class Experiment:
                     self.max_lr,
                     self.min_lr,
                 )
-                stu_multiplier = {
-                    "stu_1": 1.0,
-                    "stu_2": 0.7,
-                    "stu_3": 0.4,
-                    "stu_4": 0.1,
-                }[param_group["name"]]
+                stu_multiplier = [1.0, 0.7, 0.4, 0.1][pair_index] if pair_index < 4 else 0.1
                 param_group["lr"] = stu_base_lr * stu_multiplier
             else:
                 param_group["lr"] = self.get_lr(

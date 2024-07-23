@@ -209,6 +209,7 @@ def main() -> None:
         use_ar_y=use_ar_y,
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
+        num_stu_mlp_pairs=3,
 
         # MoE
         moe=moe,
