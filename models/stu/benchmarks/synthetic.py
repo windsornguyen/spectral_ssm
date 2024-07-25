@@ -79,38 +79,42 @@ def generate_copy(
         The total length of the input sequence is 2*copy_len + blank_len.
         The total length of the output sequence is blank_len + copy_len.
     """
-    # Assign characters.
+    # Assign characters
     copy_chars = torch.arange(num_categories - 2)
     blank_char = num_categories - 2
     delim_char = num_categories - 1
 
-    # Set random seed.
+    # Set random seed
     torch.manual_seed(seed)
 
-    # Construct input sequences.
+    # Construct input sequences
     to_copy = torch.randint(0, len(copy_chars), (num_examples, copy_len))
     blank = torch.full((num_examples, blank_len - 1), blank_char)
     delim = torch.full((num_examples, 1), delim_char)
     to_fill = torch.full((num_examples, copy_len), blank_char)
 
     if selective:
+        def insert_blanks(row):
+            insert_positions = torch.randperm(copy_len)[:blank_len - 1]
+            inserted = torch.full((copy_len + blank_len - 1,), blank_char)
+            mask = torch.ones(copy_len + blank_len - 1, dtype=torch.bool)
+            mask[insert_positions] = False
+            inserted[mask] = row
+            return inserted
 
-        def insert(row):
-            indices = torch.randperm(copy_len)[: blank_len - 1]
-            row[indices] = blank_char
-            return row
-
-        inputs = torch.stack([insert(row) for row in to_copy])
+        inputs = torch.stack([insert_blanks(row) for row in to_copy])
     else:
         inputs = torch.cat((to_copy, blank), dim=1)
+
     inputs = torch.cat((inputs, delim, to_fill), dim=1)
 
-    # Construct output sequences.
-    blank = torch.full((num_examples, blank_len + copy_len), blank_char)
-    outputs = torch.cat((blank, to_copy), dim=1)
+    # Construct output sequences
+    blank_output = torch.full((num_examples, blank_len + copy_len), blank_char)
+    outputs = torch.cat((blank_output, to_copy), dim=1)
 
-    # Construct dataset.
-    return TensorDataset(inputs, outputs)
+    # Construct dataset
+    dataset = TensorDataset(inputs, outputs)
+    return dataset
 
 def generate_adding(
     num_examples: int = 5,

@@ -21,8 +21,8 @@ from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment as exp
-from models.stu.model import SpectralSSM, SpectralSSMConfigs
+from utils import experiment_res as exp
+from models.stu.model import SpectralSSM, ResidualSTU, SpectralSSMConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
@@ -209,7 +209,7 @@ def main() -> None:
         use_ar_y=use_ar_y,
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
-        num_stu_mlp_pairs=3,
+        # num_stu_mlp_pairs=3,
 
         # MoE
         moe=moe,
@@ -221,7 +221,8 @@ def main() -> None:
         device=device,
     )
 
-    model = SpectralSSM(configs).to(device)
+    # model = SpectralSSM(configs).to(device)
+    model = ResidualSTU(configs, num_models=3).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
@@ -518,98 +519,98 @@ def main() -> None:
         if patient_counter >= patience:
             break
 
-    # Post-training processing
-    if main_process:
-        if best_checkpoint:
-            model_checkpoint, extra_info = best_checkpoint
-            best_model_path = os.path.join(checkpoint_dir, model_checkpoint)
-            best_model_extra_info_path = os.path.join(checkpoint_dir, extra_info)
+    # # Post-training processing
+    # if main_process:
+    #     if best_checkpoint:
+    #         model_checkpoint, extra_info = best_checkpoint
+    #         best_model_path = os.path.join(checkpoint_dir, model_checkpoint)
+    #         best_model_extra_info_path = os.path.join(checkpoint_dir, extra_info)
 
-            if dist.is_initialized():
-                # Load the best checkpoint on the main process and broadcast it to all processes
-                if main_process:
-                    # Load model state dict
-                    state_dict = load_file(best_model_path, device=rank)
-                    training_run.model.load_state_dict(state_dict)
+    #         if dist.is_initialized():
+    #             # Load the best checkpoint on the main process and broadcast it to all processes
+    #             if main_process:
+    #                 # Load model state dict
+    #                 state_dict = load_file(best_model_path, device=rank)
+    #                 training_run.model.load_state_dict(state_dict)
 
-                    # Load optimizer and other data
-                    other_data = torch.load(
-                        best_model_extra_info_path, map_location=f"cuda:{rank}"
-                    )
-                    training_run.optimizer.load_state_dict(other_data["optimizer"])
-                dist.barrier()
-            else:
-                # Load model state dict
-                state_dict = load_file(best_model_path, device="cpu")
-                training_run.model.load_state_dict(state_dict)
+    #                 # Load optimizer and other data
+    #                 other_data = torch.load(
+    #                     best_model_extra_info_path, map_location=f"cuda:{rank}"
+    #                 )
+    #                 training_run.optimizer.load_state_dict(other_data["optimizer"])
+    #             dist.barrier()
+    #         else:
+    #             # Load model state dict
+    #             state_dict = load_file(best_model_path, device="cpu")
+    #             training_run.model.load_state_dict(state_dict)
 
-                # Load optimizer and other data
-                other_data = torch.load(best_model_extra_info_path, map_location="cpu")
-                training_run.optimizer.load_state_dict(other_data["optimizer"])
+    #             # Load optimizer and other data
+    #             other_data = torch.load(best_model_extra_info_path, map_location="cpu")
+    #             training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-            print(
-                "\nLyla: Here's the best model information for the spectral SSM model:"
-            )
-            print(f"    Best model at step {best_model_step}")
-            print(f"    Best model validation loss: {best_val_loss:.4f}")
-            print(f"    Best model checkpoint saved at: {best_model_path}")
-            print(f"    Best other data saved at: {best_model_extra_info_path}")
+    #         print(
+    #             "\nLyla: Here's the best model information for the spectral SSM model:"
+    #         )
+    #         print(f"    Best model at step {best_model_step}")
+    #         print(f"    Best model validation loss: {best_val_loss:.4f}")
+    #         print(f"    Best model checkpoint saved at: {best_model_path}")
+    #         print(f"    Best other data saved at: {best_model_extra_info_path}")
 
-            # Save the training details to a file
-            training_details = f"training_details_sssm_{timestamp}.txt"
-            with open(training_details, "w") as f:
-                f.write(
-                    f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
-                )
-                f.write(f"Best model step: {best_model_step}\n")
-                f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
-                f.write(f"Best model checkpoint saved at: {best_model_path}\n")
-                f.write(
-                    f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
-                )
-            print(
-                f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
-            )
-        else:
-            colored_print(
-                "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
-                Colors.WARNING,
-            )
+    #         # Save the training details to a file
+    #         training_details = f"training_details_sssm_{timestamp}.txt"
+    #         with open(training_details, "w") as f:
+    #             f.write(
+    #                 f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
+    #             )
+    #             f.write(f"Best model step: {best_model_step}\n")
+    #             f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
+    #             f.write(f"Best model checkpoint saved at: {best_model_path}\n")
+    #             f.write(
+    #                 f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
+    #             )
+    #         print(
+    #             f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
+    #         )
+    #     else:
+    #         colored_print(
+    #             "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
+    #             Colors.WARNING,
+    #         )
 
-        # Save the final results
-        if main_process:
-            save_results(args.task, controller, train_losses, "train_losses", timestamp)
-            save_results(
-                args.task,
-                controller,
-                val_losses,
-                "val_losses",
-                timestamp,
-            )
-            save_results(
-                args.task, controller, val_time_steps, "val_time_steps", timestamp
-            )
-            save_results(args.task, controller, grad_norms, "grad_norms", timestamp)
+    #     # Save the final results
+    #     if main_process:
+    #         save_results(args.task, controller, train_losses, "train_losses", timestamp)
+    #         save_results(
+    #             args.task,
+    #             controller,
+    #             val_losses,
+    #             "val_losses",
+    #             timestamp,
+    #         )
+    #         save_results(
+    #             args.task, controller, val_time_steps, "val_time_steps", timestamp
+    #         )
+    #         save_results(args.task, controller, grad_norms, "grad_norms", timestamp)
 
-            if not task["mujoco-v3"]:
-                for metric, losses in metric_losses.items():
-                    save_results(args.task, controller, losses, metric, timestamp)
+    #         if not task["mujoco-v3"]:
+    #             for metric, losses in metric_losses.items():
+    #                 save_results(args.task, controller, losses, metric, timestamp)
 
-            colored_print(
-                "Lyla: It was a pleasure assisting you. Until next time!",
-                Colors.OKGREEN,
-            )
+    #         colored_print(
+    #             "Lyla: It was a pleasure assisting you. Until next time!",
+    #             Colors.OKGREEN,
+    #         )
 
     # if main_process:
     #     colored_print("Generating loss landscape...", Colors.HEADER)
     #     landscape_output_path = os.path.join(
     #         landscape_dir, f"loss_landscape_{timestamp}.pt"
     #     )
-    #     landscape_data = training_run.generate_loss_landscape(
+    #     generated_landscape = training_run.generate_loss_landscape(
     #         train_loader, landscape_output_path
     #     )
     #     training_run.save_loss_landscape(
-    #         landscape_data, 
+    #         generated_landscape, 
     #         landscape_output_path,
     #         convert_to_vtk=True, 
     #         surf_name="train_loss", 

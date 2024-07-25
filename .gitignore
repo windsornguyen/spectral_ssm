@@ -28,6 +28,7 @@ plots/
 *.png
 *.jpg
 *.pth
+*.vtp
 training_details.txt
 *.out
 

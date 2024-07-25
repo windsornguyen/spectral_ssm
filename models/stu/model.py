@@ -48,7 +48,7 @@ class SpectralSSMConfigs:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
-    num_stu_mlp_pairs: int = 3
+    # num_stu_mlp_pairs: int = 3
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -429,52 +429,58 @@ class SimpleGatedMoe(nn.Module):
 
         return output
 
-class ResidualSTUs(nn.Module):
-    def __init__(self, configs, sigma, V, padded_sl):
-        super(ResidualSTUs, self).__init__()
-        self.n_embd = configs.n_embd
-        self.d_proj = configs.d_proj
-        self.k = configs.num_stu_mlp_pairs
+class ResidualSTU(nn.Module):
+    def __init__(self, configs, num_models=3):
+        super(ResidualSTU, self).__init__()
+        self.configs = configs
+        self.loss_fn = configs.loss_fn
+        self.models = nn.ModuleList([SpectralSSM(configs) for _ in range(num_models)])
+        self.num_models = num_models
 
-        self.stu_mlp_pairs = nn.ModuleList()
-        for _ in range(self.k):
-            self.stu_mlp_pairs.append(nn.ModuleDict({
-                'stu': STU(configs, sigma, V, padded_sl),
-                'mlp': MLP(configs),
-                'norm1': RMSNorm(configs.n_embd),
-                'norm2': RMSNorm(configs.n_embd)
-            }))
-        
-        self.output_proj = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = targets
+        all_preds = []
+        all_losses = []
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
-        cumulative_preds = torch.zeros_like(targets)
-        individual_preds = []
-        residuals = []
-
-        for i, pair in enumerate(self.stu_mlp_pairs):
-            # STU
-            stu_in = pair['norm1'](inputs)
-            stu_out = pair['stu'](stu_in)
+        for i, model in enumerate(self.models):
+            self.freeze_previous_models(i)
+            preds, loss_info = model(inputs, residual)
+            all_preds.append(preds)
             
-            # MLP
-            mlp_in = pair['norm2'](stu_out)
-            mlp_out = pair['mlp'](mlp_in)
-            
-            # Project to output space
-            y_hat = self.output_proj(mlp_out)
-            
-            cumulative_preds += y_hat
-            individual_preds.append(y_hat)
-            
-            # Calculate residual for this STU
-            if i == 0:
-                residual = targets - y_hat
+            if isinstance(loss_info, tuple):
+                loss, *step_metrics = loss_info
             else:
-                residual = residuals[-1] - y_hat
-            residuals.append(residual)
+                loss = loss_info
+            all_losses.append(loss)
+            if loss.requires_grad:
+                loss.backward(retain_graph=True)
+            residual = residual - preds.detach()
+            # print(residual)
 
-        return cumulative_preds, individual_preds, residuals
+        final_preds = sum(all_preds)
+        # final_losses = sum(all_losses)
+
+        final_loss_info = self.loss_fn(final_preds, targets)
+        if isinstance(final_loss_info, tuple):
+            final_loss, *step_metrics = final_loss_info
+        else:
+            final_loss = final_loss_info
+
+        self.unfreeze_all_models()
+        # if final_loss.requires_grad:
+        #     final_loss.backward(retain_graph=True)
+
+        return final_preds, final_loss
+
+    def freeze_previous_models(self, current_model_index):
+        for i in range(current_model_index):
+            for param in self.models[i].parameters():
+                param.requires_grad = False
+
+    def unfreeze_all_models(self):
+       for model in self.models:
+            for param in model.parameters():
+                param.requires_grad = True
 
 class Block(nn.Module):
     """
@@ -489,10 +495,9 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
-        self.rn_2 = RMSNorm(configs.n_embd)
-        # self.stu = STU(configs, sigma, V, padded_sl)
-        self.stu = ExponentialLookbackMoE(configs, sigma, V, padded_sl)
+        self.rn = RMSNorm(configs.n_embd)
+        self.stu = STU(configs, sigma, V, padded_sl)
+        # self.stu = ExponentialLookbackMoE(configs, sigma, V, padded_sl)
 
         self.mlp = (
             MoE(
@@ -515,8 +520,8 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp(self.rn_2(x))
+        x = x + self.stu(self.rn(x))
+        x = x + self.mlp(x)
         return x + z
 
 
@@ -556,11 +561,12 @@ class SpectralSSM(nn.Module):
             dict(
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
-                    [ResidualSTUs(
+                    [Block(
                         self.configs, self.sigma, self.V, self.padded_sl
                     ) for _ in range(self.n_layers)]),
             )
         )
+        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=self.bias)
 
         # Initialize all weights
         self.m_x = self.n_embd**-0.5
@@ -570,7 +576,7 @@ class SpectralSSM(nn.Module):
         # Report the number of parameters
         print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
 
-    def forward(self, inputs, targets):
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of the spectral SSM model.
 
@@ -581,43 +587,22 @@ class SpectralSSM(nn.Module):
         Returns:
             Type (ignore due to high variability):
             - Predictions tensor
-            - Tuple containing loss and metrics (if applicable)
+            - tuple containing loss and metrics (if applicable)
         """
-        x = inputs
-        total_loss = 0
-        all_individual_preds = []
-        all_residuals = []
+        x = self.input_proj(inputs)
+        x = self.spectral_ssm.dropout(x)
+        for block in self.spectral_ssm.hidden:
+            x = block(x)
+        preds = self.output_proj(x)
 
-        for layer in self.spectral_ssm.hidden:
-            x, individual_preds, residuals = layer(x, targets)
-            all_individual_preds.extend(individual_preds)
-            all_residuals.extend(residuals)
-
-            # Calculate loss for this layer
-            layer_loss = 0
-            for i, (pred, residual) in enumerate(zip(individual_preds, residuals)):
-                if i == 0:
-                    if self.controls["task"] != "mujoco-v3":
-                        loss, metrics = self.loss_fn(pred, targets)
-                        layer_loss += loss
-                    else:
-                        layer_loss += self.loss_fn(pred, targets)
-                else:
-                    if self.controls["task"] != "mujoco-v3":
-                        loss, metrics = self.loss_fn(pred, residual)
-                        layer_loss += loss
-                    else:
-                        layer_loss += self.loss_fn(pred, residual)
-            total_loss += layer_loss
-
-        # Final loss is the sum of all layer losses plus the loss of the final cumulative prediction
         if self.controls["task"] != "mujoco-v3":
-            loss, metrics = self.loss_fn(x, targets)
-            final_loss = total_loss + loss
-            return x, (final_loss, metrics)
+            loss, metrics = (
+                self.loss_fn(preds, targets) if targets is not None else (None, None)
+            )
+            return preds, (loss, metrics)
         else:
-            final_loss = total_loss + self.loss_fn(x, targets)
-            return x, final_loss
+            loss = self.loss_fn(preds, targets) if targets is not None else None
+            return preds, loss
 
     def _init_weights(self, module):
         """

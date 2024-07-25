@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen
+# Authors: Windsor Nguyen, Isabel Liu
 # File: benchmark.py
 # =============================================================================#
 
@@ -136,7 +136,7 @@ def get_model(args, device):
         d_in=args.num_categories,
         d_out=args.num_categories,
         d_proj=args.num_categories,
-        sl=2 * args.copy_len + args.blank_len,
+        sl=args.sl,
         scale=args.scale,
         bias=args.bias,
         dropout=args.dropout,
