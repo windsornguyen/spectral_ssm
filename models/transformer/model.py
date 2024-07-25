@@ -147,7 +147,6 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = self.rn_1(x) if not self.configs.dilated_attn else x
         x = x + self.attn(x)
         x = x + self.ffn_1(self.rn_2(x))
         return x

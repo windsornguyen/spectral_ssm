@@ -5,6 +5,7 @@
 
 """Synthetic long-context datasets."""
 
+import numpy as np
 import torch
 from torch.utils.data import TensorDataset
 
@@ -112,9 +113,7 @@ def generate_copy(
     blank_output = torch.full((num_examples, blank_len + copy_len), blank_char)
     outputs = torch.cat((blank_output, to_copy), dim=1)
 
-    # Construct dataset
-    dataset = TensorDataset(inputs, outputs)
-    return dataset
+    return TensorDataset(inputs, outputs)
 
 def generate_adding(
     num_examples: int = 5,
@@ -208,7 +207,7 @@ def generate_induction_heads(
     inputs[torch.arange(num_examples), idx] = special
 
     # Place special token at the end of the sequence.
-    inputs[torch.arange(num_examples), -1] = special
+    inputs[:, -1] = special
 
     outputs = inputs[torch.arange(num_examples), idx + 1]
 
@@ -243,37 +242,183 @@ def generate_associative_recall(
     Returns:
       A PyTorch dataset.
     """
-    # Set random seed.
-    torch.manual_seed(seed)
-
-    sequence_len = (sequence_len // 2) * 2
-    idx = torch.randint(0, vocab_size, (num_examples, sequence_len))
+    rng = np.random.default_rng(seed=seed)
+    idx = rng.choice(vocab_size, (num_examples, sequence_len // 2), replace=True)
 
     def get_assoc(start: int, end: int):
         # Range of values
-        x = torch.arange(start, end)
+        x = np.arange(start, end)
 
         # Make num_examples copies.
-        x = x.repeat(num_examples, 1)
+        x = np.tile(x, (num_examples, 1))
 
         # Shuffle each row independently.
-        x = x[torch.randperm(x.size(0)), :]
+        x = rng.permuted(x, axis=1)
 
         # Grab the corresponding indices
-        return x[torch.arange(num_examples).unsqueeze(1), idx]
+        return np.take(x, idx)
 
     keys = get_assoc(0, vocab_size)
     vals = get_assoc(vocab_size, 2 * vocab_size)
 
     # Interleave keys and values by row.
-    inputs = torch.zeros((num_examples, sequence_len), dtype=keys.dtype)
+    inputs = np.zeros((num_examples, sequence_len), dtype=keys.dtype)
     inputs[:, 0::2] = keys
     inputs[:, 1::2] = vals
 
     # Get key we want to find associated value for.
-    idx = torch.randint(0, vocab_size, (num_examples,))
-    keys = keys[torch.arange(num_examples), idx].unsqueeze(1)
-    inputs = torch.cat((inputs, keys), dim=1)
-    outputs = vals[torch.arange(num_examples), idx]
-
+    idx = rng.choice(vocab_size, num_examples, replace=True)
+    keys = np.expand_dims(keys[np.arange(num_examples), idx], axis=1)
+    inputs = np.hstack((inputs, keys))
+    outputs = vals[np.arange(num_examples), idx].squeeze()
+    inputs = torch.from_numpy(inputs)
+    outputs = torch.from_numpy(outputs)
     return TensorDataset(inputs, outputs)
+
+def generate_multi_scale_adaptive(
+    num_examples: int = 5,
+    sequence_len: int = 1000,
+    num_regimes: int = 3,
+    noise_level: float = 0.1,
+    seed: int = 0,
+) -> TensorDataset:
+    """
+    Generates a multi-scale adaptive learning task with switching linear
+    dynamical systems.
+
+    This task tests the model's ability to recognize patterns at different scales
+    and adapt to changing rules. The sequence switches between different linear
+    dynamical systems, with added noise.
+
+    Args:
+        num_examples: Number of examples to generate.
+        sequence_len: Length of each sequence.
+        num_regimes: Number of different LDS regimes to switch between.
+        noise_level: Standard deviation of the Gaussian noise to add.
+        seed: Seed for random number generator.
+
+    Returns:
+        A PyTorch dataset with inputs and targets.
+    """
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+    A_matrices = [np.random.randn(2, 2) for _ in range(num_regimes)]
+
+    inputs = []
+    targets = []
+
+    for _ in range(num_examples):
+        x = np.zeros((sequence_len, 2))
+        x[0] = np.random.randn(2)
+
+        # Randomly assign regime changes
+        regime_changes = np.sort(np.random.choice(sequence_len, num_regimes - 1, replace=False))
+        current_regime = 0
+
+        for t in range(1, sequence_len):
+            if t in regime_changes:
+                current_regime += 1
+            x[t] = A_matrices[current_regime] @ x[t-1] + np.random.normal(0, noise_level, 2)
+
+        inputs.append(x[:-1])
+        targets.append(x[1:])
+    
+    inputs = torch.tensor(np.array(inputs, dtype=np.float32))
+    targets = torch.tensor(np.array(targets, dtype=np.float32))
+
+    return TensorDataset(inputs, targets)
+
+def generate_needle_in_haystack(
+    num_examples: int = 5,
+    sequence_len: int = 1000,
+    needle_len: int = 5,
+    vocab_size: int = 100,
+    seed: int = 0,
+) -> TensorDataset:
+    """
+    Generates a needle-in-a-haystack retrieval task.
+
+    This task tests the model's ability to find and remember a specific short
+    sequence (the needle) within a much longer sequence (the haystack).
+
+    Args:
+        num_examples: Number of examples to generate.
+        sequence_len: Length of each sequence (haystack).
+        needle_len: Length of the sequence to be found (needle).
+        vocab_size: Size of the vocabulary.
+        seed: Seed for random number generator.
+
+    Returns:
+        A PyTorch dataset with inputs and targets.
+    """
+    torch.manual_seed(seed)
+
+    inputs = torch.randint(0, vocab_size, (num_examples, sequence_len))
+    needles = torch.randint(0, vocab_size, (num_examples, needle_len))
+
+    # Insert needles at random positions
+    for i in range(num_examples):
+        start_pos = torch.randint(0, sequence_len - needle_len, (1,))
+        inputs[i, start_pos:start_pos+needle_len] = needles[i]
+    
+    # Target is the position of the needle
+    targets = torch.zeros(num_examples, dtype=torch.long)
+    for i in range(num_examples):
+        for j in range(sequence_len - needle_len + 1):
+            if torch.all(inputs[i, j:j+needle_len] == needles[i]):
+                targets[i] = j
+                break
+    
+    return TensorDataset(inputs, targets)
+
+def generate_telephone_book(
+    num_examples: int = 5,
+    num_entries: int = 100,
+    name_len: int = 10,
+    number_len: int = 10,
+    vocab_size: int = 26,
+    seed: int = 0,
+) -> TensorDataset:
+    """
+    Generate a telephone book-like task.
+
+    This task tests the model's ability to remember and recall specific key-value
+    pairs from a large set, similar to looking up a number in a telephone book.
+
+    Args:
+        num_examples: Number of examples to generate.
+        num_entries: Number of key-value pairs in each "book".
+        name_len: Length of each name (key).
+        vocab_size: Size of the vocabulary for names.
+        seed: Seed for random number generator.
+    
+    Returns:
+        A PyTorch dataset with inputs and targets.
+    """
+    torch.manual_seed(seed)
+
+    # Generate the names (keys)
+    names = torch.randint(0, vocab_size, (num_examples, num_entries, name_len))
+
+    # Generate numbers (values)
+    numbers = torch.randint(0, 10, (num_examples, num_entries, number_len))
+
+    # Combine names and numbers
+    book = torch.cat((names, numbers), dim=2)
+
+    # Shuffle each book
+    for i in range(num_examples):
+        book[i] = book[i][torch.randperm(num_entries)]
+
+    # Choose a random entry to query
+    query_indices = torch.randint(0, num_entries, (num_examples,))
+    queries = names[torch.arange(num_examples), query_indices]
+
+    # Combine book and query
+    inputs = torch.cat((book.view(num_examples, -1), queries), dim=1)
+
+    # Target is the corresponding number
+    targets = numbers[torch.arange(num_examples), query_indices]
+
+    return TensorDataset(inputs, targets)
