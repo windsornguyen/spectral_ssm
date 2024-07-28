@@ -10,6 +10,7 @@ import os
 import csv
 import time
 import copy
+import random
 
 import torch
 import torch.nn as nn
@@ -49,6 +50,7 @@ class SpectralSSMConfigs:
     use_ar_u: bool = False
     use_hankel_L: bool = False
     # num_stu_mlp_pairs: int = 3
+    num_models: int = 3
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -430,20 +432,28 @@ class SimpleGatedMoe(nn.Module):
         return output
 
 class ResidualSTU(nn.Module):
-    def __init__(self, configs, num_models=3):
+    def __init__(self, configs):
         super(ResidualSTU, self).__init__()
         self.configs = configs
         self.loss_fn = configs.loss_fn
-        self.models = nn.ModuleList([SpectralSSM(configs) for _ in range(num_models)])
-        self.num_models = num_models
+        self.num_models = configs.num_models
+        self.soft_detach_factor = 0.9
+        self.l2_reg_factor = 0.01
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # TODO: Initialize each sub-model with a different random seed
+        self.models = nn.ModuleList()
+        for i in range(self.num_models):
+            seed = random.randint(0, 2**32 - 1)  # Generate a random seed
+            torch.manual_seed(seed)
+            self.models.append(SpectralSSM(configs))
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, list, list]]:
         residual = targets
         all_preds = []
         all_losses = []
+        individual_metrics = []
 
         for i, model in enumerate(self.models):
-            self.freeze_previous_models(i)
             preds, loss_info = model(inputs, residual)
             all_preds.append(preds)
             
@@ -451,36 +461,30 @@ class ResidualSTU(nn.Module):
                 loss, *step_metrics = loss_info
             else:
                 loss = loss_info
+                step_metrics = []
+            
+            # Add L2 regularization for later models: penalize large weights for more refined adjustments
+            if i > 0:
+                l2_reg = self.l2_reg_factor * sum((p**2).sum() for p in model.parameters())
+                loss += l2_reg
+
             all_losses.append(loss)
-            if loss.requires_grad:
-                loss.backward(retain_graph=True)
-            residual = residual - preds.detach()
-            # print(residual)
+            individual_metrics.append({
+                f"model_{i}_loss": loss.item(),
+                f"model_{i}_metrics": step_metrics
+            })
+            
+            # Soft detachment for residual computation
+            with torch.no_grad():
+                detached_preds = preds.detach()
+            residual = residual - (detached_preds * self.soft_detach_factor + preds * (1 - self.soft_detach_factor))
 
         final_preds = sum(all_preds)
-        # final_losses = sum(all_losses)
+        final_loss = self.loss_fn(final_preds, targets)
+        if isinstance(final_loss, tuple):
+            final_loss = final_loss[0]  # Extract the loss value if it's a tuple
 
-        final_loss_info = self.loss_fn(final_preds, targets)
-        if isinstance(final_loss_info, tuple):
-            final_loss, *step_metrics = final_loss_info
-        else:
-            final_loss = final_loss_info
-
-        self.unfreeze_all_models()
-        # if final_loss.requires_grad:
-        #     final_loss.backward(retain_graph=True)
-
-        return final_preds, final_loss
-
-    def freeze_previous_models(self, current_model_index):
-        for i in range(current_model_index):
-            for param in self.models[i].parameters():
-                param.requires_grad = False
-
-    def unfreeze_all_models(self):
-       for model in self.models:
-            for param in model.parameters():
-                param.requires_grad = True
+        return final_preds, (final_loss, all_losses, individual_metrics)
 
 class Block(nn.Module):
     """

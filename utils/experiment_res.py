@@ -1,9 +1,9 @@
 # ==============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu
-# File: experiment.py
+# Authors: Isabel Liu, Windsor Nguyen
+# File: experiment_res.py
 # ==============================================================================#
 
-"""Utilities for running an experiment."""
+"""Utilities for running an experiment for ResidualSTU."""
 
 import inspect
 import math
@@ -43,6 +43,7 @@ class Experiment:
         sl: int,
         optimizer_settings: tuple[int, int, float, float],
         training_stu: bool = False,
+        num_models: int = 3,
         world_size: int = 1,
         main_process: bool = False,
         device: torch.device = None,
@@ -74,6 +75,7 @@ class Experiment:
         self.bsz = bsz
         self.sl = sl
         self.main_process = main_process
+        self.num_models = num_models
         self.world_size = world_size
 
         # If training STU
@@ -81,7 +83,7 @@ class Experiment:
             self.m_y_learning_rate = 5e-5
             self.m_y_weight_decay = 0
 
-        self.lr_multipliers = [1.0, 0.7, 0.4]  # Adjust these values as needed
+        self.lr_multipliers = [1.0] * self.num_models  # Set all multipliers to 1.0 for fairness
         self.optimizer = self.get_optimizer(
             self.max_lr, self.betas, self.eps, self.weight_decay, self.use_amsgrad
         )
@@ -93,6 +95,16 @@ class Experiment:
         # self.total_time = 0
         # self.total_steps = 0
         # self.mfu_calculation_frequency = 100 # Estimate MFU every hundred steps.
+
+    def freeze_other_models(self, current_model_index):
+        for i, model in enumerate(self.model.models):
+            for param in model.parameters():
+                param.requires_grad = (i == current_model_index)
+
+    def unfreeze_all_models(self):
+        for model in self.model.models:
+            for param in model.parameters():
+                param.requires_grad = True
 
     def get_optimizer(self, lr, betas, eps, weight_decay, use_amsgrad):
         # # Print out the named parameters for each model just to make sure
@@ -233,32 +245,31 @@ class Experiment:
 
         inputs, targets = inputs.to(self.device), targets.to(self.device)
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            preds, loss = self.model(inputs, targets)
+            preds, (final_loss, all_losses, individual_metrics) = self.model(inputs, targets)
 
-        if self.world_size > 1:
-            dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+        final_loss.backward()
 
-        # Clip global norm of gradient at 1.0, per the GPT-3 paper
-        norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        for i, model in enumerate(self.model.models):
+            self.freeze_other_models(i)
+            
+            # Clip gradient norm for each model separately
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            # Update weights for this model
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+
+        self.unfreeze_all_models()
 
         # Update learning rates for each parameter group
         for param_group in self.optimizer.param_groups:
             if param_group["name"].startswith("model_"):
-                model_index = int(param_group["name"].split("_")[1])
                 param_group["lr"] = self.get_lr(
                     relative_step,
                     self.warmup_steps,
                     self.num_steps,
-                    self.max_lr * self.lr_multipliers[model_index],
-                    self.min_lr * self.lr_multipliers[model_index],
-                )
-            elif param_group["name"] == "m_y":
-                param_group["lr"] = self.get_lr(
-                    relative_step,
-                    self.warmup_steps,
-                    self.num_steps,
-                    self.m_y_learning_rate,
-                    self.min_lr,
+                    self.max_lr * self.lr_multipliers[int(param_group["name"].split("_")[1])],
+                    self.min_lr * self.lr_multipliers[int(param_group["name"].split("_")[1])]
                 )
             else:
                 param_group["lr"] = self.get_lr(
@@ -266,12 +277,9 @@ class Experiment:
                     self.warmup_steps,
                     self.num_steps,
                     self.max_lr,
-                    self.min_lr,
+                    self.min_lr
                 )
 
-        self.optimizer.step()
-
-        # Time how long this training step took
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         t1 = time()
@@ -280,20 +288,15 @@ class Experiment:
         toks_per_sec = toks_processed / dt
 
         metrics = {
-            "loss": loss.item(),
+            "loss": final_loss.item(),
             "grad_norm": norm.item(),
             "step_time": dt,
             "tokens_per_sec": toks_per_sec,
         }
 
-        # # Add additional metrics if available
-        # if isinstance(loss_info, dict):
-        #     metrics.update(
-        #         {
-        #             k: v.item() if isinstance(v, torch.Tensor) else v
-        #             for k, v in loss_info.items()
-        #         }
-        #     )
+        # Add individual model metrics
+        for i, model_metrics in enumerate(individual_metrics):
+            metrics.update({f"model_{i}_{k}": v for k, v in model_metrics.items()})
 
         return metrics
 

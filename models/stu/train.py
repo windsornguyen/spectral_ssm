@@ -157,6 +157,9 @@ def main() -> None:
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
+    # Residual-STU
+    num_models: int = 3
+
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
             loss_fn = AntLoss()
@@ -210,6 +213,7 @@ def main() -> None:
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
         # num_stu_mlp_pairs=3,
+        num_models=num_models,
 
         # MoE
         moe=moe,
@@ -222,7 +226,7 @@ def main() -> None:
     )
 
     # model = SpectralSSM(configs).to(device)
-    model = ResidualSTU(configs, num_models=3).to(device)
+    model = ResidualSTU(configs).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
@@ -362,6 +366,7 @@ def main() -> None:
         sl=sl,
         optimizer_settings=optimizer_settings,
         training_stu=training_stu,
+        num_models=num_models,  # parameter for ResidualSTU
         world_size=world_size,
         main_process=main_process,
         device=device,
@@ -487,6 +492,13 @@ def main() -> None:
             # Logging
             if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
+                colored_print(f"Final Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f}", Colors.OKBLUE)
+                
+                # Check if we're using ResidualSTU (which would have individual model metrics)
+                if isinstance(model, ResidualSTU):
+                    for i in range(model.num_models):
+                        if f'model_{i}_model_{i}_loss' in train_results:
+                            colored_print(f"Model {i} Loss: {train_results[f'model_{i}_model_{i}_loss']:.6f}", Colors.OKCYAN)
 
                 if "flops" in train_results:
                     flops = train_results["flops"]
@@ -519,87 +531,87 @@ def main() -> None:
         if patient_counter >= patience:
             break
 
-    # # Post-training processing
-    # if main_process:
-    #     if best_checkpoint:
-    #         model_checkpoint, extra_info = best_checkpoint
-    #         best_model_path = os.path.join(checkpoint_dir, model_checkpoint)
-    #         best_model_extra_info_path = os.path.join(checkpoint_dir, extra_info)
+    # Post-training processing
+    if main_process:
+        if best_checkpoint:
+            model_checkpoint, extra_info = best_checkpoint
+            best_model_path = os.path.join(checkpoint_dir, model_checkpoint)
+            best_model_extra_info_path = os.path.join(checkpoint_dir, extra_info)
 
-    #         if dist.is_initialized():
-    #             # Load the best checkpoint on the main process and broadcast it to all processes
-    #             if main_process:
-    #                 # Load model state dict
-    #                 state_dict = load_file(best_model_path, device=rank)
-    #                 training_run.model.load_state_dict(state_dict)
+            if dist.is_initialized():
+                # Load the best checkpoint on the main process and broadcast it to all processes
+                if main_process:
+                    # Load model state dict
+                    state_dict = load_file(best_model_path, device=rank)
+                    training_run.model.load_state_dict(state_dict)
 
-    #                 # Load optimizer and other data
-    #                 other_data = torch.load(
-    #                     best_model_extra_info_path, map_location=f"cuda:{rank}"
-    #                 )
-    #                 training_run.optimizer.load_state_dict(other_data["optimizer"])
-    #             dist.barrier()
-    #         else:
-    #             # Load model state dict
-    #             state_dict = load_file(best_model_path, device="cpu")
-    #             training_run.model.load_state_dict(state_dict)
+                    # Load optimizer and other data
+                    other_data = torch.load(
+                        best_model_extra_info_path, map_location=f"cuda:{rank}"
+                    )
+                    training_run.optimizer.load_state_dict(other_data["optimizer"])
+                dist.barrier()
+            else:
+                # Load model state dict
+                state_dict = load_file(best_model_path, device="cpu")
+                training_run.model.load_state_dict(state_dict)
 
-    #             # Load optimizer and other data
-    #             other_data = torch.load(best_model_extra_info_path, map_location="cpu")
-    #             training_run.optimizer.load_state_dict(other_data["optimizer"])
+                # Load optimizer and other data
+                other_data = torch.load(best_model_extra_info_path, map_location="cpu")
+                training_run.optimizer.load_state_dict(other_data["optimizer"])
 
-    #         print(
-    #             "\nLyla: Here's the best model information for the spectral SSM model:"
-    #         )
-    #         print(f"    Best model at step {best_model_step}")
-    #         print(f"    Best model validation loss: {best_val_loss:.4f}")
-    #         print(f"    Best model checkpoint saved at: {best_model_path}")
-    #         print(f"    Best other data saved at: {best_model_extra_info_path}")
+            print(
+                "\nLyla: Here's the best model information for the spectral SSM model:"
+            )
+            print(f"    Best model at step {best_model_step}")
+            print(f"    Best model validation loss: {best_val_loss:.4f}")
+            print(f"    Best model checkpoint saved at: {best_model_path}")
+            print(f"    Best other data saved at: {best_model_extra_info_path}")
 
-    #         # Save the training details to a file
-    #         training_details = f"training_details_sssm_{timestamp}.txt"
-    #         with open(training_details, "w") as f:
-    #             f.write(
-    #                 f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
-    #             )
-    #             f.write(f"Best model step: {best_model_step}\n")
-    #             f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
-    #             f.write(f"Best model checkpoint saved at: {best_model_path}\n")
-    #             f.write(
-    #                 f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
-    #             )
-    #         print(
-    #             f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
-    #         )
-    #     else:
-    #         colored_print(
-    #             "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
-    #             Colors.WARNING,
-    #         )
+            # Save the training details to a file
+            training_details = f"training_details_sssm_{timestamp}.txt"
+            with open(training_details, "w") as f:
+                f.write(
+                    f"Training completed for the spectral SSM on {args.task} with {controller} at: {datetime.now()}\n"
+                )
+                f.write(f"Best model step: {best_model_step}\n")
+                f.write(f"Best model validation loss: {best_val_loss:.4f}\n")
+                f.write(f"Best model checkpoint saved at: {best_model_path}\n")
+                f.write(
+                    f"Best model's extra info data saved at: {best_model_extra_info_path}\n"
+                )
+            print(
+                f"Lyla: Congratulations on completing the training run for the spectral SSM model! Details are saved in {training_details}."
+            )
+        else:
+            colored_print(
+                "\nLyla: No best checkpoint found for the spectral SSM model. The model did not improve during training.",
+                Colors.WARNING,
+            )
 
-    #     # Save the final results
-    #     if main_process:
-    #         save_results(args.task, controller, train_losses, "train_losses", timestamp)
-    #         save_results(
-    #             args.task,
-    #             controller,
-    #             val_losses,
-    #             "val_losses",
-    #             timestamp,
-    #         )
-    #         save_results(
-    #             args.task, controller, val_time_steps, "val_time_steps", timestamp
-    #         )
-    #         save_results(args.task, controller, grad_norms, "grad_norms", timestamp)
+        # Save the final results
+        if main_process:
+            save_results(args.task, controller, train_losses, "train_losses", timestamp)
+            save_results(
+                args.task,
+                controller,
+                val_losses,
+                "val_losses",
+                timestamp,
+            )
+            save_results(
+                args.task, controller, val_time_steps, "val_time_steps", timestamp
+            )
+            save_results(args.task, controller, grad_norms, "grad_norms", timestamp)
 
-    #         if not task["mujoco-v3"]:
-    #             for metric, losses in metric_losses.items():
-    #                 save_results(args.task, controller, losses, metric, timestamp)
+            if not task["mujoco-v3"]:
+                for metric, losses in metric_losses.items():
+                    save_results(args.task, controller, losses, metric, timestamp)
 
-    #         colored_print(
-    #             "Lyla: It was a pleasure assisting you. Until next time!",
-    #             Colors.OKGREEN,
-    #         )
+            colored_print(
+                "Lyla: It was a pleasure assisting you. Until next time!",
+                Colors.OKGREEN,
+            )
 
     # if main_process:
     #     colored_print("Generating loss landscape...", Colors.HEADER)

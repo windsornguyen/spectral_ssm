@@ -3,7 +3,7 @@
 # File: experiment.py
 # ==============================================================================#
 
-"""Utilities for running an experiment."""
+"""Utilities for running an experiment for Spectral SSM."""
 
 import inspect
 import math
