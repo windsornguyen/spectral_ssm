@@ -243,23 +243,55 @@ class Experiment:
         self.optimizer.zero_grad()
         t0 = time()
 
-        inputs, targets = inputs.to(self.device), targets.to(self.device)
+        inputs = inputs.to(self.device, dtype=torch.bfloat16)
+        targets = targets.to(self.device, dtype=torch.bfloat16)
+
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            preds, (final_loss, all_losses, individual_metrics) = self.model(inputs, targets)
+            final_preds, (all_preds, all_targets, individual_metrics) = self.model(inputs, targets)
 
-        final_loss.backward()
+        all_losses = []
+        all_norms = []
 
-        for i, model in enumerate(self.model.models):
-            self.freeze_other_models(i)
+        for i, (model, preds, model_targets) in enumerate(zip(self.model.models, all_preds, all_targets)):
+            # Ensure preds and model_targets are bfloat16
+            preds = preds.to(dtype=torch.bfloat16)
+            model_targets = model_targets.to(dtype=torch.bfloat16)
+
+            # Compute loss for this model
+            with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                loss_output = self.loss_fn(preds, model_targets)
             
-            # Clip gradient norm for each model separately
+            # Handle the case where loss_fn returns a tuple
+            if isinstance(loss_output, tuple):
+                loss = loss_output[0]  # Assume the first element is the loss
+            else:
+                loss = loss_output
+            
+            # # Add L2 regularization for later models
+            # if i > 0:
+            #     l2_reg = self.model.l2_reg_factor * sum((p**2).sum() for p in model.parameters())
+            #     loss += l2_reg
+
+            # Compute gradients for this model
+            loss.backward(retain_graph=(i < len(self.model.models) - 1))
+            
+            # Clip gradient norm for this model
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
+            all_losses.append(loss.item())
+            all_norms.append(norm.item())
+
             # Update weights for this model
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-        self.unfreeze_all_models()
+        # Compute final loss
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            final_loss_output = self.loss_fn(final_preds, targets)
+        if isinstance(final_loss_output, tuple):
+            final_loss = final_loss_output[0]
+        else:
+            final_loss = final_loss_output
 
         # Update learning rates for each parameter group
         for param_group in self.optimizer.param_groups:
@@ -288,15 +320,15 @@ class Experiment:
         toks_per_sec = toks_processed / dt
 
         metrics = {
-            "loss": final_loss.item(),
-            "grad_norm": norm.item(),
+            "final_loss": final_loss.item(),
             "step_time": dt,
             "tokens_per_sec": toks_per_sec,
         }
 
         # Add individual model metrics
-        for i, model_metrics in enumerate(individual_metrics):
-            metrics.update({f"model_{i}_{k}": v for k, v in model_metrics.items()})
+        for i, (loss, norm) in enumerate(zip(all_losses, all_norms)):
+            metrics[f"model_{i}_loss"] = loss
+            metrics[f"model_{i}_grad_norm"] = norm
 
         return metrics
 
@@ -311,8 +343,8 @@ class Experiment:
         """
         self.model.eval()
         val_steps = len(dataloader)
-        metrics_accum = {"loss": 0.0, "tokens_processed": 0, "total_time": 0.0}
-        additional_metrics = {}
+        metrics_accum = {"final_loss": 0.0, "tokens_processed": 0, "total_time": 0.0}
+        additional_metrics = {f"model_{i}_loss": 0.0 for i in range(self.num_models)}
 
         with (
             torch.no_grad(),
@@ -322,26 +354,23 @@ class Experiment:
         ):
             for inputs, targets in dataloader:
                 t0 = time()
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                inputs = inputs.to(self.device, dtype=torch.bfloat16)
+                targets = targets.to(self.device, dtype=torch.bfloat16)
                 with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    preds, loss_info = self.model(inputs, targets)
+                    final_preds, (all_preds, all_targets, individual_metrics) = self.model(inputs, targets)
+                    final_loss = self.loss_fn(final_preds, targets)
+                    if isinstance(final_loss, tuple):
+                        final_loss = final_loss[0]
 
-                if isinstance(loss_info, tuple):
-                    loss, *step_metrics = loss_info
-                else:
-                    loss = loss_info
+                # Accumulate final loss
+                metrics_accum["final_loss"] += final_loss.item()
 
-                # Accumulate loss
-                metrics_accum["loss"] += loss.item()
-
-                # Accumulate additional metrics if available
-                if isinstance(loss_info, dict):
-                    for key, value in loss_info.items():
-                        if key not in additional_metrics:
-                            additional_metrics[key] = 0.0
-                        additional_metrics[key] += (
-                            value.item() if isinstance(value, torch.Tensor) else value
-                        )
+                # Accumulate individual model losses
+                for i, (preds, model_targets) in enumerate(zip(all_preds, all_targets)):
+                    model_loss = self.loss_fn(preds, model_targets)
+                    if isinstance(model_loss, tuple):
+                        model_loss = model_loss[0]
+                    additional_metrics[f"model_{i}_loss"] += model_loss.item()
 
                 # Time tracking
                 if self.device.type == "cuda":
@@ -357,7 +386,7 @@ class Experiment:
 
         # Average the accumulated metrics
         metrics_avg = {
-            "loss": metrics_accum["loss"] / val_steps,
+            "loss": metrics_accum["final_loss"] / val_steps,
             "tokens_per_sec": metrics_accum["tokens_processed"]
             / metrics_accum["total_time"],
         }

@@ -407,8 +407,8 @@ def main() -> None:
 
             # Perform a training step
             train_results = training_run.step(inputs, targets, relative_step)
-            train_losses.append(train_results["loss"])
-            grad_norms.append(train_results["grad_norm"])
+            train_losses.append(train_results["final_loss"])
+            grad_norms.append(train_results["model_0_grad_norm"])
 
             if not task["mujoco-v3"]:
                 for k, v in train_results.items():
@@ -492,13 +492,13 @@ def main() -> None:
             # Logging
             if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
-                colored_print(f"Final Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f}", Colors.OKBLUE)
+                colored_print(f"Final Loss: {train_results['final_loss']:.6f} | Gradient Norm: {train_results['model_0_grad_norm']:.4f}", Colors.OKBLUE)
                 
                 # Check if we're using ResidualSTU (which would have individual model metrics)
                 if isinstance(model, ResidualSTU):
                     for i in range(model.num_models):
-                        if f'model_{i}_model_{i}_loss' in train_results:
-                            colored_print(f"Model {i} Loss: {train_results[f'model_{i}_model_{i}_loss']:.6f}", Colors.OKCYAN)
+                        if f'model_{i}_loss' in train_results:
+                            colored_print(f"Model {i} Loss: {train_results[f'model_{i}_loss']:.6f}", Colors.OKCYAN)
 
                 if "flops" in train_results:
                     flops = train_results["flops"]
@@ -514,7 +514,7 @@ def main() -> None:
                 mfu_str = f"Est. MFU: {mfu:.4f}" if mfu is not None else "Est. MFU: N/A"
 
                 colored_print(
-                    f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
+                    f"Train Loss: {train_results['final_loss']:.6f} | Gradient Norm: {train_results['model_0_grad_norm']:.4f} | "
                     f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f} | "
                     f"{flops_str} | {mfu_str}",
                     Colors.OKBLUE,

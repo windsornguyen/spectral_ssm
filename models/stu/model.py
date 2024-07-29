@@ -450,41 +450,24 @@ class ResidualSTU(nn.Module):
     def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, list, list]]:
         residual = targets
         all_preds = []
-        all_losses = []
+        all_targets = []
         individual_metrics = []
 
         for i, model in enumerate(self.models):
-            preds, loss_info = model(inputs, residual)
+            preds, _ = model(inputs, residual)
             all_preds.append(preds)
+            all_targets.append(residual)
             
-            if isinstance(loss_info, tuple):
-                loss, *step_metrics = loss_info
-            else:
-                loss = loss_info
-                step_metrics = []
-            
-            # Add L2 regularization for later models: penalize large weights for more refined adjustments
-            if i > 0:
-                l2_reg = self.l2_reg_factor * sum((p**2).sum() for p in model.parameters())
-                loss += l2_reg
-
-            all_losses.append(loss)
             individual_metrics.append({
-                f"model_{i}_loss": loss.item(),
-                f"model_{i}_metrics": step_metrics
+                f"model_{i}_pred": preds,
+                f"model_{i}_target": residual,
             })
             
-            # Soft detachment for residual computation
-            with torch.no_grad():
-                detached_preds = preds.detach()
-            residual = residual - (detached_preds * self.soft_detach_factor + preds * (1 - self.soft_detach_factor))
+            residual = residual - preds.detach()
 
         final_preds = sum(all_preds)
-        final_loss = self.loss_fn(final_preds, targets)
-        if isinstance(final_loss, tuple):
-            final_loss = final_loss[0]  # Extract the loss value if it's a tuple
 
-        return final_preds, (final_loss, all_losses, individual_metrics)
+        return final_preds, (all_preds, all_targets, individual_metrics)
 
 class Block(nn.Module):
     """
