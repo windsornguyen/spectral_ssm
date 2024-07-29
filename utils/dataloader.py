@@ -53,14 +53,14 @@ class Dataloader(Dataset):
                 raise ValueError("Invalid data format for mujoco-v1 or mujoco-v2 tasks")
             self.data = None
 
-            if model == "mamba-2" and controller == "Ant-v1":
-                # Padding zeros to the end of each trajectory at each timestep
-                self.inputs = np.pad(
-                    self.inputs, ((0, 0), (0, 0), (0, 3)), mode="constant"
-                )
-                self.targets = np.pad(
-                    self.targets, ((0, 0), (0, 0), (0, 3)), mode="constant"
-                )
+            # if model == "mamba-2" and controller == "Ant-v1":
+            #     # Padding zeros to the end of each trajectory at each timestep
+            #     self.inputs = np.pad(
+            #         self.inputs, ((0, 0), (0, 0), (0, 3)), mode="constant"
+            #     )
+            #     self.targets = np.pad(
+            #         self.targets, ((0, 0), (0, 0), (0, 3)), mode="constant"
+            #     )
 
             # Define feature groups w.r.t each task
             if controller == "Ant-v1":

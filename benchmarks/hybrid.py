@@ -1,9 +1,9 @@
 # ==============================================================================#
 # Authors: Windsor Nguyen, Isabel Liu
-# File: model.py
+# File: hybrid.py
 # ==============================================================================#
 
-"""The Spectral State Space Model architecture with attention."""
+"""The Spectral State Space Model architecture with attention for benchmark tasks."""
 
 import math
 
@@ -29,33 +29,36 @@ from torch.nn import MSELoss
 
 @dataclass
 class SpectralHybridConfigs:
-    # STU settings
-    d_in: int = 37
-    d_out: int = 37
-    d_proj: int = 29
+    d_in: int = 10
+    d_out: int = 10
+    n_layers: int = 2
+    n_embd: int = 64
+    n_heads: int = 8
+    sl: int = 1_000
+    mlp_scale: float = 4
+    bias: bool = False
+    dropout: float = 0.10
     num_eigh: int = 16
-    k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
-    k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
+    k_y: int = 2
+    k_u: int = 3
     learnable_m_y: bool = True
-    alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
+    alpha: float = 0.9
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
-    
-    # Transformer settings
-    n_embd: int = 37 # Constraint: n_heads % n_embd == 0
-    n_heads: int = 16 # Constraint: n_heads % n_embd == 0
-    flash_attn: bool = True
-    use_sq_relu: bool = False
-    
+    task: str = "copy"
+    vocab_size: int = 20
+    loss_fn: nn.Module = nn.CrossEntropyLoss()
+    device: torch.device = None
+
     # MoE
     moe: bool = True
     num_experts: int = 8
     num_experts_per_timestep: int = 2
 
-    # Dilated Attention settings
-    sub_rn: bool = True
+    # Attention settings
     flash_attn: bool = True
+    use_sq_relu: bool = False
     dilated_attn: bool = False
     segment_lengths: list[int] = field(default_factory=lambda: [128])
     dilated_ratios: list[int] = field(default_factory=lambda: [1])
@@ -64,18 +67,6 @@ class SpectralHybridConfigs:
     xpos_scale_base: int = 512
     rms_norm_eps: float = 1e-5
     multiway: bool = False
-
-    # General training settings
-    sl: int = 1_000 # Sequence length
-    n_layers: int = 2
-    mlp_scale: float = 4
-    bias: bool = False
-    dropout: float = 0.10
-    loss_fn: nn.Module = nn.MSELoss()
-    controls: dict = field(
-        default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
-    )
-    device: torch.device = None
 
 
 class STU(nn.Module):
@@ -100,20 +91,21 @@ class STU(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
-        self.d_proj = configs.d_proj
+        self.d_out = configs.d_out
         self.n_embd = configs.n_embd
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
         self.sigma = sigma
-        self.V = V # Precomputed FFT of top K eigenvectors.
+        self.V = V  # Precomputed FFT of top K eigenvectors.
         self.padded_sl = padded_sl
         self.k_u = configs.k_u
         self.k_y = configs.k_y
+        assert (self.k_u < self.k) or (self.k_y < self.k), "Cannot shift"
         self.learnable_m_y = configs.learnable_m_y
         self.stu_dropout = nn.Dropout(configs.dropout)
         self.resid_dropout = nn.Dropout(configs.dropout)
-        
+
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
         self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
         self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
@@ -125,7 +117,6 @@ class STU(nn.Module):
         else:
             self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
 
-
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the STU layer.
@@ -136,10 +127,17 @@ class STU(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (bsz, sl, d_out)
         """
+
         spectral = self.stu_dropout(
             compute_spectral(
-                inputs, self.sigma, self.V, self.M_phi_plus, 
-                self.M_phi_minus, self.M_y, self.padded_sl, self.use_ar_y
+                inputs,
+                self.sigma,
+                self.V,
+                self.M_phi_plus,
+                self.M_phi_minus,
+                self.M_y,
+                self.padded_sl,
+                self.use_ar_y,
             )
         )
 
@@ -301,7 +299,6 @@ class SpectralHybrid(nn.Module):
         self.n_embd = configs.n_embd
         self.d_in = configs.d_in
         self.d_out = configs.d_out
-        self.d_proj = configs.d_proj
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
         self.learnable_m_y = configs.learnable_m_y
@@ -314,7 +311,6 @@ class SpectralHybrid(nn.Module):
 
         self.bias = configs.bias
         self.dropout = configs.dropout
-        self.controls = configs.controls
         
         self.hybrid = nn.ModuleDict(
             dict(
@@ -327,8 +323,12 @@ class SpectralHybrid(nn.Module):
             )
         )
         
-        self.input_proj = nn.Linear(self.d_in, self.n_embd, bias=self.bias)
-        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=configs.bias)
+        if configs.task == "adding":
+            self.embed = nn.Linear(configs.d_in, self.n_embd)
+        elif configs.task in ["copy", "induction"]:
+            self.embed = nn.Embedding(configs.d_in, self.n_embd)
+
+        self.output = nn.Linear(self.n_embd, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
         
         # Initialize all weights
@@ -352,32 +352,41 @@ class SpectralHybrid(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        _, sl, _ = inputs.size()
+        if self.configs.task in ["copy", "induction"]:
+            x = self.embed(inputs)
+        elif self.configs.task == "adding":
+            x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
+            x = self.embed(x)
 
-        x = self.input_proj(inputs)
-        
-        # Generate positional embeddings for the sequence
-        pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
-
-        # Position embeddings of shape (sl, n_embd)
-        pos_emb = self.hybrid.wpe(pos)  # -> (sl, n_embd)
-
-        # Add positional embeddings to the input
+        bsz, sl, _ = x.size()
+        pos = torch.arange(0, sl, dtype=torch.long, device=x.device).unsqueeze(0)
+        pos_emb = self.hybrid.wpe(pos)
         x = x + pos_emb
         
-        x = self.hybrid.dropout(inputs)
+        x = self.hybrid.dropout(x)
         for block in self.hybrid.hidden:
             x = block(x)
-        preds = self.output_proj(x)
 
-        if self.controls["task"] != "mujoco-v3":
-            loss, metrics = (
-                self.loss_fn(preds, targets) if targets is not None else (None, None)
-            )
-            return preds, (loss, metrics)
+        if self.configs.task in ["copy", "adding"]:
+            logits = self.output(x)
+        elif self.configs.task == "induction":
+            logits = self.output(x[:, -1, :])
+
+        if self.configs.task in ["copy", "induction"]:
+            preds = torch.argmax(logits, dim=-1)
+        elif self.configs.task == "adding":
+            preds = logits.mean(dim=1).squeeze(-1)
+
+        if targets is not None:
+            if self.configs.task == "copy":
+                loss = self.loss_fn(logits.view(-1, self.d_out), targets.view(-1))
+            elif self.configs.task == "induction":
+                loss = self.loss_fn(logits, targets)
+            elif self.configs.task == "adding":
+                loss = self.loss_fn(preds, targets)
+            return preds, loss
         else:
-            loss = self.loss_fn(preds, targets) if targets is not None else None
-            return preds, (loss,)
+            return preds, None
 
     def _init_weights(self, module):
         """
@@ -453,7 +462,7 @@ class SpectralHybrid(nn.Module):
             total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
 
         # Output layer
-        total_flops += 2 * D * cfg.d_proj * T
+        total_flops += 2 * D * cfg.d_out * T
 
         # Dropout operations (1 FLOP per element)
         total_flops += (L + 1) * D * T  # L blocks + initial dropout

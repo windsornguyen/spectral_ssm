@@ -5,17 +5,16 @@
 
 """The Spectral State Space Model architecture for benchmark tasks."""
 
-
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass
 from models.stu.stu_utils import (
-    get_top_eigh, 
+    get_top_eigh,
     preconvolve,
-    compute_ar_u, 
-    compute_spectral, 
-    compute_ar_y
+    compute_ar_u,
+    compute_spectral,
+    compute_ar_y,
 )
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
@@ -29,7 +28,8 @@ class SpectralSSMConfigs:
     n_layers: int = 2
     n_embd: int = 8
     sl: int = 1_000
-    scale: int = 4
+    mlp_scale: float = 4
+    embd_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -41,6 +41,7 @@ class SpectralSSMConfigs:
     use_ar_u: bool = False
     use_hankel_L: bool = False
     task: str = "copy"
+    vocab_size: int = 20
     loss_fn: nn.Module = nn.CrossEntropyLoss()
     device: torch.device = None
 
@@ -68,6 +69,7 @@ class STU(nn.Module):
         sigma (torch.Tensor): Eigenvalues of the Hankel matrix.
         V (torch.Tensor): Precomputed FFT of top K eigenvectors.
     """
+
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
@@ -77,14 +79,15 @@ class STU(nn.Module):
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
         self.sigma = sigma
-        self.V = V # Precomputed FFT of top K eigenvectors.
+        self.V = V  # Precomputed FFT of top K eigenvectors.
         self.padded_sl = padded_sl
         self.k_u = configs.k_u
         self.k_y = configs.k_y
+        assert (self.k_u < self.k) or (self.k_y < self.k), "Cannot shift"
         self.learnable_m_y = configs.learnable_m_y
         self.stu_dropout = nn.Dropout(configs.dropout)
         self.resid_dropout = nn.Dropout(configs.dropout)
-        
+
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
         self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
         self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
@@ -96,7 +99,6 @@ class STU(nn.Module):
         else:
             self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
 
-
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the STU layer.
@@ -107,10 +109,17 @@ class STU(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (bsz, sl, d_out)
         """
+
         spectral = self.stu_dropout(
             compute_spectral(
-                inputs, self.sigma, self.V, self.M_phi_plus, 
-                self.M_phi_minus, self.M_y, self.padded_sl, self.use_ar_y
+                inputs,
+                self.sigma,
+                self.V,
+                self.M_phi_plus,
+                self.M_phi_minus,
+                self.M_y,
+                self.padded_sl,
+                self.use_ar_y,
             )
         )
 
@@ -135,7 +144,7 @@ class MLP(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            scale (float): Scaling factor for hidden dimension.
+            mlp_scale (float): Scaling factor for MLP hidden dimension.
             n_embd (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -143,8 +152,10 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.h_dim = int(configs.mlp_scale * configs.n_embd)
+        self.swiglu = SwiGLU(
+            dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False
+        )
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -169,7 +180,7 @@ class GatedMLP(nn.Module):
     Args:
         configs: Configuration object containing the following attributes:
             n_embd (int): Input and output embedding dimension.
-            scale (float): Scaling factor for hidden dimension.
+            mlp_scale (float): Scaling factor for MLP hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
@@ -178,8 +189,10 @@ class GatedMLP(nn.Module):
         super().__init__()
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
-        self.hidden_features = int(configs.scale * configs.n_embd)
-        self.fc1 = nn.Linear(self.in_features, 2 * self.hidden_features, bias=configs.bias)
+        self.hidden_features = int(configs.mlp_scale * configs.n_embd)
+        self.fc1 = nn.Linear(
+            self.in_features, 2 * self.hidden_features, bias=configs.bias
+        )
         self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
         self.activation = torch.nn.functional.silu
         self.dropout = nn.Dropout(configs.dropout)
@@ -200,7 +213,7 @@ class GatedMLP(nn.Module):
         y = self.fc2(y)
         return self.dropout(y)
 
-
+#TODO: update implementation and debug
 class ResidualSTU(nn.Module):
     def __init__(self, configs, num_models=3):
         super(ResidualSTU, self).__init__()
@@ -209,13 +222,17 @@ class ResidualSTU(nn.Module):
         self.models = nn.ModuleList([SpectralSSM(configs) for _ in range(num_models)])
         self.num_models = num_models
 
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, inputs: torch.Tensor, targets: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         all_preds = []
         all_losses = []
 
         # Initialize residual
         if self.configs.task in ["copy", "induction", "associative"]:
-            residual = torch.nn.functional.one_hot(targets, num_classes=self.configs.d_out).float()
+            residual = torch.nn.functional.one_hot(
+                targets, num_classes=self.configs.d_out
+            ).float()
         else:
             residual = targets.unsqueeze(-1)  # Add dimension to match preds
 
@@ -237,7 +254,9 @@ class ResidualSTU(nn.Module):
             # Update residual based on the task
             if self.configs.task in ["copy", "induction"]:
                 # For classification, residual is the difference in probabilities
-                residual = residual - torch.nn.functional.softmax(preds.detach(), dim=-1)
+                residual = residual - torch.nn.functional.softmax(
+                    preds.detach(), dim=-1
+                )
             else:
                 residual = residual - preds.detach()
 
@@ -246,7 +265,9 @@ class ResidualSTU(nn.Module):
 
         if self.configs.task == "copy":
             # Reshape logits to (bsz * sl, d_out) and targets to (bsz * sl)
-            final_loss = self.loss_fn(final_preds.view(-1, final_preds.size(-1)), targets.view(-1))
+            final_loss = self.loss_fn(
+                final_preds.view(-1, final_preds.size(-1)), targets.view(-1)
+            )
         elif self.configs.task == "induction":
             # For induction, targets should already be of shape (bsz,)
             final_loss = self.loss_fn(final_preds[:, -1, :], targets)
@@ -256,7 +277,7 @@ class ResidualSTU(nn.Module):
         self.unfreeze_all_models()
         # if final_loss.requires_grad:
         #     final_loss.backward(retain_graph=True)
-        print('hey', final_preds.shape)
+        print("hey", final_preds.shape)
         return final_preds, final_loss
 
     def freeze_previous_models(self, current_model_index):
@@ -265,9 +286,10 @@ class ResidualSTU(nn.Module):
                 param.requires_grad = False
 
     def unfreeze_all_models(self):
-       for model in self.models:
+        for model in self.models:
             for param in model.parameters():
                 param.requires_grad = True
+
 
 class Block(nn.Module):
     """
@@ -282,13 +304,18 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn = RMSNorm(configs.n_embd)
+        self.rn_1 = RMSNorm(configs.n_embd)
+        self.rn_2 = RMSNorm(configs.n_embd)
         self.stu = STU(configs, sigma, V, padded_sl)
-        self.mlp = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -301,9 +328,10 @@ class Block(nn.Module):
             torch.Tensor: Output tensor
         """
         z = x
-        x = x + self.stu(self.rn(x))
-        x = x + self.mlp(x)
+        x = x + self.stu(self.rn_1(x))
+        x = x + self.mlp(self.rn_2(x))
         return x + z
+
 
 class SpectralSSM(nn.Module):
     """
@@ -327,26 +355,33 @@ class SpectralSSM(nn.Module):
         self.use_hankel_L = configs.use_hankel_L
         self.device = configs.device
 
-        self.sigma, self.phi = get_top_eigh(self.sl, self.num_eigh, self.use_hankel_L, self.device)
-        self.V, self.padded_sl = preconvolve(self.phi, self.sl) # Precomputed.
+        self.sigma, self.phi = get_top_eigh(
+            self.sl, self.num_eigh, self.use_hankel_L, self.device
+        )
+        self.V, self.padded_sl = preconvolve(self.phi, self.sl)  # Precomputed.
 
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
-        
+
         self.spectral_ssm = nn.ModuleDict(
             dict(
                 hidden=nn.ModuleList(
-                    [Block(
-                        self.configs, self.sigma, self.V, self.padded_sl
-                    ) for _ in range(self.n_layers)]),
+                    [
+                        Block(self.configs, self.sigma, self.V, self.padded_sl)
+                        for _ in range(self.n_layers)
+                    ]
+                ),
             )
         )
-        # Add an embedding layer for the copying task
-        print(configs.d_in, self.n_embd)
-        self.embed = nn.Embedding(configs.d_in, self.n_embd)
 
-        # Modify the output layer to produce logits for each category
+        # Add an embedding layer for the copying task
+        if configs.task == "adding":
+            self.embed = nn.Linear(configs.d_in, self.n_embd)
+        elif configs.task in ["copy", "induction"]:
+            self.embed = nn.Embedding(configs.d_in, self.n_embd)
+            # Modify the output layer to produce logits for each category
+
         self.output = nn.Linear(self.n_embd, configs.d_out, bias=self.bias)
 
         # Initialize all weights
@@ -355,7 +390,7 @@ class SpectralSSM(nn.Module):
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print("\nSTU Model Parameter Count: %.4fM" % (self.get_num_params() / 1e6,))
 
     def forward(self, inputs, targets=None):
         """
@@ -371,32 +406,39 @@ class SpectralSSM(nn.Module):
                 - loss: Computed loss if targets are provided, else None
         """
         # Embed the input categories
-        print(inputs.shape)
-        # inputs = inputs.unsqueeze(-1).expand(-1, -1, self.configs.d_out)
-        print(inputs.shape)
-        x = self.embed(inputs)  # (5, 25) -> (5, 25, 16)
-        print(x.shape)
-        
+        if self.configs.task in ["copy", "induction"]:
+            x = self.embed(inputs)  # Shape: (bsz, sl, n_embd)
+        elif self.configs.task == "adding":
+            # Reshape inputs from (bsz, sl * 2) to (bsz, sl, 2)
+            x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
+            x = self.embed(x)  # Shape: (bsz, sl, n_embd)
+
         # Apply the spectral SSM layers
-        for block in self.spectral_ssm.hidden:
-            x = block(x)
+        for layer in self.spectral_ssm.hidden:
+            x = layer(x)
 
         # Generate logits for each category
-        if self.configs.task == "copy":
-            logits = self.output(x)  # Shape: (bsz, sl, d_out)
+        if self.configs.task in ["copy", "adding"]:
+            logits = self.output(x)
         elif self.configs.task == "induction":
-            logits = self.output(x[:, -1, :])  # Shape: (bsz, d_out)
+            logits = self.output(x[:, -1, :])
+
+        # Compute predictions
+        if self.configs.task in ["copy", "induction"]:
+            preds = torch.argmax(logits, dim=-1)
+        elif self.configs.task == "adding":
+            preds = logits.mean(dim=1).squeeze(-1)
 
         if targets is not None:
             if self.configs.task == "copy":
-                # Reshape logits to (bsz * sl, d_out) and targets to (bsz * sl)
-                loss = self.loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+                loss = self.loss_fn(logits.view(-1, self.d_out), targets.view(-1))
             elif self.configs.task == "induction":
-                # For induction, targets should already be of shape (bsz,)
                 loss = self.loss_fn(logits, targets)
-            return logits, loss
+            elif self.configs.task == "adding":
+                loss = self.loss_fn(preds, targets)
+            return preds, loss
         else:
-            return logits, None
+            return preds, None
 
     def _init_weights(self, module):
         """

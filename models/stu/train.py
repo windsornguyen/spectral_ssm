@@ -21,11 +21,12 @@ from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment_res as exp
-from models.stu.model import SpectralSSM, ResidualSTU, SpectralSSMConfigs
+from utils import experiment as exp
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
+from models.stu.model import SpectralSSM, ResidualSTU, SimplifiedResidualSTU, SpectralSSMConfigs
+from models.stu.stu_utils import get_top_eigh, preconvolve
 
 def save_results(
     task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None
@@ -139,7 +140,7 @@ def main() -> None:
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
     n_layers: int = 2
-    embd_scale: int = 1
+    embd_scale: float = 1
     mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.0
@@ -158,7 +159,7 @@ def main() -> None:
     num_experts_per_timestep: int = 2
 
     # Residual-STU
-    num_models: int = 3
+    num_models: int = 2
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -177,13 +178,13 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
-        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
+        n_embd = int(embd_scale * d_in)  # TODO: d_in is not exactly the same as n_embd
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
         d_in: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
-        n_embd = embd_scale * d_in  # TODO: d_in is not exactly the same as n_embd
+        n_embd = int(embd_scale * d_in)  # TODO: d_in is not exactly the same as n_embd
         d_proj = d_in
         sl: int = 1000
 
@@ -191,7 +192,7 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd = embd_scale * d_in
+        n_embd = int(embd_scale * d_in)
         d_proj = d_in
         sl: int = 300
     
@@ -225,8 +226,20 @@ def main() -> None:
         device=device,
     )
 
-    # model = SpectralSSM(configs).to(device)
-    model = ResidualSTU(configs).to(device)
+    # # Additional configs to pass into Simplified Residual STU
+    # # Compute sigma and V here, as they're needed for each STU model
+    # sigma, phi = get_top_eigh(sl, num_eigh, use_hankel_L, device)
+    # V, padded_sl = preconvolve(phi, sl)
+    
+    # # Add sigma, V, and padded_sl to configs
+    # configs.sigma = sigma
+    # configs.V = V
+    # configs.padded_sl = padded_sl
+
+    # model = SimplifiedResidualSTU(configs).to(device)
+
+    model = SpectralSSM(configs).to(device)
+    # model = ResidualSTU(configs).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
@@ -366,7 +379,7 @@ def main() -> None:
         sl=sl,
         optimizer_settings=optimizer_settings,
         training_stu=training_stu,
-        num_models=num_models,  # parameter for ResidualSTU
+        # num_models=num_models,  # parameter for ResidualSTU
         world_size=world_size,
         main_process=main_process,
         device=device,
@@ -407,8 +420,8 @@ def main() -> None:
 
             # Perform a training step
             train_results = training_run.step(inputs, targets, relative_step)
-            train_losses.append(train_results["final_loss"])
-            grad_norms.append(train_results["model_0_grad_norm"])
+            train_losses.append(train_results["loss"])
+            grad_norms.append(train_results["grad_norm"])
 
             if not task["mujoco-v3"]:
                 for k, v in train_results.items():
@@ -492,7 +505,7 @@ def main() -> None:
             # Logging
             if main_process and relative_step % 10 == 0:
                 colored_print(f"\nStep {relative_step:5d}", Colors.HEADER)
-                colored_print(f"Final Loss: {train_results['final_loss']:.6f} | Gradient Norm: {train_results['model_0_grad_norm']:.4f}", Colors.OKBLUE)
+                colored_print(f"Final Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f}", Colors.OKBLUE)
                 
                 # Check if we're using ResidualSTU (which would have individual model metrics)
                 if isinstance(model, ResidualSTU):
@@ -514,7 +527,7 @@ def main() -> None:
                 mfu_str = f"Est. MFU: {mfu:.4f}" if mfu is not None else "Est. MFU: N/A"
 
                 colored_print(
-                    f"Train Loss: {train_results['final_loss']:.6f} | Gradient Norm: {train_results['model_0_grad_norm']:.4f} | "
+                    f"Train Loss: {train_results['loss']:.6f} | Gradient Norm: {train_results['grad_norm']:.4f} | "
                     f"Step Time: {train_results['step_time']*1000:.4f}ms | sl/sec: {train_results['tokens_per_sec']:.4f} | "
                     f"{flops_str} | {mfu_str}",
                     Colors.OKBLUE,

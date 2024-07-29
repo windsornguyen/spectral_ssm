@@ -151,7 +151,7 @@ def main() -> None:
 
     # Fused kernel and sharding options
     chunk_size: int = 256
-    use_mem_eff_path: bool = False
+    use_mem_eff_path: bool = True
     process_group = get_data_parallel_group()
     sequence_parallel: bool = True
     dtype: torch.dtype = torch.float32
@@ -164,8 +164,10 @@ def main() -> None:
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 2
-    n_layers: int = 4
+    n_layers: int = 2
+    mlp_scale: int = 4
     bias: bool = False
+    dropout: float = 0.0
     conv_bias: bool = True
     loss_fn = nn.MSELoss()
     preprocess: bool = True
@@ -186,20 +188,22 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
+        d_in: int = 24 if controller != "Ant-v1" else 37
         d_model: int = 24 if controller != "Ant-v1" else 40
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
         d_out: int = 24 if controller != "Ant-v1" else 40
-        d_proj: int = 18 if controller != "Ant-v1" else 32
+        d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
+        d_in: int = 18 if controller != "Ant-v1" else 29
         d_model: int = 18 if controller != "Ant-v1" else 32
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
-        d_proj = d_model
+        d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v3"]:
@@ -214,9 +218,12 @@ def main() -> None:
     configs = Mamba2Configs(
         bsz=bsz,
         n_layers=n_layers,
+        d_in=d_in,
         d_model=d_model,
         d_out=d_out,
         d_proj=d_proj,
+        mlp_scale=mlp_scale,
+        dropout=dropout,
         d_state=d_state,
         d_conv=d_conv,
         conv_init=conv_init,

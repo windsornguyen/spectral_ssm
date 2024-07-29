@@ -157,7 +157,7 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.mlp_scale * configs.n_embd
+        self.h_dim = int(configs.mlp_scale * configs.n_embd)
         self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -430,6 +430,74 @@ class SimpleGatedMoe(nn.Module):
         output = (outputs * weights).sum(dim=-1)
 
         return output
+
+#TODO: instead of MLPs, GELU for non-linearities
+class SimplifiedResidualSTU(nn.Module):
+    def __init__(self, configs):
+        super(SimplifiedResidualSTU, self).__init__()
+        self.configs = configs
+        self.loss_fn = configs.loss_fn
+        self.num_models = configs.num_models
+        self.soft_detach_factor = 0.9
+
+        # Input projection
+        self.input_proj = nn.Linear(configs.d_in, configs.n_embd, bias=configs.bias)
+
+        # Create STU models
+        self.models = nn.ModuleList([
+            STU(configs, configs.sigma, configs.V, configs.padded_sl)
+            for _ in range(self.num_models)
+        ])
+        
+        # Add GELU activation
+        self.gelu = nn.GELU()
+
+        # Output projection
+        self.output_proj = nn.Linear(configs.n_embd, configs.d_proj, bias=configs.bias)
+
+        # Report the number of parameters
+        print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, list, list]]:
+        # Apply input projection
+        x = self.input_proj(inputs)
+
+        residual = targets
+        all_preds = []
+        all_targets = []
+        individual_metrics = []
+
+        for i, model in enumerate(self.models):
+            preds = model(x)
+            preds = self.output_proj(preds)
+            all_preds.append(preds)
+            all_targets.append(residual)
+            
+            individual_metrics.append({
+                f"model_{i}_pred": preds,
+                f"model_{i}_target": residual,
+            })
+            
+            residual = residual - preds.detach()
+            
+            # Apply GELU activation between models, except for the last one
+            if i < len(self.models) - 1:
+                residual = self.gelu(residual)
+
+        # Sum all predictions and apply output projection
+        final_preds = sum(all_preds)
+
+        return final_preds, (all_preds, all_targets, individual_metrics)
+    
+    def get_num_params(self):
+        """
+        Return the number of parameters in the model.
+
+        Returns:
+            int: The number of parameters in the model.
+        """
+        num_params = sum(p.numel() for p in self.parameters())
+        return num_params
 
 class ResidualSTU(nn.Module):
     def __init__(self, configs):

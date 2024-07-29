@@ -312,10 +312,10 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     eps=1e-5,
-    noise = 0.5
-    noise_frequency = 0.2
-    # noise = 0.0
-    # noise_frequency = 0.0
+    # noise = 0.5
+    # noise_frequency = 0.2
+    noise = 0.0
+    noise_frequency = 0.0
 
     train_loader = get_dataloader(
         model="transformer",
@@ -330,7 +330,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
-        sl=None, # TODO: Set to None or sl?
+        sl=1000, # TODO: Set to None or sl?
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,

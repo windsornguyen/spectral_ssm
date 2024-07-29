@@ -14,14 +14,16 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from safetensors.torch import load_file, save_file
+from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
+from tqdm import tqdm
 
 from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
 from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader, split_data
-from utils import experiment as exp
+from utils import experiment as exp, optimizer as opt
 from models.hybrid.model import SpectralHybrid, SpectralHybridConfigs
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
@@ -114,14 +116,14 @@ def main() -> None:
     parser.add_argument(
         "--segment_lengths",
         type=int,
-        nargs="+",
+        nargs='+',
         default=[128, 256, 512],
         help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
     )
     parser.add_argument(
         "--dilated_ratios",
         type=int,
-        nargs="+",
+        nargs='+',
         default=[1, 2, 4],
         help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
     )
@@ -195,7 +197,7 @@ def main() -> None:
 
     # Transformer settings
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
-    pct_attn: float = 0.08 # Percentage of layers using attention
+    pct_attn: float = 0.5 # Percentage of layers using attention
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
 
     # MoE
@@ -215,7 +217,8 @@ def main() -> None:
 
     # General training settings
     n_layers: int = 2
-    scale: int = 4
+    mlp_scale: float = 4
+    embd_scale: float = 1
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
@@ -235,17 +238,17 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        n_embd: int = 24 if controller != "Ant-v1" else 37
+        d_in: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = d_in    # before projection d_in = d_out
+        n_embd = int(embd_scale * d_in)
+        d_out = n_embd    # before projection d_in = d_out
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
-        n_embd: int = 18 if controller != "Ant-v1" else 29
+        d_in: int = 18 if controller != "Ant-v1" else 29
         n_heads: int = 9 if controller != "Ant-v1" else 1
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
+        n_embd = int(embd_scale * d_in)
         d_out = n_embd
         d_proj = n_embd
         sl: int = 1000
@@ -254,9 +257,9 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_heads: int = 16
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
+        n_embd = int(embd_scale * d_in)
         d_proj = n_embd
         sl: int = 300
 
@@ -278,10 +281,10 @@ def main() -> None:
         n_embd=n_embd,
         n_heads=n_heads,
         sub_rn=sub_rn,
-        pct_attn=pct_attn,
+        # pct_attn=pct_attn,
         flash_attn=flash_attn,
         use_sq_relu=use_sq_relu,
-
+        
         # MoE
         moe=moe,
         num_experts=num_experts,
@@ -300,7 +303,8 @@ def main() -> None:
         # General training settings
         sl=sl,
         n_layers=n_layers,
-        scale=scale,
+        mlp_scale=mlp_scale,
+        
         bias=bias,
         dropout=dropout,
         loss_fn=loss_fn,
@@ -344,7 +348,7 @@ def main() -> None:
         dataset = torch.load(
             f"{mujoco_v3_base}{args.controller}_ResNet-18.pt", map_location=device
         )
-        train_data, val_data = split_data(dataset, train_ratio=0.8)
+        train_data, val_data = split_data(dataset)
     else:
         raise ValueError("Invalid task")
 
@@ -355,7 +359,6 @@ def main() -> None:
     # noise_frequency = 0.2
     noise = 0.0
     noise_frequency = 0.0
-
     train_loader = get_dataloader(
         model="hybrid",
         data=train_data,

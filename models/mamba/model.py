@@ -23,11 +23,14 @@ from models.mamba.mamba import MambaLayer
 
 @dataclass
 class Mamba2Configs:
-    bsz: int = 8
-    n_layers: int = 4
+    bsz: int = 2
+    n_layers: int = 2
+    d_in: int = 29
     d_model: int = 32
     d_out: int = 32
     d_proj: int = 29
+    mlp_scale: int = 4
+    dropout: float = 0.10
     d_state: int = 128
     d_conv: int = 4
     conv_init: Optional[float] = None
@@ -74,15 +77,15 @@ class MLP(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            scale (float): Scaling factor for hidden dimension.
-            n_embd (int): Embedding dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
+            d_model (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
     """
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.scale * configs.n_embd
-        self.swiglu = SwiGLU(dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
+        self.h_dim = configs.mlp_scale * configs.d_model
+        self.swiglu = SwiGLU(dim=configs.d_model, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -106,14 +109,20 @@ class GatedMLP(nn.Module):
             d_model (int): Input and output embedding dimension.
             scale (float): Scaling factor for hidden dimension.
             bias (bool): Whether to use bias in linear layers.
+            dropout (float): Dropout rate.
     """
 
     def __init__(self, configs):
         super().__init__()
-        self.h_dim = configs.scale * configs.d_model
-        self.fc_1 = nn.Linear(configs.d_model, self.h_dim, bias=configs.bias)
-        self.fc_2 = nn.Linear(self.h_dim, configs.d_out, bias=configs.bias)
+        self.in_features = configs.d_model
+        self.out_features = configs.d_model
+        self.chunks = 2
+        self.hidden_features = int(configs.mlp_scale * configs.d_model)
+
+        self.fc1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
+        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
         self.silu = nn.SiLU()
+        self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -125,12 +134,11 @@ class GatedMLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        x = self.fc_1(x)
-        x, gate = x.chunk(2, dim=-1)
-        x = x * self.silu(gate)
-        x = self.fc_2(x)
-        return x
-
+        y = self.fc1(x)
+        y, gate = y.chunk(self.chunks, dim=-1)
+        y = y * self.silu(gate)
+        y = self.fc2(y)
+        return self.dropout(y)
 
 class MambaBlock(nn.Module):
     """
@@ -150,7 +158,7 @@ class MambaBlock(nn.Module):
         self.mlp = MoE(
             configs,
             experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedMLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -163,7 +171,8 @@ class MambaBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        x = x + self.mamba(x)
+        _, sl, _ = x.size()
+        x = x + self.mamba(x, sl)
         x = x + self.mlp(self.rn(x))
         return x
 
@@ -179,6 +188,7 @@ class Mamba2(nn.Module):
         super(Mamba2, self).__init__()
         self.configs = configs
         self.n_layers = self.configs.n_layers
+        self.d_in = self.configs.d_in
         self.d_model = self.configs.d_model
         self.d_out = self.configs.d_out
         self.d_proj = configs.d_proj
@@ -191,13 +201,15 @@ class Mamba2(nn.Module):
         else:
             print("\nMoE?: Disabled")
             
+        self.input_proj = nn.Linear(self.d_in, self.d_model, bias=self.bias)
+
         self.mamba = nn.ModuleDict(
             dict(
                 hidden=nn.ModuleList(
-                    [MambaLayer(self.configs) for _ in range(self.n_layers)]),
+                    [MambaBlock(self.configs) for _ in range(self.n_layers)]),
             )
         )
-        self.output = nn.Linear(self.d_model, self.d_proj, bias=self.bias)
+        self.output_proj = nn.Linear(self.d_model, self.d_proj, bias=self.bias)
 
         # Report the number of parameters
         print(
@@ -228,11 +240,10 @@ class Mamba2(nn.Module):
             - Predictions tensor
             - tuple containing loss and metrics (if applicable)
         """
-        _, sl, _ = inputs.size()
-        x = inputs
+        x = self.input_proj(inputs)
         for block in self.mamba.hidden:
-            x = block(x, sl)
-        preds = self.output(x)
+            x = block(x)
+        preds = self.output_proj(x)
 
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (

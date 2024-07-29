@@ -5,12 +5,10 @@
 
 """The Transformer architecture for benchmark tasks."""
 
-
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from tqdm import tqdm
 from models.transformer.attn import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.moe import MoE
@@ -25,17 +23,19 @@ class TransformerConfigs:
     n_heads: int = 16  # Constraint: n_heads % n_embd == 0
     d_in: int = 10
     d_out: int = 10
-    sl: int = 300  # Sequence length
-    scale: int = 4
+    sl: int = 1000  # Sequence length
+    ffn_scale: int = 8
+    embd_scale: int = 1
     sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
     flash_attn: bool = True
     use_sq_relu: bool = False
     task: str = "copy"
+    vocab_size: int = 20
     loss_fn: nn.Module = nn.CrossEntropyLoss()
     device: torch.device = None
-    
+
     # MoE
     moe: bool = True
     num_experts: int = 8
@@ -43,13 +43,18 @@ class TransformerConfigs:
 
     # Dilated Attention
     dilated_attn: bool = False
-    segment_lengths: list[int] = field(default_factory=lambda: [128]) # TODO: Check this makes sense (and follows paper)
-    dilated_ratios: list[int] = field(default_factory=lambda: [1]) # TODO: Check this makes sense (and follows paper)
+    segment_lengths: list[int] = field(
+        default_factory=lambda: [128]
+    )  # TODO: Check this makes sense (and follows paper)
+    dilated_ratios: list[int] = field(
+        default_factory=lambda: [1]
+    )  # TODO: Check this makes sense (and follows paper)
     seq_parallel: bool = True
     xpos_rel_pos: bool = True
     xpos_scale_base: int = 512
     rms_norm_eps: float = 1e-5
     multiway: bool = False
+
 
 class FFN(nn.Module):
     """
@@ -57,7 +62,7 @@ class FFN(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            scale (float): Scaling factor for hidden dimension.
+            ffn_scale (float): Scaling factor for hidden dimension.
             n_embd (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -66,8 +71,10 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.n_embd, h_dim=configs.scale * configs.n_embd,
-            bias=configs.bias, use_sq_relu=configs.use_sq_relu
+            dim=configs.n_embd,
+            h_dim=configs.ffn_scale * configs.n_embd,
+            bias=configs.bias,
+            use_sq_relu=configs.use_sq_relu,
         )
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -85,6 +92,7 @@ class FFN(nn.Module):
         x = self.dropout(x)
         return x
 
+
 class GatedFFN(nn.Module):
     """
     Gated feed-forward network using SiLU activation.
@@ -92,7 +100,7 @@ class GatedFFN(nn.Module):
     Args:
         configs: Configuration object containing the following attributes:
             n_embd (int): Input and output embedding dimension.
-            scale (float): Scaling factor for hidden dimension.
+            ffn_scale (float): Scaling factor for hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
@@ -102,10 +110,14 @@ class GatedFFN(nn.Module):
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
         self.chunks = 2
-        self.hidden_features = int(configs.scale * configs.n_embd)
+        self.hidden_features = int(configs.ffn_scale * configs.n_embd)
 
-        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
-        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.fc_1 = nn.Linear(
+            self.in_features, self.chunks * self.hidden_features, bias=configs.bias
+        )
+        self.fc_2 = nn.Linear(
+            self.hidden_features, self.out_features, bias=configs.bias
+        )
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -125,6 +137,7 @@ class GatedFFN(nn.Module):
         y = self.fc_2(y)
         return self.dropout(y)
 
+
 class TransformerBlock(nn.Module):
     """
     Single block of the Transformer.
@@ -137,11 +150,15 @@ class TransformerBlock(nn.Module):
         self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
 
-        self.ffn_1 = MoE(
-            configs,
-            experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedFFN(configs)
+        self.ffn_1 = (
+            MoE(
+                configs,
+                experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
+            )
+            if configs.moe
+            else GatedFFN(configs)
+        )
 
     def _get_attn_type(self, configs):
         if configs.dilated_attn:
@@ -154,6 +171,7 @@ class TransformerBlock(nn.Module):
         x = x + self.ffn_1(self.rn_2(x))
         return x
 
+
 class Transformer(nn.Module):
     """
     Transformer architecture adapted from the GPT-2 implementation.
@@ -165,7 +183,7 @@ class Transformer(nn.Module):
         self.configs = configs
         self.n_embd = configs.n_embd
         self.dropout = nn.Dropout(self.configs.dropout)
-        
+
         if configs.moe:
             print(f"\nMoE?: Enabled | Using {configs.num_experts} experts.")
         else:
@@ -225,7 +243,10 @@ class Transformer(nn.Module):
         """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
-            n_params -= (self.transformer.wte.weight.numel() + self.transformer.wpe.weight.numel())
+            n_params -= (
+                self.transformer.wte.weight.numel()
+                + self.transformer.wpe.weight.numel()
+            )
         return n_params
 
     def forward(self, inputs, targets=None):
@@ -241,7 +262,9 @@ class Transformer(nn.Module):
             tuple: Loss (and metrics, if applicable)
         """
         bsz, sl = inputs.size()
-        assert sl <= self.configs.sl, f"Input sequence length {sl} exceeds model's maximum sequence length {self.configs.sl}"
+        assert (
+            sl <= self.configs.sl
+        ), f"Input sequence length {sl} exceeds model's maximum sequence length {self.configs.sl}"
 
         # Token embeddings
         token_embeddings = self.transformer.wte(inputs)
@@ -254,23 +277,26 @@ class Transformer(nn.Module):
         x = token_embeddings + pos_embeddings
         x = self.transformer.dropout(x)
 
-        # Pass through transformer blocks
-        for block in self.transformer.hidden:
-            x = block(x)
+        # Pass through transformer layers
+        for layer in self.transformer.hidden:
+            x = layer(x)
 
         # Generate logits for each category
-        if self.configs.task == "copy":
+        if self.configs.task == "induction":
+            logits = self.output(x[:, -1, :])
+        else:
             logits = self.output(x)  # Shape: (bsz, sl, d_out)
-        elif self.configs.task == "induction":
-            logits = self.output(x[:, -1, :])  # Shape: (bsz, d_out)
 
+        preds = torch.argmax(logits, dim=-1)
         if targets is not None:
             if self.configs.task == "copy":
                 # Reshape logits to (bsz * sl, d_out) and targets to (bsz * sl)
-                loss = self.loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+                loss = self.loss_fn(
+                    logits.view(-1, self.configs.d_out), targets.view(-1)
+                )
             elif self.configs.task == "induction":
                 # For induction, targets should already be of shape (bsz,)
                 loss = self.loss_fn(logits, targets)
-            return logits, loss
+            return preds, loss
         else:
-            return logits, None
+            return preds, None

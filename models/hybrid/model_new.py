@@ -1,6 +1,6 @@
 # ==============================================================================#
 # Authors: Windsor Nguyen, Isabel Liu
-# File: model.py
+# File: model_new.py
 # ==============================================================================#
 
 """The Spectral State Space Model architecture with attention."""
@@ -24,7 +24,6 @@ from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
-from torch.nn import MSELoss
 
 
 @dataclass
@@ -45,6 +44,8 @@ class SpectralHybridConfigs:
     # Transformer settings
     n_embd: int = 37 # Constraint: n_heads % n_embd == 0
     n_heads: int = 16 # Constraint: n_heads % n_embd == 0
+    sub_rn: bool = True
+    pct_attn: float = 0.08 # Percentage of layers using attention
     flash_attn: bool = True
     use_sq_relu: bool = False
     
@@ -54,8 +55,6 @@ class SpectralHybridConfigs:
     num_experts_per_timestep: int = 2
 
     # Dilated Attention settings
-    sub_rn: bool = True
-    flash_attn: bool = True
     dilated_attn: bool = False
     segment_lengths: list[int] = field(default_factory=lambda: [128])
     dilated_ratios: list[int] = field(default_factory=lambda: [1])
@@ -68,7 +67,7 @@ class SpectralHybridConfigs:
     # General training settings
     sl: int = 1_000 # Sequence length
     n_layers: int = 2
-    mlp_scale: float = 4
+    scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     loss_fn: nn.Module = nn.MSELoss()
@@ -80,7 +79,7 @@ class SpectralHybridConfigs:
 
 class STU(nn.Module):
     """
-    An STU (Spectral Transform Unit) layer.
+    A simple STU (Spectral Transform Unit) layer.
 
     Args:
         configs: Configuration contains (at least) the following attributes:
@@ -100,8 +99,7 @@ class STU(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
-        self.d_proj = configs.d_proj
-        self.n_embd = configs.n_embd
+        self.d_out = configs.d_out
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -115,15 +113,15 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
         
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_out, self.d_in))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.n_embd, self.k_y, self.n_embd))
+            self.M_y = nn.Parameter(torch.zeros(self.d_out, self.k_y, self.d_out))
         else:
-            self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
+            self.register_buffer("m_y", torch.zeros(self.d_out, self.k_y, self.d_out))
 
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -164,7 +162,7 @@ class MLP(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            mlp_scale (float): Scaling factor for hidden dimension.
+            scale (float): Scaling factor for hidden dimension.
             n_embd (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -173,7 +171,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.n_embd, h_dim=int(configs.mlp_scale * configs.n_embd),
+            dim=configs.n_embd, h_dim=configs.scale * configs.n_embd,
             bias=configs.bias, use_sq_relu=configs.use_sq_relu
         )
         self.dropout = nn.Dropout(configs.dropout)
@@ -199,7 +197,7 @@ class GatedMLP(nn.Module):
     Args:
         configs: Configuration object containing the following attributes:
             n_embd (int): Input and output embedding dimension.
-            mlp_scale (float): Scaling factor for hidden dimension.
+            scale (float): Scaling factor for hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
@@ -209,7 +207,7 @@ class GatedMLP(nn.Module):
         self.in_features = configs.n_embd
         self.out_features = configs.n_embd
         self.chunks = 2
-        self.hidden_features = int(configs.mlp_scale * configs.n_embd)
+        self.hidden_features = int(configs.scale * configs.n_embd)
 
         self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
         self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
@@ -243,10 +241,15 @@ class HybridBlock(nn.Module):
         padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs, sigma, V, padded_sl, layer_type) -> None:
         super(HybridBlock, self).__init__()
-        self.stu = STU(configs, sigma, V, padded_sl)
-        self.attn = CausalSelfAttention(configs)
+        self.layer_type = layer_type
+        if self.layer_type == "STU":
+            self.stu = STU(configs, sigma, V, padded_sl)
+        elif self.layer_type == "Attention":
+            self.attn = CausalSelfAttention(configs)
+        else:
+            raise ValueError("Invalid layer type")
 
         self.mlp_1 = MoE(
             configs,
@@ -275,15 +278,14 @@ class HybridBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        # STU portion
         z = x
-        x = x + self.stu(self.rn_1(x))
-        x = x + self.mlp_1(self.rn_2(x)) + z
-
-        # Attention portion
-        x = x + self.attn(self.rn_3(x))
-        x = x + self.mlp_2(self.rn_4(x)) + z
-
+        if self.layer_type == "STU":
+            x = x + self.stu(self.rn_1(x))
+            x = x + self.mlp_1(self.rn_2(x)) + z
+        elif self.layer_type == "Attention":
+            x = x + self.attn(self.rn_3(x))
+            x = x + self.mlp_2(self.rn_4(x)) + z
+    
         return x
 
 class SpectralHybrid(nn.Module):
@@ -315,22 +317,42 @@ class SpectralHybrid(nn.Module):
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.controls = configs.controls
+        self.pct_attn = configs.pct_attn
         
+        if configs.moe:
+            print("\nMoE?: Enabled | Using {configs.num_experts} experts.")
+        else:
+            print("\nMoE?: Disabled")
+        
+        attn_layers = int(self.n_layers * self.pct_attn)
+        stu_layers = self.n_layers - attn_layers
+        print(f"No. attn layers={attn_layers}, No. stu layers={stu_layers}")
+
+        # Calculate the number of STU layers between each Attention layer
+        stu_per_attn = stu_layers // attn_layers if attn_layers !=0 else 0
+        
+        blocks = []
+        print(f"total number of attention layers: {attn_layers}")
+        print(f"number of stu layers between every two attention layers: {stu_per_attn}")
+        for _ in range(attn_layers):
+            blocks.extend([HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "STU") for _ in range(stu_per_attn)])
+            blocks.append(HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "Attention"))
+        
+        # Add any remaining STU layers at the end
+        blocks.extend([HybridBlock(self.configs, self.sigma, self.V, self.padded_sl, "STU") for _ in range(stu_layers % stu_per_attn)])
+        print(blocks)
         self.hybrid = nn.ModuleDict(
             dict(
                 wpe=nn.Embedding(configs.sl, configs.n_embd),
                 dropout=nn.Dropout(self.dropout),
-                hidden=nn.ModuleList(
-                    [HybridBlock(
-                        self.configs, self.sigma, self.V, self.padded_sl
-                    ) for _ in range(self.n_layers)]),
+                hidden=nn.ModuleList(blocks),
             )
         )
         
         self.input_proj = nn.Linear(self.d_in, self.n_embd, bias=self.bias)
-        self.output_proj = nn.Linear(self.n_embd, self.d_proj, bias=configs.bias)
+        self.output_proj = nn.Linear(configs.n_embd, self.d_proj, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
-        
+
         # Initialize all weights
         self.m_x = self.d_out**-0.5
         self.std = self.n_embd**-0.5
@@ -355,17 +377,13 @@ class SpectralHybrid(nn.Module):
         _, sl, _ = inputs.size()
 
         x = self.input_proj(inputs)
-        
-        # Generate positional embeddings for the sequence
-        pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
 
-        # Position embeddings of shape (sl, n_embd)
-        pos_emb = self.hybrid.wpe(pos)  # -> (sl, n_embd)
-
-        # Add positional embeddings to the input
+        # Add positional embeddings
+        pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)
+        pos_emb = self.hybrid.wpe(pos)
         x = x + pos_emb
         
-        x = self.hybrid.dropout(inputs)
+        x = self.hybrid.dropout(x)
         for block in self.hybrid.hidden:
             x = block(x)
         preds = self.output_proj(x)
@@ -403,7 +421,7 @@ class SpectralHybrid(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.n_embd)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_out)
 
     def get_num_params(self, non_embedding=True):
         """
@@ -570,7 +588,7 @@ class SpectralHybrid(nn.Module):
         print(f"Predicting on {device}.")
         num_traj, total_steps, d_out = targets.size()
         assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
 
         # Track model hallucinations
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
@@ -591,7 +609,7 @@ class SpectralHybrid(nn.Module):
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
             # Store the last prediction step for plotting
@@ -604,4 +622,3 @@ class SpectralHybrid(nn.Module):
 
         avg_loss = traj_losses.mean()
         return predicted_steps, (avg_loss, traj_losses)
-    

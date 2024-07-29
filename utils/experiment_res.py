@@ -320,16 +320,19 @@ class Experiment:
         toks_per_sec = toks_processed / dt
 
         metrics = {
-            "final_loss": final_loss.item(),
+            "loss": final_loss.item(),
             "step_time": dt,
             "tokens_per_sec": toks_per_sec,
         }
 
         # Add individual model metrics
         for i, (loss, norm) in enumerate(zip(all_losses, all_norms)):
-            metrics[f"model_{i}_loss"] = loss
-            metrics[f"model_{i}_grad_norm"] = norm
-
+            if i == 0:  # customize: show model 0's gradient norms in the training log
+                metrics[f"model_{i}_loss"] = loss
+                metrics[f"grad_norm"] = norm
+            else:
+                metrics[f"model_{i}_loss"] = loss
+                metrics[f"model_{i}_grad_norm"] = norm
         return metrics
 
     def evaluate(self, dataloader: DataLoader) -> dict[str, float]:
@@ -343,7 +346,7 @@ class Experiment:
         """
         self.model.eval()
         val_steps = len(dataloader)
-        metrics_accum = {"final_loss": 0.0, "tokens_processed": 0, "total_time": 0.0}
+        metrics_accum = {"loss": 0.0, "tokens_processed": 0, "total_time": 0.0}
         additional_metrics = {f"model_{i}_loss": 0.0 for i in range(self.num_models)}
 
         with (
@@ -363,7 +366,7 @@ class Experiment:
                         final_loss = final_loss[0]
 
                 # Accumulate final loss
-                metrics_accum["final_loss"] += final_loss.item()
+                metrics_accum["loss"] += final_loss.item()
 
                 # Accumulate individual model losses
                 for i, (preds, model_targets) in enumerate(zip(all_preds, all_targets)):
@@ -386,7 +389,7 @@ class Experiment:
 
         # Average the accumulated metrics
         metrics_avg = {
-            "loss": metrics_accum["final_loss"] / val_steps,
+            "loss": metrics_accum["loss"] / val_steps,
             "tokens_per_sec": metrics_accum["tokens_processed"]
             / metrics_accum["total_time"],
         }

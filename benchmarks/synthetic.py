@@ -11,7 +11,7 @@ from torch.utils.data import TensorDataset
 
 
 def generate_copy(
-    num_examples: int = 5,
+    num_examples: int = 10,
     num_categories: int = 10,
     copy_len: int = 10,
     blank_len: int = 5,
@@ -19,56 +19,29 @@ def generate_copy(
     seed: int = 0,
 ) -> TensorDataset:
     """
-    Generate a copy task.
-
-    This copy task is taken from (Arjovsky, Shah, and Bengio, 2016). From their
-    paper:
-
-      Following a similar setup to (Hochreiter & Schmidhuber, 1997), we outline
-      the copy memory task. Consider 10 categories, a_0 to a_9. The input takes
-      the form of a T + 20 length vector of categories, where we test over a range
-      of values of T. The first 10 entries are sampled uniformly, independently
-      and with replacement from a_0 to a_7, and represent the sequence which will
-      need to be remembered. The next T − 1 entries are set to a_8, which can be
-      thought of as the ’blank’ category. The next single entry is a_9, which
-      represents a delimiter, which should indicate to the algorithm that it is
-      now required to reproduce the initial 10 categories in the output. The
-      remaining 10 entries are set to a_8. The required output sequence consists
-      of T + 10 repeated entries of a_8, followed by the first 10 categories of
-      the input sequence in exactly the same order. The goal is to minimize the
-      average cross entropy of category predictions at each time step of the
-      sequence. The task amounts to having to remember a categorical sequence of
-      length 10, for T time steps.
-
-      A simple baseline can be established by considering an optimal strategy when
-      no memory is available, which we deem the memoryless strategy. The
-      memoryless strategy would be to predict a_8 for T + 10 entries and then
-      predict each of the final 10 categories from the set {a_i}_{i=0}^7
-      independently and uniformly at random. The categorical cross entropy of this
-      strategy is \frac{10 log(8)}{T + 20}.
-
-      If selective is True, then shuffle the blank spaces between the array to
-      copy.
+    Generate a copy task dataset based on Arjovsky, Shah, and Bengio (2016).
 
     Task Description:
     - Input sequence: [copy_sequence][blank_tokens][delimiter][blank_tokens]
     - Output sequence: [blank_tokens][copy_sequence]
 
+    The task requires remembering a categorical sequence for a variable number of time steps.
+
     Args:
-        num_examples (int): Number of examples to generate. Default is 5.
-        num_categories (int): Number of token categories. Default is 10.
+        num_examples: Number of examples to generate.
+        num_categories: Number of token categories.
             - Categories 0 to num_categories-3: Tokens to be copied
             - Category num_categories-2: Blank token
             - Category num_categories-1: Delimiter token
-        copy_len (int): Length of the sequence to be copied. Default is 10.
-        blank_len (int): Number of blank tokens between copy and paste. Default is 5.
-        selective (bool): If True, generate a selective copy task. Default is False.
-        seed (int): Random seed for reproducibility. Default is 0.
+        copy_len: Length of the sequence to be copied.
+        blank_len: Number of blank tokens between copy and paste.
+        selective: If True, shuffles blank spaces into the sequence to be copied.
+        seed: Random seed for reproducibility.
 
     Returns:
-        TensorDataset: A PyTorch dataset containing input and target tensors.
-            - inputs: Tensor of shape (num_examples, 2*copy_len + blank_len)
-            - targets: Tensor of shape (num_examples, blank_len + copy_len)
+        TensorDataset with:
+            - inputs: Shape (num_examples, 2*copy_len + blank_len)
+            - targets: Shape (num_examples, blank_len + copy_len)
 
     Example:
         >>> dataset = generate_copy(num_examples=100, copy_len=8, blank_len=3)
@@ -77,8 +50,9 @@ def generate_copy(
         torch.Size([19]) torch.Size([11])
 
     Note:
-        The total length of the input sequence is 2*copy_len + blank_len.
-        The total length of the output sequence is blank_len + copy_len.
+        A memoryless baseline strategy would predict the blank token for the first
+        (blank_len + copy_len) steps, then random tokens, yielding a categorical
+        cross entropy of (copy_len * log(num_categories-2)) / (2*copy_len + blank_len).
     """
     # Assign characters
     copy_chars = torch.arange(num_categories - 2)
@@ -112,18 +86,18 @@ def generate_copy(
     # Construct output sequences
     blank_output = torch.full((num_examples, blank_len + copy_len), blank_char)
     outputs = torch.cat((blank_output, to_copy), dim=1)
-
     return TensorDataset(inputs, outputs)
 
 def generate_adding(
-    num_examples: int = 5,
+    num_examples: int = 10,
     sequence_len: int = 10,
+    p: int = None,
     seed: int = 0,
 ) -> TensorDataset:
     """
-    Generate an adding task.
+    Generate an adding task with an optional modulo operation.
 
-    This adding task is taken from (Arjovsky, Shah, and Bengio, 2016). From their
+    This adding task is adapted from (Arjovsky, Shah, and Bengio, 2016). From their
     paper:
 
       We closely follow the adding problem defined in (Hochreiter & Schmidhuber,
@@ -134,14 +108,17 @@ def generate_adding(
       entry is located uniformly at random in the first half of the sequence,
       whilst the second 1 entry is located uniformly at random in the second half.
       The output is the sum of the two entries of the first sequence,
-      corresponding to where the 1 entries are located in the second sequence. A
-      naive strategy of predicting 1 as the output regardless of the input
-      sequence gives an expected mean squared error of 0.167, the variance of the
-      sum of two independent uniform distributions. This is our baseline to beat.
+      corresponding to where the 1 entries are located in the second sequence.
+      
+      IMPORTANT: A naive strategy of predicting 1 as the output regardless of the
+      input sequence gives an expected mean squared error of 0.167, the variance
+      of the sum of two independent uniform distributions. This is our baseline to beat.
 
     Args:
       num_examples: Number of examples to generate.
       sequence_len: Length of each sequence.
+      p: If provided, the sum will be computed modulo p. If None, no modulo
+         operation is performed.
       seed: Seed for random number generator.
 
     Returns:
@@ -163,15 +140,57 @@ def generate_adding(
     # Compute the outputs.
     outputs = torch.sum(seq_1 * seq_2, dim=1)
 
+    # Apply modulo operation if p is provided
+    if p is not None:
+        outputs = outputs % p
+
     # Concatenate the inputs.
     inputs = torch.cat((seq_1, seq_2), dim=1)
 
     # Construct dataset.
     return TensorDataset(inputs, outputs)
 
+def generate_mode_tracking(
+    num_examples: int = 10,
+    sequence_len: int = 10,
+    num_classes: int = 5,
+    seed: int = 0,
+) -> TensorDataset:
+    """
+    Generate a mode tracking task.
+
+    In this task, each input consists of a sequence of integers. The output
+    at each step is the mode (most frequent element) of all elements seen
+    so far in the sequence. If there's a tie, the smallest number is chosen.
+
+    Args:
+      num_examples: Number of examples to generate.
+      sequence_len: Length of each sequence.
+      num_classes: Number of possible integer classes (0 to num_classes-1).
+      seed: Seed for random number generator.
+
+    Returns:
+      A PyTorch dataset.
+    """
+    # Set random seed
+    torch.manual_seed(seed)
+
+    # Generate input sequences
+    inputs = torch.randint(0, num_classes, (num_examples, sequence_len))
+
+    # Compute outputs
+    outputs = torch.zeros_like(inputs)
+    for i in range(num_examples):
+        counts = torch.zeros(num_classes)
+        for j in range(sequence_len):
+            counts[inputs[i, j]] += 1
+            outputs[i, j] = torch.argmax(counts)
+
+    # Construct dataset
+    return TensorDataset(inputs, outputs)
 
 def generate_induction_heads(
-    num_examples: int = 5,
+    num_examples: int = 10,
     sequence_len: int = 30,
     vocab_size: int = 20,
     seed: int = 0,
@@ -209,13 +228,12 @@ def generate_induction_heads(
     # Place special token at the end of the sequence.
     inputs[:, -1] = special
 
-    outputs = inputs[torch.arange(num_examples), idx + 1]
+    outputs = inputs[torch.arange(num_examples), idx + 1]   # the targets are set to be the token after the second special token, i.e. the last special token
 
     return TensorDataset(inputs, outputs)
 
-
 def generate_associative_recall(
-    num_examples: int = 5,
+    num_examples: int = 10,
     sequence_len: int = 30,
     vocab_size: int = 10,
     seed: int = 0,
@@ -276,7 +294,7 @@ def generate_associative_recall(
     return TensorDataset(inputs, outputs)
 
 def generate_multi_scale_adaptive(
-    num_examples: int = 5,
+    num_examples: int = 10,
     sequence_len: int = 1000,
     num_regimes: int = 3,
     noise_level: float = 0.1,
@@ -330,7 +348,7 @@ def generate_multi_scale_adaptive(
     return TensorDataset(inputs, targets)
 
 def generate_needle_in_haystack(
-    num_examples: int = 5,
+    num_examples: int = 10,
     sequence_len: int = 1000,
     needle_len: int = 5,
     vocab_size: int = 100,
@@ -373,7 +391,7 @@ def generate_needle_in_haystack(
     return TensorDataset(inputs, targets)
 
 def generate_telephone_book(
-    num_examples: int = 5,
+    num_examples: int = 10,
     num_entries: int = 100,
     name_len: int = 10,
     number_len: int = 10,
