@@ -17,11 +17,13 @@ from utils.swiglu import SwiGLU
 
 @dataclass
 class TransformerConfigs:
-    n_layers: int = 2
-    n_embd: int = 512  # Embedding dimension
-    n_heads: int = 16  # Constraint: n_heads % n_embd == 0
-    sl: int = 300  # Sequence length
-    scale: int = 4
+    d_in: int = 37
+    d_out: int = 29
+    n_layers: int = 4
+    d_model: int = 37  # Embedding dimension
+    n_heads: int = 16  # Constraint: n_heads % d_model == 0
+    sl: int = 1_000  # Sequence length
+    mlp_scale: float = 4
     sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
@@ -54,8 +56,8 @@ class FFN(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            scale (float): Scaling factor for hidden dimension.
-            n_embd (int): Embedding dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
+            d_model (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
@@ -63,7 +65,7 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.n_embd, h_dim=configs.scale * configs.n_embd,
+            dim=configs.d_model, h_dim=int(configs.mlp_scale * configs.d_model),
             bias=configs.bias, use_sq_relu=configs.use_sq_relu
         )
         self.dropout = nn.Dropout(configs.dropout)
@@ -88,18 +90,18 @@ class GatedFFN(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            n_embd (int): Input and output embedding dimension.
-            scale (float): Scaling factor for hidden dimension.
+            d_model (int): Input and output embedding dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.n_embd
-        self.out_features = configs.n_embd
+        self.in_features = configs.d_model
+        self.out_features = configs.d_model
         self.chunks = 2
-        self.hidden_features = int(configs.scale * configs.n_embd)
+        self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
         self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
         self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
@@ -130,14 +132,14 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
-        self.rn_2 = RMSNorm(configs.n_embd, eps=configs.rms_norm_eps)
+        self.rn_1 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
+        self.rn_2 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
 
         self.ffn_1 = MoE(
             configs,
             experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedFFN(configs)
 
     def _get_attn_type(self, configs):
@@ -147,7 +149,7 @@ class TransformerBlock(nn.Module):
             return CausalSelfAttention(configs)
 
     def forward(self, x):
-        x = x + self.attn(self.rn_1(x)) #TODO: pre-norm or no
+        x = x + self.attn(self.rn_1(x))
         x = x + self.ffn_1(self.rn_2(x))
         return x
 
@@ -161,8 +163,9 @@ class Transformer(nn.Module):
         assert configs.sl is not None
         self.configs = configs
         self.controls = configs.controls
-        self.n_embd = configs.n_embd
-        self.d_in = nn.Linear(self.n_embd, self.n_embd)
+        self.d_in = configs.d_in
+        self.d_model = configs.d_model
+        self.d_out = configs.d_out
         self.dropout = nn.Dropout(self.configs.dropout)
         
         if configs.moe:
@@ -173,7 +176,7 @@ class Transformer(nn.Module):
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
-                wpe=nn.Embedding(configs.sl, configs.n_embd),
+                wpe=nn.Embedding(configs.sl, configs.d_model),
                 dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
@@ -181,19 +184,12 @@ class Transformer(nn.Module):
             )
         )
 
-        # Adjust output dims based on task and controller
-        self.d_out = configs.n_embd
-        if configs.controls["task"] == "mujoco-v1":
-            if configs.controls["controller"] == "Ant-v1":
-                self.d_out = 29
-            else:
-                self.d_out = 18
-
-        self.output = nn.Linear(configs.n_embd, self.d_out, bias=configs.bias)
+        self.input_proj = nn.Linear(configs.d_in, self.d_model, bias=configs.bias)
+        self.output_proj = nn.Linear(configs.d_model, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = self.n_embd**-0.5
+        self.std = self.d_model**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -247,29 +243,31 @@ class Transformer(nn.Module):
             torch.Tensor: Predicted output tensor of shape (bsz, sl, d_out)
             tuple: Loss (and metrics, if applicable)
         """
-        _, sl, d_in = inputs.size()
+        _, sl, _ = inputs.size()
+
+        x = self.input_proj(inputs)
 
         # Generate positional embeddings for the sequence
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
 
-        # Position embeddings of shape (sl, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # -> (sl, n_embd)
+        # Position embeddings of shape (sl, d_model)
+        pos_emb = self.transformer.wpe(pos)  # -> (sl, d_model)
 
         # Add positional embeddings to the input
-        x = inputs + pos_emb
+        x = x + pos_emb
 
         incremental_state = None # 
         if self.configs.dilated_attn:
             incremental_state = {}
 
-        x = self.transformer.dropout(inputs)
+        x = self.transformer.dropout(x)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:
             x = block(x)
 
-        # Output model predictions!
-        preds = self.output(x)  # -> (bsz, sl, d_out)
+        # Output model predictions
+        preds = self.output_proj(x)
 
         if self.controls["task"] != "mujoco-v3":
             loss, metrics = (

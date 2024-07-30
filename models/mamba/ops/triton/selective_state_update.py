@@ -16,7 +16,7 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
-from mamba_ssm.ops.triton.softplus import softplus
+from models.mamba.ops.triton.softplus import softplus
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})

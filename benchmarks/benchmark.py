@@ -8,9 +8,13 @@
 import argparse
 import time
 import torch
+
 from benchmarks.stu import SpectralSSM, SpectralSSMConfigs, ResidualSTU
+
+# from models.stu.model2 import SpectralSSM, SpectralSSMConfigs
 from benchmarks.transformer import Transformer, TransformerConfigs
 from benchmarks.hybrid import SpectralHybrid, SpectralHybridConfigs
+# from benchmarks.hybrid import Mamba2, Mamba2Configs
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,7 +37,7 @@ from benchmarks.synthetic import (
 
 def get_dataloader(
     dataset,
-    batch_size,
+    bsz,
     shuffle=True,
     sampler=None,
     distributed=False,
@@ -47,7 +51,7 @@ def get_dataloader(
 
     return DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=bsz,
         shuffle=shuffle,
         sampler=sampler,
         pin_memory=pin_memory,
@@ -56,9 +60,9 @@ def get_dataloader(
 
 
 def print_dataset_info(train_loader, world_size, local_rank, main_process):
-    local_batch_size = train_loader.batch_size
+    local_bsz = train_loader.batch_size
     num_batches = len(train_loader)
-    local_size = num_batches * local_batch_size
+    local_size = num_batches * local_bsz
 
     if world_size > 1:
         global_size = torch.tensor(local_size, dtype=torch.int64, device="cuda")
@@ -71,8 +75,8 @@ def print_dataset_info(train_loader, world_size, local_rank, main_process):
         print(f"Global dataset size: {global_size}")
         print(f"Local dataset size on rank {local_rank}: {local_size}")
         print(f"Number of batches on rank {local_rank}: {num_batches}")
-        print(f"Local batch size: {local_batch_size}")
-        print(f"Effective global batch size: {world_size * local_batch_size}")
+        print(f"Local batch size: {local_bsz}")
+        print(f"Effective global batch size: {world_size * local_bsz}")
 
 
 class Benchmark:
@@ -101,43 +105,39 @@ class Benchmark:
         self.task = task
         self.max_grad_norm = max_grad_norm
         self.time = None
+        self.criterion = get_loss_fn(self.task)
 
-        if self.task == "adding":
-            self.criterion = MSELoss()
-        elif self.task == "copy" or self.task == "induction":
-            self.criterion = CrossEntropyLoss()
-        else:
-            raise ValueError("Task not yet supported")
-
-    def train(self, dataloader, num_epochs=3):
+    def train(self, dataloader, n_epochs=1):
         """
         Train the model for a specified number of epochs.
 
         Args:
             dataloader (DataLoader): DataLoader for the training dataset.
-            num_epochs (int): Number of epochs to train. Default is 1.
+            n_epochs (int): Number of epochs to train. Default is 1.
 
         Returns:
             None
         """
         self.model.train()
-        for current_epoch in range(num_epochs):
+        for current_epoch in range(n_epochs):
             if isinstance(dataloader.sampler, DistributedSampler):
                 dataloader.sampler.set_epoch(current_epoch)
 
             total_loss = 0
             num_batches = len(dataloader)
             for batch, (inputs, targets) in enumerate(
-                tqdm(dataloader, desc=f"Training Epoch {current_epoch+1}/{num_epochs}")
+                tqdm(dataloader, desc=f"Training Epoch {current_epoch+1}/{n_epochs}")
             ):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 self.optimizer.zero_grad()
 
                 # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 _, loss = self.model(inputs, targets)
-
                 if not torch.isfinite(loss):
-                    print(f"Warning: Non-finite loss detected: {loss.item()}. Skipping this batch.")
+                    colored_print(
+                        f"Warning: Non-finite loss detected: {loss.item()}. Skipping this batch.",
+                        Colors.WARNING,
+                    )
                     continue
 
                 loss.backward()
@@ -155,10 +155,12 @@ class Benchmark:
 
             epoch_loss = total_loss / num_batches
             print(
-                f"Epoch {current_epoch+1}/{num_epochs}, Average Loss: {epoch_loss:.4f}"
+                f"Epoch {current_epoch+1}/{n_epochs}, Average Loss: {epoch_loss:.4f}"
             )
 
-    def evaluate(self, dataset_name, dataloader):
+    def evaluate(
+        self, dataset_name: str, dataloader: DataLoader
+    ) -> tuple[float, float]:
         """
         Evaluate the model on a given dataset.
 
@@ -169,80 +171,115 @@ class Benchmark:
         Returns:
             tuple: A tuple containing:
                 - avg_loss (float): The average loss over the dataset.
-                - accuracy (float): The accuracy as a percentage.
+                - accuracy (float): The accuracy as a percentage (or MSE for adding task).
         """
         self.model.eval()
         total_loss = 0.0
         total_correct = 0
         total_samples = 0
+        total_predictions = 0
 
         with torch.no_grad():
             for batch, (inputs, targets) in enumerate(
                 tqdm(dataloader, desc=f"Evaluating on {dataset_name}")
             ):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                # with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 preds, loss = self.model(inputs, targets)
 
                 total_loss += loss.item()
-                
-                if self.task in ["copy", "induction"]:
+
+                if self.task == "copy":
                     total_correct += (preds == targets).sum().item()
                     total_samples += targets.numel()
+                elif self.task == "associative":
+                    total_correct += (preds == targets).sum().item()
+                    total_samples += targets.size(
+                        0
+                    )  # Count per sequence, not per token
+                elif self.task == "induction":
+                    mask = targets != -1
+                    total_correct += (preds[mask] == targets[mask]).sum().item()
+                    total_predictions += mask.sum().item()
                 elif self.task == "adding":
                     total_samples += targets.numel()
+                    total_correct += ((preds - targets) ** 2).sum().item()
                 else:
                     colored_print(
-                        f"Warning: Output shape {preds.shape} doesn't match target shape {targets.shape}. "
+                        f"Warning: Unknown task '{self.task}'. "
                         f"Skipping accuracy calculation for this batch.",
                         Colors.WARNING,
                     )
 
-                # Print loss every 10 steps
                 if (batch + 1) % 10 == 0:
                     print(
                         f"Evaluation Batch {batch+1}/{len(dataloader)}, Loss: {loss.item():.4f}"
                     )
 
-
         if torch.distributed.is_initialized():
-            metrics = torch.tensor([total_loss, total_correct, total_samples]).to(self.device)
+            metrics = torch.tensor(
+                [total_loss, total_correct, total_samples, total_predictions]
+            ).to(self.device)
             torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
-            total_loss, total_correct, total_samples = metrics.tolist()
+            total_loss, total_correct, total_samples, total_predictions = (
+                metrics.tolist()
+            )
 
         avg_loss = total_loss / len(dataloader)
-        
-        if self.task == "adding":
-            return avg_loss, avg_loss
-        else:
-            accuracy = (total_correct / total_samples) * 100 if total_samples > 0 else 0
-            return avg_loss, accuracy
 
-    def benchmark(self, train_loader, val_loader, num_epochs=3):
+        print(f"\nEvaluation on {dataset_name}:")
+        print(f"Average Loss: {avg_loss:.4f}")
+
+        if self.task == "adding":
+            mse = total_correct / total_samples
+            print(f"Mean Squared Error: {mse:.4f}")
+            return avg_loss, mse
+        elif self.task in ["copy", "associative", "induction"]:
+            if self.task == "induction":
+                accuracy = (
+                    (total_correct / total_predictions) * 100
+                    if total_predictions > 0
+                    else 0
+                )
+            else:
+                accuracy = (
+                    (total_correct / total_samples) * 100 if total_samples > 0 else 0
+                )
+            print(f"Accuracy: {accuracy:.2f}%")
+            print(f"Total Correct: {total_correct}")
+            print(
+                f"Total Samples: {total_samples if self.task != 'induction' else total_predictions}"
+            )
+            return avg_loss, accuracy
+        else:
+            colored_print(
+                f"Warning: Unknown task '{self.task}'. Unable to calculate accuracy.",
+                Colors.WARNING,
+            )
+            return avg_loss, None
+
+    def benchmark(self, train_loader, val_loader, n_epochs=1):
         """
         Run the benchmark on a dataset.
 
         Args:
-            dataset_name (str): Name of the dataset.
-            dataloader (DataLoader): DataLoader for the dataset.
-            num_epochs (int): Number of epochs to train.
+            train_loader (DataLoader): DataLoader for the training dataset.
+            val_loader (DataLoader): DataLoader for the validation dataset.
+            n_epochs (int): Number of epochs to train.
         """
-        # Train
         start = time.time()
-        self.train(train_loader, num_epochs=num_epochs)
+        self.train(train_loader, n_epochs=n_epochs)
         end = time.time()
         self.time = end - start
 
-        # Evaluate
-        loss, accuracy = self.evaluate(self.task, val_loader)
+        loss, metric = self.evaluate(self.task, val_loader)
 
         colored_print(f"Dataset: {self.task}", Colors.HEADER)
         colored_print(f"  Validation Loss: {loss:.4f}", Colors.OKBLUE)
         
-        if self.task in ["copy", "induction"]:
-            colored_print(f"  Accuracy: {accuracy:.2f}%", Colors.OKGREEN)
-        elif self.task in ["adding"]:
-            colored_print(f"  Mean Squared Error: {loss:.4f}", Colors.OKGREEN)
+        if self.task in ["copy", "induction", "associative"]:
+            colored_print(f"  Accuracy: {metric:.2f}%", Colors.OKGREEN)
+        elif self.task == "adding":
+            colored_print(f"  Mean Squared Error: {metric:.4f}", Colors.OKGREEN)
 
         colored_print(f"  Training Time: {self.time:.2f} seconds", Colors.OKBLUE)
         print()
@@ -252,12 +289,14 @@ def get_input_dim(args):
     if args.task in [
         "copy",
         "selective_copy",
-        "induction",
-        "associative",
         "needle_in_haystack",
         "telephone_book",
     ]:
         return args.vocab_size
+    elif args.task == "induction":
+        return args.vocab_size + 3
+    elif args.task == "associative":
+        return args.vocab_size + 1
     elif args.task == "adding":
         return 2  # The adding task has 2 input channels
     elif args.task == "multi_scale_adaptive":
@@ -267,8 +306,10 @@ def get_input_dim(args):
 
 
 def get_output_dim(args):
-    if args.task in ["copy", "selective_copy", "induction", "associative"]:
+    if args.task in ["copy", "selective_copy", "associative"]:
         return args.vocab_size
+    elif args.task == "induction":
+        return args.vocab_size + 3
     elif args.task == "adding":
         return 1  # The adding task has a single output (the sum)
     elif args.task == "multi_scale_adaptive":
@@ -281,13 +322,25 @@ def get_output_dim(args):
         raise ValueError(f"Unknown task: {args.task}")
 
 
-def get_model(args, device):
+def get_loss_fn(task):
+    if task == "adding":
+        return MSELoss()
+    elif task in ["induction", "copy"]:
+        return CrossEntropyLoss(ignore_index=-1)
+    elif task == "associative":
+        return CrossEntropyLoss()
+    else:
+        raise ValueError(f"Unknown task: {task}")
+
+
+def get_model(args, device, world_size):
     """
     Create and configure the Spectral SSM model.
 
     Args:
         args (argparse.Namespace): Command-line arguments.
         device (torch.device): Device to run the model on.
+        world_size (int: Number of processes.
 
     Returns:
         SpectralSSM: Configured Spectral SSM model.
@@ -297,13 +350,13 @@ def get_model(args, device):
         configs = TransformerConfigs(
             # General Transformer settings
             n_layers=args.n_layers,
-            n_embd=args.n_embd,
+            d_model=args.d_model,
             n_heads=args.n_heads,
             d_in=get_input_dim(args),
             d_out=get_output_dim(args),
             sl=args.sl,
             ffn_scale=args.ffn_scale,
-            embd_scale=args.embd_scale,
+            d_model_scale=args.d_model_scale,
             sub_rn=args.sub_rn,
             bias=args.bias,
             dropout=args.dropout,
@@ -311,7 +364,7 @@ def get_model(args, device):
             use_sq_relu=args.use_sq_relu,
             task=args.task,
             vocab_size=args.vocab_size,
-            loss_fn=MSELoss() if args.task == "adding" else CrossEntropyLoss(),
+            loss_fn=get_loss_fn(args.task),
             device=device,
             # MoE
             moe=args.moe,
@@ -333,12 +386,12 @@ def get_model(args, device):
         # python -m benchmarks.benchmark --model stu --learnable_m_y --task {task} --use_ar_y --use_ar_u
         configs = SpectralSSMConfigs(
             n_layers=args.n_layers,
-            n_embd=args.n_embd,
+            d_model=args.d_model,
             d_in=get_input_dim(args),
             d_out=get_output_dim(args),
             sl=args.sequence_len,
             mlp_scale=args.mlp_scale,
-            embd_scale=args.embd_scale,
+            d_model_scale=args.d_model_scale,
             bias=args.bias,
             dropout=args.dropout,
             num_eigh=args.num_eigh,
@@ -354,7 +407,7 @@ def get_model(args, device):
             num_experts_per_timestep=args.num_experts_per_timestep,
             task=args.task,
             vocab_size=args.vocab_size,
-            loss_fn=MSELoss() if args.task == "adding" else CrossEntropyLoss(),
+            loss_fn=get_loss_fn(args.task),
             device=device,
         )
         model = SpectralSSM(configs).to(device)
@@ -362,13 +415,14 @@ def get_model(args, device):
 
     if args.model == "hybrid":
         configs = SpectralHybridConfigs(
-            n_layers=args.n_layers,
-            n_embd=args.n_embd,
+            d_in=args.vocab_size,
+            d_out=args.vocab_size,
+            d_model=args.d_model,
             n_heads=args.n_heads,
-            d_in=get_input_dim(args),
-            d_out=get_output_dim(args),
-            sl=args.sequence_len,
+            n_layers=args.n_layers,
+            sl=args.sl,
             mlp_scale=args.mlp_scale,
+            d_model_scale=args.d_model_scale,
             bias=args.bias,
             dropout=args.dropout,
             num_eigh=args.num_eigh,
@@ -379,25 +433,62 @@ def get_model(args, device):
             use_ar_y=args.use_ar_y,
             use_ar_u=args.use_ar_u,
             use_hankel_L=args.use_hankel_L,
+            pct_attn=args.pct_attn,
             moe=args.moe,
             num_experts=args.num_experts,
             num_experts_per_timestep=args.num_experts_per_timestep,
             task=args.task,
             vocab_size=args.vocab_size,
-            loss_fn=MSELoss() if args.task == "adding" else CrossEntropyLoss(),
+            loss_fn=CrossEntropyLoss(),
             device=device,
-            flash_attn=args.flash_attn,
-            use_sq_relu=args.use_sq_relu,
-            dilated_attn=args.dilated_attn,
-            segment_lengths=args.segment_lengths,
-            dilated_ratios=args.dilated_ratios,
-            seq_parallel=args.seq_parallel,
-            xpos_rel_pos=args.xpos_rel_pos,
-            xpos_scale_base=args.xpos_scale_base,
-            rms_norm_eps=args.rms_norm_eps,
-            multiway=args.multiway,
         )
         model = SpectralHybrid(configs).to(device)
+
+    # if args.model == "mamba-2":
+    #     # python -m benchmarks.benchmark --model transformer --learnable_m_y --task {task} --flash_attn --sub_rn
+    #     configs = Mamba2Configs(
+    #         bsz=args.bsz,
+    #         n_layers=args.n_layers,
+    #         d_in=get_input_dim(),
+    #         d_model=args.d_model,
+    #         d_out=get_output_dim(),
+    #         d_proj=d_proj,
+    #         mlp_scale=args.mlp_scale,
+    #         dropout=args.dropout,
+    #         d_state=args.d_state,
+    #         d_conv=args.d_conv,
+    #         conv_init=args.conv_init,
+    #         expand=arg.sexpand,
+    #         headdim=args.headdim,
+    #         d_ssm=args.d_ssm,
+    #         ngroups=args.ngroups,
+    #         A_init_range=args.A_init_range,
+    #         activation=args.activation,
+    #         D_has_hdim=args.D_has_hdim,
+    #         rmsnorm=args.rmsnorm,
+    #         norm_before_gate=args.norm_before_gate,
+    #         dt_min=args.dt_min,
+    #         dt_max=args.dt_max,
+    #         dt_init_floor=args.dt_init_floor,
+    #         dt_limit=args.dt_limit,
+    #         bias=args.bias,
+    #         conv_bias=args.conv_bias,
+    #         chunk_size=args.chunk_size,
+    #         use_mem_eff_path=args.use_mem_eff_path,
+    #         process_group=args.process_group,
+    #         sequence_parallel=args.sequence_parallel,
+
+    #         # MoE
+    #         moe=arg.smoe,
+    #         num_experts=args.num_experts,
+    #         num_experts_per_timestep=args.num_experts_per_timestep,
+
+    #         loss_fn=get_loss_fn(args.task),
+    #         device=device,
+    #         dtype=args.dtype,
+    #         world_size=world_size,
+    #     )
+    #     model = Mamba2(configs).to(device)
 
     return model
 
@@ -431,7 +522,7 @@ def main():
         "--model",
         type=str,
         default="stu",
-        choices=["stu", "transformer", "hybrid", "mamba"],
+        choices=["stu", "transformer", "hybrid", "mamba-2"],
         help="Model to benchmark",
     )
     parser.add_argument("--compile", action="store_true", help="Compile the model")
@@ -471,6 +562,25 @@ def main():
         default=20,
         help="Vocabulary size (for applicable tasks)",
     )
+    parser.add_argument(
+        "--min_prefix_len", type=int, default=1, help="Minimum prefix length"
+    )
+    parser.add_argument(
+        "--max_prefix_len", type=int, default=1, help="Maximum prefix length"
+    )
+    parser.add_argument(
+        "--min_pattern_len", type=int, default=1, help="Minimum pattern length"
+    )
+    parser.add_argument(
+        "--max_pattern_len", type=int, default=1, help="Maximum pattern length"
+    )
+    parser.add_argument(
+        "--num_patterns",
+        type=int,
+        default=1,
+        help="Number of patterns in each sequence",
+    )
+    parser.add_argument("--num_pairs", type=int, default=8, help="Number of pairs")
     parser.add_argument(
         "--selective", action="store_true", help="Use selective copy task"
     )
@@ -521,10 +631,10 @@ def main():
 
     parser.add_argument("--seed", type=int, default=1_337, help="Random seed")
     parser.add_argument(
-        "--num_epochs", type=int, default=3, help="Number of epochs to train"
+        "--n_epochs", type=int, default=1, help="Number of epochs to train"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=2, help="Batch size for evaluation"
+        "--bsz", type=int, default=2, help="Batch size for evaluation"
     )
 
     # Model hyperparameters
@@ -532,20 +642,26 @@ def main():
         "--n_layers", type=int, default=1, help="Number of layers in the model"
     )
     parser.add_argument("--d_model", type=int, default=32, help="Model dimension")
-    parser.add_argument("--n_embd", type=int, default=64, help="Embedding dimension")
     parser.add_argument(
         "--n_heads", type=int, default=1, help="Number of attention heads"
     )
     parser.add_argument("--d_in", type=int, default=1, help="Input dimension")
     parser.add_argument("--d_out", type=int, default=1, help="Output dimension")
     parser.add_argument("--sl", type=int, default=1000, help="Sequence length")
-    parser.add_argument("--mlp_scale", type=float, default=4, help="MLP scale factor")
+    parser.add_argument("--mlp_scale", type=int, default=4, help="MLP scale factor")
     parser.add_argument("--ffn_scale", type=int, default=4, help="FFN scale factor")
-    parser.add_argument("--embd_scale", type=int, default=4, help="Embedding scale factor")
+    parser.add_argument(
+        "--d_model_scale", type=int, default=4, help="Embedding scale factor"
+    )
     parser.add_argument("--sub_rn", action="store_true", help="Use sub-layer RMS Norm")
     parser.add_argument("--bias", action="store_true", help="Use bias in the model")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate")
-    parser.add_argument("--pct_attn", type=float, default=0.5, help="Percentage of layers using attention")
+    parser.add_argument(
+        "--pct_attn",
+        type=float,
+        default=0.5,
+        help="Percentage of layers using attention",
+    )
     parser.add_argument("--flash_attn", action="store_true", help="Use FlashAttention")
     parser.add_argument("--use_sq_relu", action="store_true", help="Use Squared ReLU")
     parser.add_argument(
@@ -664,11 +780,23 @@ def main():
         )
     elif args.task == "induction":
         dataset = generate_induction_heads(
-            args.num_examples, args.sequence_len, args.vocab_size, args.seed
+            args.num_examples,
+            args.sequence_len,
+            args.vocab_size,
+            args.min_prefix_len,
+            args.max_prefix_len,
+            args.min_pattern_len,
+            args.max_pattern_len,
+            args.num_patterns,
+            args.seed,
         )
     elif args.task == "associative":
         dataset = generate_associative_recall(
-            args.num_examples, args.sequence_len, args.vocab_size, args.seed
+            args.num_examples,
+            args.sequence_len,
+            args.vocab_size,
+            args.num_pairs,
+            args.seed,
         )
     elif args.task == "multi_scale_adaptive":
         dataset = generate_multi_scale_adaptive(
@@ -695,7 +823,7 @@ def main():
             args.vocab_size,
             args.seed,
         )
-    assert args.batch_size <= len(
+    assert args.bsz <= len(
         dataset
     ), "Batch size must be less than the dataset size."
 
@@ -728,7 +856,7 @@ def main():
 
     train_loader = get_dataloader(
         train_dataset,
-        batch_size=args.batch_size,
+        bsz=args.bsz,
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         distributed=(world_size > 1),
@@ -738,7 +866,7 @@ def main():
 
     val_loader = get_dataloader(
         val_dataset,
-        batch_size=args.batch_size,
+        bsz=args.bsz,
         sampler=val_sampler,
         shuffle=False,
         distributed=(world_size > 1),
@@ -746,7 +874,7 @@ def main():
     )
 
     # Create model
-    model = get_model(args, device)
+    model = get_model(args, device, world_size)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
     model = model.module if world_size > 1 else model
@@ -757,7 +885,7 @@ def main():
     benchmark = Benchmark(model, args.task, args.max_grad_norm, device)
 
     # Run benchmark
-    benchmark.benchmark(train_loader, val_loader, num_epochs=args.num_epochs)
+    benchmark.benchmark(train_loader, val_loader, n_epochs=args.n_epochs)
 
     if main_process:
         colored_print(
@@ -766,7 +894,7 @@ def main():
         )
         print(f"Length of dataset: {len(dataset)}")
         colored_print(
-            f"Total time steps: {len(train_dataset) * args.num_epochs}",
+            f"Total time steps: {len(train_dataset) * args.n_epochs}",
             Colors.OKGREEN,
         )
         colored_print(
@@ -797,12 +925,17 @@ def main():
             print(f"Number of examples: {args.num_examples}")
             print(f"Sequence length: {args.sequence_len}")
             print(f"Vocabulary size: {args.vocab_size}")
+            print(f"Min prefix length: {args.min_prefix_len}")
+            print(f"Max prefix length: {args.max_prefix_len}")
+            print(f"Min pattern length: {args.min_pattern_len}")
+            print(f"Max pattern length: {args.max_pattern_len}")
             print(f"Seed: {args.seed}")
         elif args.task == "associative":
             print("Task: Associative Recall")
             print(f"Number of examples: {args.num_examples}")
             print(f"Sequence length: {args.sequence_len}")
             print(f"Vocabulary size: {args.vocab_size}")
+            print(f"Number of pairs: {args.num_pairs}")
             print(f"Seed: {args.seed}")
         elif args.task == "multi_scale_adaptive":
             print("Task: Multi-scale Adaptive")
@@ -826,6 +959,10 @@ def main():
             print(f"Number length: {args.number_len}")
             print(f"Vocabulary size: {args.vocab_size}")
             print(f"Seed: {args.seed}\n")
+        colored_print(
+            "\nModel Parameter Count: %.4fM\n" % (model.get_num_params() / 1e6,),
+            Colors.BOLD,
+        )
 
 
 if __name__ == "__main__":

@@ -584,7 +584,7 @@ def _mamba_chunk_scan_combined_fwd(
     dt_bias=None,
     initial_states=None,
     seq_idx=None,
-    cu_sl=None,
+    cu_seqlens=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
 ):
@@ -648,18 +648,18 @@ def _mamba_chunk_scan_combined_fwd(
     out, out_x = _chunk_scan_fwd(
         CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx
     )
-    if cu_sl is None:
+    if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
     else:
         assert (
             batch == 1
-        ), "passing cu_sl to get the varlen states is only supported if batch dimension is 1"
+        ), "passing cu_seqlens to get the varlen states is only supported if batch dimension is 1"
         varlen_states = chunk_state_varlen(
             B.squeeze(0),
             x.squeeze(0),
             dt.squeeze(0),
             dA_cumsum.squeeze(0),
-            cu_sl,
+            cu_seqlens,
             states.squeeze(0),
         )
         return out, out_x, dt, dA_cumsum, states, final_states, varlen_states
@@ -966,7 +966,7 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
         dt_bias=None,
         initial_states=None,
         seq_idx=None,
-        cu_sl=None,
+        cu_seqlens=None,
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         return_final_states=False,
@@ -974,11 +974,11 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
     ):
         ctx.dt_dtype = dt.dtype
         if not return_varlen_states:
-            cu_sl = None
+            cu_seqlens = None
         else:
             assert (
-                cu_sl is not None
-            ), "cu_sl must be provided if return_varlen_states is True"
+                cu_seqlens is not None
+            ), "cu_seqlens must be provided if return_varlen_states is True"
         out, out_x, dt_out, dA_cumsum, states, final_states, *rest = (
             _mamba_chunk_scan_combined_fwd(
                 x,
@@ -992,7 +992,7 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
                 dt_bias=dt_bias,
                 initial_states=initial_states,
                 seq_idx=seq_idx,
-                cu_sl=cu_sl,
+                cu_seqlens=cu_seqlens,
                 dt_softplus=dt_softplus,
                 dt_limit=dt_limit,
             )
@@ -1087,7 +1087,7 @@ def mamba_chunk_scan_combined(
     dt_bias=None,
     initial_states=None,
     seq_idx=None,
-    cu_sl=None,
+    cu_seqlens=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
     return_final_states=False,
@@ -1106,7 +1106,7 @@ def mamba_chunk_scan_combined(
         dt_bias: (nheads,)
         initial_states: (batch, nheads, headdim, dstate)
         seq_idx: (batch, seqlen)
-        cu_sl: (num_sequences + 1) or None, only used if return_varlen_states is True
+        cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
     Return:
         out: (batch, seqlen, nheads, headdim)
@@ -1123,7 +1123,7 @@ def mamba_chunk_scan_combined(
         dt_bias,
         initial_states,
         seq_idx,
-        cu_sl,
+        cu_seqlens,
         dt_softplus,
         dt_limit,
         return_final_states,
@@ -1248,7 +1248,7 @@ def ssd_selective_scan(
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
-    from models.mamba.ops.selective_scan_interface import selective_scan_fn
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
@@ -1407,20 +1407,6 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1
         )
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-
-        ## DEBUG ##
-        # channel_dim = xBC.shape[-1]
-        # print(f"dim: {dim}")
-        # print(f"ngroups: {ngroups}")
-        # print(f"dstate: {dstate}")
-        # print(f"nheads: {nheads}")
-        # print(f"headdim: {headdim}")
-        # print(f"Channel dimension size (dim + ngroups * dstate * 2): {dim + ngroups * dstate * 2}")
-        # print(f"Channel dimension size: {channel_dim}")
-        # print(f"xBC shape: {xBC.shape}")
-        # print(f"xBC strides: {xBC.stride()}")
-        ## DEBUG ##
-
         xBC_conv = rearrange(
             causal_conv1d_cuda.causal_conv1d_fwd(
                 rearrange(xBC, "b s d -> b d s"),

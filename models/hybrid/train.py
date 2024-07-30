@@ -25,6 +25,7 @@ from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp, optimizer as opt
 from models.hybrid.model import SpectralHybrid, SpectralHybridConfigs
+from utils.loss_landscape import LossLandscape
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
@@ -218,7 +219,7 @@ def main() -> None:
     # General training settings
     n_layers: int = 2
     mlp_scale: float = 4
-    embd_scale: float = 1
+    embd_scale: float = 3
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
@@ -240,17 +241,17 @@ def main() -> None:
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
-        n_embd = int(embd_scale * d_in)
-        d_out = n_embd    # before projection d_in = d_out
+        d_model = int(embd_scale * d_in)
+        d_out = d_model    # before projection d_in = d_out
         d_proj: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
         n_heads: int = 9 if controller != "Ant-v1" else 1
-        n_embd = int(embd_scale * d_in)
-        d_out = n_embd
-        d_proj = n_embd
+        d_model = int(embd_scale * d_in)
+        d_out = d_model
+        d_proj = d_model
         sl: int = 1000
 
     elif task["mujoco-v3"]:
@@ -259,8 +260,8 @@ def main() -> None:
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_heads: int = 16
-        n_embd = int(embd_scale * d_in)
-        d_proj = n_embd
+        d_model = int(embd_scale * d_in)
+        d_proj = d_model
         sl: int = 300
 
     configs = SpectralHybridConfigs(
@@ -278,7 +279,7 @@ def main() -> None:
         use_hankel_L=use_hankel_L,
 
         # Transformer settings
-        n_embd=n_embd,
+        d_model=d_model,
         n_heads=n_heads,
         sub_rn=sub_rn,
         # pct_attn=pct_attn,
@@ -399,7 +400,7 @@ def main() -> None:
 
     # General training hyperparameters
     training_stu = False
-    num_epochs: int = 3
+    num_epochs: int = 1
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
     dilation: int = 1
@@ -438,6 +439,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
+    generate_loss_landscape = True
 
     training_run = exp.Experiment(
         model=hybrid_model,
@@ -671,6 +673,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            hybrid_model, device, training_run.optimizer, max_lr, main_process
+        )
+        x_range = (-1, 1, 10)   # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

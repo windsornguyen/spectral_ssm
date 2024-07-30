@@ -23,6 +23,7 @@ from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp
 from models.mamba.model import Mamba2, Mamba2Configs
+from utils.loss_landscape import LossLandscape
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 from utils.dist_utils import get_data_parallel_group
@@ -164,8 +165,9 @@ def main() -> None:
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 2
-    n_layers: int = 2
+    n_layers: int = 4
     mlp_scale: int = 4
+    embd_scale: float = 1
     bias: bool = False
     dropout: float = 0.0
     conv_bias: bool = True
@@ -190,6 +192,7 @@ def main() -> None:
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
         d_model: int = 24 if controller != "Ant-v1" else 40
+        d_model = int(embd_scale * d_model)
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
@@ -200,6 +203,7 @@ def main() -> None:
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
         d_model: int = 18 if controller != "Ant-v1" else 32
+        d_model = int(embd_scale * d_model)
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out = d_model
@@ -341,7 +345,7 @@ def main() -> None:
 
     # General training hyperparameters
     training_stu = False
-    num_epochs: int = 3
+    num_epochs: int = 1
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
     dilation: int = 1
@@ -382,6 +386,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
+    generate_loss_landscape = True
 
     training_run = exp.Experiment(
         model=mamba_model,
@@ -613,6 +618,21 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
+
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            mamba_model, device, training_run.optimizer, max_lr, main_process
+        )
+        x_range = (-1, 1, 10)   # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

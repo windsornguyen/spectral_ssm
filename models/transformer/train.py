@@ -22,6 +22,7 @@ from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp
 from models.transformer.model import Transformer, TransformerConfigs
+from utils.loss_landscape import LossLandscape
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
@@ -183,8 +184,9 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 2
-    scale: int = 8
+    n_layers: int = 4
+    embd_scale: float = 2
+    mlp_scale: float = 6
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
@@ -220,29 +222,37 @@ def main() -> None:
 
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
-        n_embd: int = 24 if controller != "Ant-v1" else 37
+        d_in: int = 24 if controller != "Ant-v1" else 37
+        d_model = int(embd_scale * d_in)
         n_heads: int = 8 if controller != "Ant-v1" else 1
+        d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
-        n_embd: int = 18 if controller != "Ant-v1" else 29
+        d_in: int = 18 if controller != "Ant-v1" else 29
+        d_model = int(embd_scale * d_in)
         n_heads: int = 9 if controller != "Ant-v1" else 1
+        d_out = d_in
         sl: int = 1000
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
-        n_embd: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        d_model = int(embd_scale * d_in)
         n_heads: int = 16
+        d_out = d_in
         sl: int = 300
 
     configs = TransformerConfigs(
         # General Transformer settings
         n_layers=n_layers,
-        n_embd=n_embd,
+        d_model=d_model,
+        d_in=d_in,
+        d_out=d_out,
         n_heads=n_heads,
         sl=sl,
-        scale=scale,
+        mlp_scale=mlp_scale,
         sub_rn=sub_rn,
         bias=bias,
         dropout=dropout,
@@ -272,7 +282,7 @@ def main() -> None:
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
-    hybrid_model = model.module if world_size > 1 else model
+    transformer_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
     # TODO: Add accumulated gradients to this
@@ -359,7 +369,7 @@ def main() -> None:
 
     # General training hyperparameters
     training_stu = False
-    num_epochs: int = 3
+    num_epochs: int = 1
     steps_per_epoch = len(train_loader)
     num_steps: int = steps_per_epoch * num_epochs
     dilation: int = 1
@@ -398,9 +408,10 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
+    generate_loss_landscape = True
 
     training_run = exp.Experiment(
-        model=hybrid_model,
+        model=transformer_model,
         task=task,
         loss_fn=loss_fn,
         bsz=bsz,
@@ -631,6 +642,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            transformer_model, device, training_run.optimizer, max_lr, main_process
+        )
+        x_range = (-1, 1, 10)    # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

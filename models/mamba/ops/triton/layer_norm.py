@@ -1,5 +1,10 @@
-# Copyright (c) 2024, Tri Dao.
-# Implement dropout + residual + layer_norm / rms_norm.
+# =============================================================================#
+# Authors: Tri Dao, Windsor Nguyen
+# File: selective_state_update.py
+# Adapted from
+# https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/layer_norm.py
+# =============================================================================#
+
 
 """
 Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html

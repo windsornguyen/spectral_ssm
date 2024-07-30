@@ -26,10 +26,10 @@ class SpectralSSMConfigs:
     d_in: int = 10
     d_out: int = 10
     n_layers: int = 2
-    n_embd: int = 8
+    d_model: int = 8
     sl: int = 1_000
-    mlp_scale: float = 4
-    embd_scale: int = 4
+    mlp_scale: int = 4
+    d_model_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -74,7 +74,7 @@ class STU(nn.Module):
         super(STU, self).__init__()
         self.d_in = configs.d_in
         self.d_out = configs.d_out
-        self.n_embd = configs.n_embd
+        self.d_model = configs.d_model
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -89,15 +89,17 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
 
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.n_embd, self.n_embd))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.n_embd, self.n_embd))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_model, self.d_model))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.n_embd, self.k_y, self.n_embd))
+            self.M_y = nn.Parameter(torch.zeros(self.d_model, self.k_y, self.d_model))
         else:
-            self.register_buffer("m_y", torch.zeros(self.n_embd, self.k_y, self.n_embd))
+            self.register_buffer(
+                "m_y", torch.zeros(self.d_model, self.k_y, self.d_model)
+            )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -145,16 +147,16 @@ class MLP(nn.Module):
     Args:
         configs: Configuration object containing the following attributes:
             mlp_scale (float): Scaling factor for MLP hidden dimension.
-            n_embd (int): Embedding dimension.
+            d_model (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = int(configs.mlp_scale * configs.n_embd)
+        self.h_dim = int(configs.mlp_scale * configs.d_model)
         self.swiglu = SwiGLU(
-            dim=configs.n_embd, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False
+            dim=configs.d_model, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False
         )
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -179,7 +181,7 @@ class GatedMLP(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            n_embd (int): Input and output embedding dimension.
+            d_model (int): Input and output embedding dimension.
             mlp_scale (float): Scaling factor for MLP hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -187,9 +189,9 @@ class GatedMLP(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.n_embd
-        self.out_features = configs.n_embd
-        self.hidden_features = int(configs.mlp_scale * configs.n_embd)
+        self.in_features = configs.d_model
+        self.out_features = configs.d_model
+        self.hidden_features = int(configs.mlp_scale * configs.d_model)
         self.fc1 = nn.Linear(
             self.in_features, 2 * self.hidden_features, bias=configs.bias
         )
@@ -213,7 +215,7 @@ class GatedMLP(nn.Module):
         y = self.fc2(y)
         return self.dropout(y)
 
-#TODO: update implementation and debug
+
 class ResidualSTU(nn.Module):
     def __init__(self, configs, num_models=3):
         super(ResidualSTU, self).__init__()
@@ -304,14 +306,14 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn_1 = RMSNorm(configs.n_embd)
-        self.rn_2 = RMSNorm(configs.n_embd)
+        self.rn_1 = RMSNorm(configs.d_model)
+        self.rn_2 = RMSNorm(configs.d_model)
         self.stu = STU(configs, sigma, V, padded_sl)
         self.mlp = (
             MoE(
                 configs,
                 experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-                gate=nn.Linear(configs.n_embd, configs.num_experts, bias=configs.bias),
+                gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias),
             )
             if configs.moe
             else GatedMLP(configs)
@@ -345,7 +347,7 @@ class SpectralSSM(nn.Module):
         super(SpectralSSM, self).__init__()
         self.configs = configs
         self.n_layers = configs.n_layers
-        self.n_embd = configs.n_embd
+        self.d_model = configs.d_model
         self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.sl = configs.sl
@@ -377,16 +379,15 @@ class SpectralSSM(nn.Module):
 
         # Add an embedding layer for the copying task
         if configs.task == "adding":
-            self.embed = nn.Linear(configs.d_in, self.n_embd)
-        elif configs.task in ["copy", "induction"]:
-            self.embed = nn.Embedding(configs.d_in, self.n_embd)
-            # Modify the output layer to produce logits for each category
+            self.embed = nn.Linear(configs.d_in, self.d_model)
+        elif configs.task in ["copy", "induction", "associative"]:
+            self.embed = nn.Embedding(configs.d_in, self.d_model)
 
-        self.output = nn.Linear(self.n_embd, configs.d_out, bias=self.bias)
+        self.output = nn.Linear(self.d_model, configs.d_out, bias=self.bias)
 
         # Initialize all weights
         self.m_x = self.d_out**-0.5
-        self.std = self.n_embd**-0.5
+        self.std = self.d_model**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -406,25 +407,26 @@ class SpectralSSM(nn.Module):
                 - loss: Computed loss if targets are provided, else None
         """
         # Embed the input categories
-        if self.configs.task in ["copy", "induction"]:
-            x = self.embed(inputs)  # Shape: (bsz, sl, n_embd)
+        if self.configs.task in ["copy", "induction", "associative"]:
+            x = self.embed(inputs)  # Shape: (bsz, sl, d_model)
         elif self.configs.task == "adding":
             # Reshape inputs from (bsz, sl * 2) to (bsz, sl, 2)
             x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
-            x = self.embed(x)  # Shape: (bsz, sl, n_embd)
+            x = self.embed(x)  # Shape: (bsz, sl, d_model)
 
         # Apply the spectral SSM layers
         for layer in self.spectral_ssm.hidden:
             x = layer(x)
 
-        # Generate logits for each category
-        if self.configs.task in ["copy", "adding"]:
-            logits = self.output(x)
-        elif self.configs.task == "induction":
-            logits = self.output(x[:, -1, :])
+        # For associative recall, we only need to predict based on the last token
+        if self.configs.task == "associative":
+            x = x[:, -1, :]  # Shape: (bsz, d_model)
+            logits = self.output(x)  # Shape: (bsz, d_out)
+        else:
+            logits = self.output(x)  # Shape: (bsz, sl, d_out)
 
         # Compute predictions
-        if self.configs.task in ["copy", "induction"]:
+        if self.configs.task in ["copy", "induction", "associative"]:
             preds = torch.argmax(logits, dim=-1)
         elif self.configs.task == "adding":
             preds = logits.mean(dim=1).squeeze(-1)
@@ -433,8 +435,14 @@ class SpectralSSM(nn.Module):
             if self.configs.task == "copy":
                 loss = self.loss_fn(logits.view(-1, self.d_out), targets.view(-1))
             elif self.configs.task == "induction":
+                logits_flat = logits.view(
+                    -1, logits.size(-1)
+                )  # Shape: (bsz * sl, vocab_size)
+                targets_flat = targets.view(-1)  # Shape: (bsz * sl)
+                loss = self.loss_fn(logits_flat, targets_flat)
+            elif self.configs.task == "associative":
                 loss = self.loss_fn(logits, targets)
-            elif self.configs.task == "adding":
+            else:  # adding task
                 loss = self.loss_fn(preds, targets)
             return preds, loss
         else:
@@ -462,7 +470,7 @@ class SpectralSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.n_embd)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model)
 
     def get_num_params(self):
         """

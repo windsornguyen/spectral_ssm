@@ -84,7 +84,7 @@ class MLP(nn.Module):
 
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
-        self.h_dim = configs.mlp_scale * configs.d_model
+        self.h_dim = int(configs.mlp_scale * configs.d_model)
         self.swiglu = SwiGLU(dim=configs.d_model, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -172,7 +172,10 @@ class MambaBlock(nn.Module):
             torch.Tensor: Output tensor
         """
         _, sl, _ = x.size()
-        x = x + self.mamba(x, sl)
+        placeholder = self.mamba(x, sl)
+        print(f"self.mamba(x, sl) shape: {placeholder.shape}")
+        print(f"x shape: {x.shape}")
+        x = x + placeholder
         x = x + self.mlp(self.rn(x))
         return x
 

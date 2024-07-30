@@ -75,11 +75,11 @@ def main():
     if args.task == "mujoco-v1":
         sl = 1000
         if args.controller == "Ant-v1":
-            n_embd, d_out = 37, 29
+            d_model, d_out = 37, 29
             n_heads = 1
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            n_embd, d_out = 24, 18
+            d_model, d_out = 24, 18
             n_heads = 8
             loss_fn = (
                 HalfCheetahLoss()
@@ -87,32 +87,32 @@ def main():
                 else Walker2DLoss()
             )
         else:
-            n_embd, d_out, loss_fn = None, None, None
+            d_model, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v2":
         sl = 1000
         n_heads = 1
         if args.controller == "Ant-v1":
-            n_embd, d_out = 29, 29
+            d_model, d_out = 29, 29
             loss_fn = AntLoss()
         elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            n_embd, d_out = 18, 18
+            d_model, d_out = 18, 18
             loss_fn = (
                 HalfCheetahLoss()
                 if args.controller == "HalfCheetah-v1"
                 else Walker2DLoss()
             )
         else:
-            n_embd, d_out, loss_fn = None, None, None
+            d_model, d_out, loss_fn = None, None, None
     elif args.task == "mujoco-v3":
         n_heads = 8
-        sl, n_embd, d_out = 300, 512, 512
+        sl, d_model, d_out = 300, 512, 512
         loss_fn = MSELoss()
     else:
         raise ValueError("Invalid task")
 
     configs = TransformerConfigs(
         n_layers=2,
-        n_embd=n_embd,
+        d_model=d_model,
         n_heads=n_heads,
         sl=sl,
         scale=16,
