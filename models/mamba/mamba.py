@@ -245,7 +245,6 @@ class MambaLayer(nn.Module):
         Returns: same shape as u
         """
         bsz, sl, _ = inputs.shape
-        print(f"inputs shape: {inputs.shape}")
 
         if self.sl_offset > 0:
             # The states are updated in-place
@@ -253,7 +252,6 @@ class MambaLayer(nn.Module):
             return preds
 
         zxbcdt = self.in_proj(inputs) # (B, L, d_in_proj) or (B * L, d_in_proj)
-        print(f"self.in_proj(inputs): {zxbcdt.shape}")
 
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
@@ -274,8 +272,6 @@ class MambaLayer(nn.Module):
                 dt_limit_kwargs=dt_limit_kwargs,
                 cu_sl=cu_sl,
             )
-
-        print(f"preds shape: {preds.shape}")
 
         return preds
 

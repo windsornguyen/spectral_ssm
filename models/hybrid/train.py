@@ -220,7 +220,7 @@ def main() -> None:
     n_layers: int = 2
     d_model: int = 32
     mlp_scale: int = 4
-    embd_scale: int = 2
+    embd_scale: int = 1
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True

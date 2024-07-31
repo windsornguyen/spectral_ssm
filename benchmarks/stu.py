@@ -29,7 +29,7 @@ class SpectralSSMConfigs:
     d_model: int = 8
     sl: int = 1_000
     mlp_scale: int = 4
-    d_model_scale: int = 4
+    embd_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -221,6 +221,7 @@ class ResidualSTU(nn.Module):
         super(ResidualSTU, self).__init__()
         self.configs = configs
         self.loss_fn = configs.loss_fn
+        self.task = configs.task
         self.models = nn.ModuleList([SpectralSSM(configs) for _ in range(num_models)])
         self.num_models = num_models
 
@@ -231,7 +232,7 @@ class ResidualSTU(nn.Module):
         all_losses = []
 
         # Initialize residual
-        if self.configs.task in ["copy", "induction", "associative"]:
+        if self.task in ["copy", "induction", "associative"]:
             residual = torch.nn.functional.one_hot(
                 targets, num_classes=self.configs.d_out
             ).float()
@@ -254,7 +255,7 @@ class ResidualSTU(nn.Module):
                 loss.backward(retain_graph=True)
 
             # Update residual based on the task
-            if self.configs.task in ["copy", "induction"]:
+            if self.task in ["copy", "induction"]:
                 # For classification, residual is the difference in probabilities
                 residual = residual - torch.nn.functional.softmax(
                     preds.detach(), dim=-1
@@ -265,12 +266,12 @@ class ResidualSTU(nn.Module):
         final_preds = sum(all_preds)
         # final_losses = sum(all_losses)
 
-        if self.configs.task == "copy":
+        if self.task == "copy":
             # Reshape logits to (bsz * sl, d_out) and targets to (bsz * sl)
             final_loss = self.loss_fn(
                 final_preds.view(-1, final_preds.size(-1)), targets.view(-1)
             )
-        elif self.configs.task == "induction":
+        elif self.task == "induction":
             # For induction, targets should already be of shape (bsz,)
             final_loss = self.loss_fn(final_preds[:, -1, :], targets)
         else:
@@ -365,6 +366,7 @@ class SpectralSSM(nn.Module):
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
+        self.task = configs.task
 
         self.spectral_ssm = nn.ModuleDict(
             dict(
@@ -407,9 +409,9 @@ class SpectralSSM(nn.Module):
                 - loss: Computed loss if targets are provided, else None
         """
         # Embed the input categories
-        if self.configs.task in ["copy", "induction", "associative"]:
+        if self.task in ["copy", "induction", "associative"]:
             x = self.embed(inputs)  # Shape: (bsz, sl, d_model)
-        elif self.configs.task == "adding":
+        elif self.task == "adding":
             # Reshape inputs from (bsz, sl * 2) to (bsz, sl, 2)
             x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
             x = self.embed(x)  # Shape: (bsz, sl, d_model)
@@ -419,28 +421,28 @@ class SpectralSSM(nn.Module):
             x = layer(x)
 
         # For associative recall, we only need to predict based on the last token
-        if self.configs.task == "associative":
+        if self.task == "associative":
             x = x[:, -1, :]  # Shape: (bsz, d_model)
             logits = self.output(x)  # Shape: (bsz, d_out)
         else:
             logits = self.output(x)  # Shape: (bsz, sl, d_out)
 
         # Compute predictions
-        if self.configs.task in ["copy", "induction", "associative"]:
+        if self.task in ["copy", "induction", "associative"]:
             preds = torch.argmax(logits, dim=-1)
-        elif self.configs.task == "adding":
+        elif self.task == "adding":
             preds = logits.mean(dim=1).squeeze(-1)
 
         if targets is not None:
-            if self.configs.task == "copy":
+            if self.task == "copy":
                 loss = self.loss_fn(logits.view(-1, self.d_out), targets.view(-1))
-            elif self.configs.task == "induction":
+            elif self.task == "induction":
                 logits_flat = logits.view(
                     -1, logits.size(-1)
                 )  # Shape: (bsz * sl, vocab_size)
                 targets_flat = targets.view(-1)  # Shape: (bsz * sl)
                 loss = self.loss_fn(logits_flat, targets_flat)
-            elif self.configs.task == "associative":
+            elif self.task == "associative":
                 loss = self.loss_fn(logits, targets)
             else:  # adding task
                 loss = self.loss_fn(preds, targets)

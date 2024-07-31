@@ -167,7 +167,7 @@ def main() -> None:
     bsz: int = 2
     n_layers: int = 4
     mlp_scale: int = 4
-    embd_scale: int = 2
+    embd_scale: int = 1
     bias: bool = False
     dropout: float = 0.0
     conv_bias: bool = True
@@ -228,7 +228,7 @@ def main() -> None:
         conv_init=conv_init,
         expand=expand,
         headdim=headdim,
-        d_ssm=d_ssm,
+        d_ssm=d_ssm * configs.embd_scale,
         ngroups=ngroups,
         A_init_range=A_init_range,
         activation=activation,

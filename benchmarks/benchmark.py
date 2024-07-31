@@ -11,10 +11,10 @@ import torch
 
 from benchmarks.stu import SpectralSSM, SpectralSSMConfigs, ResidualSTU
 
-# from models.stu.model2 import SpectralSSM, SpectralSSMConfigs
+#from benchmarks.stu2 import SpectralSSM, SpectralSSMConfigs
 from benchmarks.transformer import Transformer, TransformerConfigs
 from benchmarks.hybrid import SpectralHybrid, SpectralHybridConfigs
-# from benchmarks.hybrid import Mamba2, Mamba2Configs
+from benchmarks.mamba import Mamba2, Mamba2Configs
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -185,7 +185,9 @@ class Benchmark:
             ):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 preds, loss = self.model(inputs, targets)
-
+                print('preds', preds)
+                print()
+                print('targets', targets)
                 total_loss += loss.item()
 
                 if self.task == "copy":
@@ -355,8 +357,8 @@ def get_model(args, device, world_size):
             d_in=get_input_dim(args),
             d_out=get_output_dim(args),
             sl=args.sl,
-            ffn_scale=args.ffn_scale,
-            d_model_scale=args.d_model_scale,
+            mlp_scale=args.mlp_scale,
+            embd_scale=args.embd_scale,
             sub_rn=args.sub_rn,
             bias=args.bias,
             dropout=args.dropout,
@@ -391,7 +393,7 @@ def get_model(args, device, world_size):
             d_out=get_output_dim(args),
             sl=args.sequence_len,
             mlp_scale=args.mlp_scale,
-            d_model_scale=args.d_model_scale,
+            embd_scale=args.embd_scale,
             bias=args.bias,
             dropout=args.dropout,
             num_eigh=args.num_eigh,
@@ -422,7 +424,7 @@ def get_model(args, device, world_size):
             n_layers=args.n_layers,
             sl=args.sl,
             mlp_scale=args.mlp_scale,
-            d_model_scale=args.d_model_scale,
+            embd_scale=args.embd_scale,
             bias=args.bias,
             dropout=args.dropout,
             num_eigh=args.num_eigh,
@@ -444,51 +446,48 @@ def get_model(args, device, world_size):
         )
         model = SpectralHybrid(configs).to(device)
 
-    # if args.model == "mamba-2":
-    #     # python -m benchmarks.benchmark --model transformer --learnable_m_y --task {task} --flash_attn --sub_rn
-    #     configs = Mamba2Configs(
-    #         bsz=args.bsz,
-    #         n_layers=args.n_layers,
-    #         d_in=get_input_dim(),
-    #         d_model=args.d_model,
-    #         d_out=get_output_dim(),
-    #         d_proj=d_proj,
-    #         mlp_scale=args.mlp_scale,
-    #         dropout=args.dropout,
-    #         d_state=args.d_state,
-    #         d_conv=args.d_conv,
-    #         conv_init=args.conv_init,
-    #         expand=arg.sexpand,
-    #         headdim=args.headdim,
-    #         d_ssm=args.d_ssm,
-    #         ngroups=args.ngroups,
-    #         A_init_range=args.A_init_range,
-    #         activation=args.activation,
-    #         D_has_hdim=args.D_has_hdim,
-    #         rmsnorm=args.rmsnorm,
-    #         norm_before_gate=args.norm_before_gate,
-    #         dt_min=args.dt_min,
-    #         dt_max=args.dt_max,
-    #         dt_init_floor=args.dt_init_floor,
-    #         dt_limit=args.dt_limit,
-    #         bias=args.bias,
-    #         conv_bias=args.conv_bias,
-    #         chunk_size=args.chunk_size,
-    #         use_mem_eff_path=args.use_mem_eff_path,
-    #         process_group=args.process_group,
-    #         sequence_parallel=args.sequence_parallel,
+    if args.model == "mamba-2":
+        configs = Mamba2Configs(
+            bsz=args.bsz,
+            n_layers=args.n_layers,
+            d_in=get_input_dim(args),
+            d_model=args.d_model,
+            d_out=get_output_dim(args),
+            mlp_scale=args.mlp_scale,
+            embd_scale=args.embd_scale,
+            dropout=args.dropout,
+            d_state=args.d_state,
+            d_conv=args.d_conv,
+            conv_init=args.conv_init,
+            expand=args.expand,
+            headdim=args.headdim,
+            d_ssm=args.d_ssm,
+            ngroups=args.ngroups,
+            A_init_range=args.A_init_range,
+            activation=args.activation,
+            D_has_hdim=args.D_has_hdim,
+            rmsnorm=args.rmsnorm,
+            norm_before_gate=args.norm_before_gate,
+            dt_min=args.dt_min,
+            dt_max=args.dt_max,
+            dt_init_floor=args.dt_init_floor,
+            dt_limit=args.dt_limit,
+            bias=args.bias,
+            conv_bias=args.conv_bias,
+            chunk_size=args.chunk_size,
+            seq_parallel=args.seq_parallel,
 
-    #         # MoE
-    #         moe=arg.smoe,
-    #         num_experts=args.num_experts,
-    #         num_experts_per_timestep=args.num_experts_per_timestep,
+            # MoE
+            moe=args.moe,
+            num_experts=args.num_experts,
+            num_experts_per_timestep=args.num_experts_per_timestep,
 
-    #         loss_fn=get_loss_fn(args.task),
-    #         device=device,
-    #         dtype=args.dtype,
-    #         world_size=world_size,
-    #     )
-    #     model = Mamba2(configs).to(device)
+            task=args.task,
+            vocab_size=args.vocab_size,
+            loss_fn=MSELoss() if args.task == "adding" else CrossEntropyLoss(),
+            device=device,
+        )
+        model = Mamba2(configs).to(device)
 
     return model
 
@@ -649,9 +648,8 @@ def main():
     parser.add_argument("--d_out", type=int, default=1, help="Output dimension")
     parser.add_argument("--sl", type=int, default=1000, help="Sequence length")
     parser.add_argument("--mlp_scale", type=int, default=4, help="MLP scale factor")
-    parser.add_argument("--ffn_scale", type=int, default=4, help="FFN scale factor")
     parser.add_argument(
-        "--d_model_scale", type=int, default=4, help="Embedding scale factor"
+        "--embd_scale", type=int, default=4, help="Embedding scale factor"
     )
     parser.add_argument("--sub_rn", action="store_true", help="Use sub-layer RMS Norm")
     parser.add_argument("--bias", action="store_true", help="Use bias in the model")
@@ -676,6 +674,27 @@ def main():
     parser.add_argument("--use_ar_y", action="store_true", help="Use AR-Y")
     parser.add_argument("--use_ar_u", action="store_true", help="Use AR-U")
     parser.add_argument("--use_hankel_L", action="store_true", help="Use Hankel-L")
+
+    # Mamba-specific arguments
+    parser.add_argument("--d_state", type=int, default=128, help="State dimension for Mamba")
+    parser.add_argument("--d_conv", type=int, default=4, help="Convolution dimension for Mamba")
+    parser.add_argument("--conv_init", type=float, default=None, help="Convolution initialization for Mamba")
+    parser.add_argument("--expand", type=int, default=2, help="Expansion factor for Mamba")
+    parser.add_argument("--headdim", type=int, default=1, help="Head dimension for Mamba")
+    parser.add_argument("--d_ssm", type=int, default=None, help="SSM dimension for Mamba")
+    parser.add_argument("--ngroups", type=int, default=1, help="Number of groups for Mamba")
+    parser.add_argument("--A_init_range", type=float, nargs=2, default=[1, 16], help="A initialization range for Mamba")
+    parser.add_argument("--activation", type=str, default="silu", choices=["silu", "relu", "gelu"], help="Activation function for Mamba")
+    parser.add_argument("--D_has_hdim", action="store_true", help="Whether D has hidden dimension in Mamba")
+    parser.add_argument("--rmsnorm", action="store_true", help="Use RMSNorm in Mamba")
+    parser.add_argument("--norm_before_gate", action="store_true", help="Apply normalization before gate in Mamba")
+    parser.add_argument("--dt_min", type=float, default=0.001, help="Minimum delta t for Mamba")
+    parser.add_argument("--dt_max", type=float, default=0.1, help="Maximum delta t for Mamba")
+    parser.add_argument("--dt_init_floor", type=float, default=1e-4, help="Delta t initialization floor for Mamba")
+    parser.add_argument("--dt_limit", type=float, nargs=2, default=[0.0, float("inf")], help="Delta t limit for Mamba")
+    parser.add_argument("--conv_bias", action="store_true", help="Use bias in convolutions for Mamba")
+    parser.add_argument("--chunk_size", type=int, default=256, help="Chunk size for Mamba")
+
     parser.add_argument("--moe", action="store_true", help="Use Mixture of Experts")
     parser.add_argument(
         "--num_experts", type=int, default=3, help="Number of experts for MoE"

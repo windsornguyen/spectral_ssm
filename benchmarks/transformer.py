@@ -24,8 +24,8 @@ class TransformerConfigs:
     d_in: int = 10
     d_out: int = 10
     sl: int = 1000  # Sequence length
-    ffn_scale: int = 8
-    d_model_scale: int = 1
+    mlp_scale: int = 8
+    embd_scale: int = 1
     sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
@@ -62,7 +62,7 @@ class FFN(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            ffn_scale (float): Scaling factor for hidden dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
             d_model (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -71,8 +71,8 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.d_model,
-            h_dim=configs.ffn_scale * configs.d_model,
+            dim=configs.d_model * configs.embd_scale,
+            h_dim=configs.mlp_scale * configs.d_model,
             bias=configs.bias,
             use_sq_relu=configs.use_sq_relu,
         )
@@ -100,17 +100,17 @@ class GatedFFN(nn.Module):
     Args:
         configs: Configuration object containing the following attributes:
             d_model (int): Input and output embedding dimension.
-            ffn_scale (float): Scaling factor for hidden dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
     """
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.d_model
-        self.out_features = configs.d_model
+        self.in_features = configs.d_model * configs.embd_scale
+        self.out_features = configs.d_model * configs.embd_scale
         self.chunks = 2
-        self.hidden_features = int(configs.ffn_scale * configs.d_model)
+        self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
         self.fc_1 = nn.Linear(
             self.in_features, self.chunks * self.hidden_features, bias=configs.bias
@@ -146,15 +146,15 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
-        self.rn_2 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
+        self.rn_1 = RMSNorm(configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps)
+        self.rn_2 = RMSNorm(configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
 
         self.ffn = (
             MoE(
                 configs,
                 experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
-                gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias),
+                gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias),
             )
             if configs.moe
             else GatedFFN(configs)
@@ -191,8 +191,8 @@ class Transformer(nn.Module):
 
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(configs.d_in, configs.d_model),
-                wpe=nn.Embedding(configs.sl, configs.d_model),
+                wte=nn.Embedding(configs.d_in, configs.d_model * configs.embd_scale),
+                wpe=nn.Embedding(configs.sl, configs.d_model * configs.embd_scale),
                 dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
@@ -202,15 +202,15 @@ class Transformer(nn.Module):
 
         # Add an embedding layer for the copying task
         if configs.task == "adding":
-            self.embed = nn.Linear(configs.d_in, self.d_model)
+            self.embed = nn.Linear(configs.d_in, self.d_model * configs.embd_scale)
         elif configs.task in ["copy", "induction", "associative"]:
-            self.embed = nn.Embedding(configs.d_in, self.d_model)
+            self.embed = nn.Embedding(configs.d_in, self.d_model * configs.embd_scale)
 
-        self.output = nn.Linear(configs.d_model, configs.d_out, bias=configs.bias)
+        self.output = nn.Linear(configs.d_model * configs.embd_scale, configs.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = self.d_model**-0.5
+        self.std = (self.d_model * configs.embd_scale)**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -280,15 +280,12 @@ class Transformer(nn.Module):
             x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
             x = self.embed(x)  # Shape: (bsz, sl, d_model)
 
-        # Token embeddings
-        token_embeddings = self.transformer.wte(inputs)
-
         # Position embeddings
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device).unsqueeze(0)
         pos_embeddings = self.transformer.wpe(pos)
 
         # Combine token and position embeddings
-        x = token_embeddings + pos_embeddings
+        x = x + pos_embeddings
         x = self.transformer.dropout(x)
 
         # Pass through transformer layers

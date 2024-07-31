@@ -141,8 +141,8 @@ def main() -> None:
     # TODO: Make these argparse arguments eventually else default to these.
     n_layers: int = 4
     d_model: int = 32
-    embd_scale: int = 2
-    mlp_scale: int = 2
+    embd_scale: int = 1
+    mlp_scale: int = 3
     bias: bool = False
     dropout: float = 0.0
     num_eigh: int = 16

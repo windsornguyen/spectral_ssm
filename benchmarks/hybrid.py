@@ -36,7 +36,7 @@ class SpectralHybridConfigs:
     n_heads: int = 8
     sl: int = 1_000
     mlp_scale: int = 4
-    d_model_scale: int = 4
+    embd_scale: int = 4
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -95,6 +95,7 @@ class STU(nn.Module):
         self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.d_model = configs.d_model
+        self.embd_scale = configs.embd_scale
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -301,6 +302,7 @@ class SpectralHybrid(nn.Module):
         self.d_model = configs.d_model
         self.d_in = configs.d_in
         self.d_out = configs.d_out
+        self.embd_scale = configs.embd_scale
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
         self.learnable_m_y = configs.learnable_m_y
@@ -316,7 +318,7 @@ class SpectralHybrid(nn.Module):
         
         self.hybrid = nn.ModuleDict(
             dict(
-                wpe=nn.Embedding(configs.sl, configs.d_model),
+                wpe=nn.Embedding(self.sl, self.d_model),
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
                     [HybridBlock(
@@ -326,16 +328,17 @@ class SpectralHybrid(nn.Module):
         )
         
         if configs.task == "adding":
-            self.embed = nn.Linear(configs.d_in, self.d_model)
+            self.embed = nn.Linear(self.d_in, self.d_model)
         elif configs.task in ["copy", "induction"]:
-            self.embed = nn.Embedding(configs.d_in, self.d_model)
+            self.embed = nn.Embedding(self.d_in, self.d_model)
 
         self.output = nn.Linear(self.d_model, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
+        self.task = self.configs.task
         
         # Initialize all weights
         self.m_x = self.d_out**-0.5
-        self.std = self.d_model**-0.5
+        self.std = (self.d_model)**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -343,7 +346,7 @@ class SpectralHybrid(nn.Module):
 
     def forward(self, inputs, targets):
         """
-        Forward pass of the spectral SSM model.
+        Forward pass of the STU-Attention Hybrid model.
 
         Args:
             inputs (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
@@ -354,9 +357,9 @@ class SpectralHybrid(nn.Module):
             - Predictions tensor
             - Tuple containing loss and metrics (if applicable)
         """
-        if self.configs.task in ["copy", "induction"]:
+        if self.task in ["copy", "induction", "associative"]:
             x = self.embed(inputs)
-        elif self.configs.task == "adding":
+        elif self.task == "adding":
             x = inputs.view(inputs.shape[0], -1, self.configs.d_in)
             x = self.embed(x)
 
@@ -369,22 +372,29 @@ class SpectralHybrid(nn.Module):
         for block in self.hybrid.hidden:
             x = block(x)
 
-        if self.configs.task in ["copy", "adding"]:
-            logits = self.output(x)
-        elif self.configs.task == "induction":
+        if self.task == "associative":
             logits = self.output(x[:, -1, :])
+        else:
+            logits = self.output(x)
 
-        if self.configs.task in ["copy", "induction"]:
+        # Compute predictions
+        if self.task in ["copy", "induction"]:
             preds = torch.argmax(logits, dim=-1)
-        elif self.configs.task == "adding":
+        elif self.task == "adding":
             preds = logits.mean(dim=1).squeeze(-1)
 
         if targets is not None:
-            if self.configs.task == "copy":
+            if self.task == "copy":
                 loss = self.loss_fn(logits.view(-1, self.d_out), targets.view(-1))
-            elif self.configs.task == "induction":
+            elif self.task == "induction":
+                logits_flat = logits.view(
+                    -1, logits.size(-1)
+                )  # Shape: (bsz * sl, vocab_size)
+                targets_flat = targets.view(-1)  # Shape: (bsz * sl)
+                loss = self.loss_fn(logits_flat, targets_flat)
+            elif self.task == "associative":
                 loss = self.loss_fn(logits, targets)
-            elif self.configs.task == "adding":
+            else:  # adding task
                 loss = self.loss_fn(preds, targets)
             return preds, loss
         else:
@@ -431,188 +441,3 @@ class SpectralHybrid(nn.Module):
         if non_embedding:
             n_params -= self.hybrid.wpe.weight.numel()
         return n_params
-
-    def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
-        """
-        Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS.
-
-        Args:
-            fwdbwd_per_iter (float): Number of forward/backward passes per iteration.
-            dt (float): Time taken for the iteration.
-
-        Returns:
-            tuple[float, float]: Estimated MFU and estimated peak FLOPS.
-
-        Reference:
-            PaLM paper Appendix B: https://arxiv.org/abs/2204.02311
-        """
-        cfg = self.configs
-        L, D, E, T = cfg.n_layers, cfg.d_model, cfg.num_eigh, cfg.sl
-
-        total_flops = 0
-
-        # STU blocks
-        for _ in range(L):
-            total_flops += self._compute_rmsnorm_flops(D, T) * 2  # 2 RMSNorm per block
-            total_flops += self._compute_spectral_flops(T, D, E)
-            
-            if cfg.use_ar_u:
-                total_flops += 2 * cfg.k_u * D * D * T  # compute_ar_u
-            if cfg.use_ar_y:
-                total_flops += self._compute_ar_y_flops(T, D, cfg.k_y)
-
-            total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
-
-        # Output layer
-        total_flops += 2 * D * cfg.d_out * T
-
-        # Dropout operations (1 FLOP per element)
-        total_flops += (L + 1) * D * T  # L blocks + initial dropout
-
-        flops_per_iter = total_flops
-        flops_achieved = flops_per_iter * fwdbwd_per_iter / dt
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops (312 TFLOPS)
-        return flops_achieved, flops_promised
-
-    def _compute_rmsnorm_flops(self, D: int, T: int) -> int:
-        """
-        Compute FLOPS for RMSNorm operation.
-
-        Args:
-            D (int): Embedding dimension.
-            T (int): Sequence length.
-
-        Returns:
-            int: Total FLOPS for RMSNorm.
-        """
-        power_flops = D * T  # x^2
-        sum_flops = D * T  # Sum across dimension
-        mean_flops = T  # Division for mean
-        sqrt_flops = T  # Square root
-        normalize_flops = D * T  # Division by sqrt(mean + eps)
-        scale_flops = D * T  # Multiplication by weight
-
-        return power_flops + sum_flops + mean_flops + sqrt_flops + normalize_flops + scale_flops
-
-    def _compute_spectral_flops(self, T: int, D: int, E: int) -> int:
-        """
-        Compute FLOPS for spectral computations.
-
-        Args:
-            T (int): Sequence length.
-            D (int): Embedding dimension.
-            E (int): Number of eigenvectors.
-
-        Returns:
-            int: Total FLOPS for spectral computations.
-        """
-        n = nearest_power_of_2(T * 2 - 1)
-        log_n = math.log2(n)
-
-        fft_flops = 2 * n * log_n * D * E * 2  # rfft and irfft
-        filter_flops = 2 * T * D * E  # Spectral filter application
-
-        return int(fft_flops + filter_flops)
-
-    def _compute_ar_y_flops(self, T: int, D: int, k_y: int) -> int:
-        """
-        Compute FLOPS for compute_ar_y function.
-
-        Args:
-            T (int): Sequence length.
-            D (int): Embedding dimension.
-            k_y (int): Autoregressive depth on the output sequence.
-
-        Returns:
-            int: Total FLOPS for ar_y computation.
-        """
-        return 2 * T * k_y * D * D + T * k_y * D  # Matrix multiplications + additions
-
-    def _compute_swiglu_flops(self, D: int, scale: float, T: int) -> int:
-        """
-        Compute FLOPS for SwiGLU activation.
-
-        Args:
-            D (int): Embedding dimension.
-            scale (float): Scaling factor for hidden dimension.
-            T (int): Sequence length.
-
-        Returns:
-            int: Total FLOPS for SwiGLU computation.
-        """
-        h_dim = int(scale * D)
-        
-        linear_flops = 2 * D * h_dim * T * 3  # Three linear layers
-        silu_flops = 3 * h_dim * T  # SiLU activation (3 ops per element)
-        hadamard_flops = h_dim * T  # Hadamard product
-        
-        return linear_flops + silu_flops + hadamard_flops
-
-    def predict_states(
-        self,
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        init: int = 950,
-        steps: int = 50,
-        rollout_steps: int = 20,
-    ) -> tuple[
-        torch.Tensor,
-        tuple[
-            torch.Tensor, dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor]
-        ],
-    ]:
-        """
-        Perform autoregressive prediction with optional periodic grounding to true targets.
-
-        Args:
-            inputs (torch.Tensor): Input tensor of shape (num_traj, total_steps, d_in)
-            targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
-            init (int): Index of the initial state to start the prediction
-            steps (int): Number of steps to predict
-
-        Returns:
-        tuple: Contains the following elements:
-            - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
-            - tuple:
-                - avg_loss (torch.Tensor): Scalar tensor with the average loss
-                - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
-        """
-        device = next(self.parameters()).device
-        print(f"Predicting on {device}.")
-        num_traj, total_steps, d_out = targets.size()
-        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
-
-        # Track model hallucinations
-        predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
-
-        # Track loss between rollout vs ground truth
-        traj_losses = torch.zeros(num_traj, steps, device=device)
-
-        # Initialize cost function
-        mse_loss = nn.MSELoss()
-
-        for step in tqdm(range(steps), desc="Predicting", unit="step"):
-            current_step = init + step
-
-            # Predict the next state using a fixed window size of inputs
-            step_preds, (_, _) = self.forward(
-                inputs[:, :current_step], targets[:, :current_step]
-            )
-
-            # Calculate the mean loss of the last rollout_steps predictions
-            rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
-            traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
-
-            # Store the last prediction step for plotting
-            predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
-
-            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
-            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-            # next_input = torch.cat([next_input, next_action], dim=2)
-            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
-
-        avg_loss = traj_losses.mean()
-        return predicted_steps, (avg_loss, traj_losses)
-    

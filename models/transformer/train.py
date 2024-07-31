@@ -186,8 +186,8 @@ def main() -> None:
     # Shared hyperparameters
     n_layers: int = 4
     d_model: int = 32
-    embd_scale: int = 2
-    mlp_scale: int = 8
+    embd_scale: int = 1
+    mlp_scale: int = 6
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually

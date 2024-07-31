@@ -173,8 +173,6 @@ class MambaBlock(nn.Module):
         """
         _, sl, _ = x.size()
         placeholder = self.mamba(x, sl)
-        print(f"self.mamba(x, sl) shape: {placeholder.shape}")
-        print(f"x shape: {x.shape}")
         x = x + placeholder
         x = x + self.mlp(self.rn(x))
         return x
