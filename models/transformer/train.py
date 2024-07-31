@@ -185,8 +185,9 @@ def main() -> None:
 
     # Shared hyperparameters
     n_layers: int = 4
-    embd_scale: float = 2
-    mlp_scale: float = 6
+    d_model: int = 32
+    embd_scale: int = 2
+    mlp_scale: int = 8
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
@@ -223,14 +224,12 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
-        d_model = int(embd_scale * d_in)
         n_heads: int = 8 if controller != "Ant-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
-        d_model = int(embd_scale * d_in)
         n_heads: int = 9 if controller != "Ant-v1" else 1
         d_out = d_in
         sl: int = 1000
@@ -239,7 +238,6 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        d_model = int(embd_scale * d_in)
         n_heads: int = 16
         d_out = d_in
         sl: int = 300
@@ -253,6 +251,7 @@ def main() -> None:
         n_heads=n_heads,
         sl=sl,
         mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
         sub_rn=sub_rn,
         bias=bias,
         dropout=dropout,

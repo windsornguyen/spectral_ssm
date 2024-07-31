@@ -140,8 +140,9 @@ def main() -> None:
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
     n_layers: int = 4
-    embd_scale: float = 1
-    mlp_scale: float = 3
+    d_model: int = 32
+    embd_scale: int = 2
+    mlp_scale: int = 2
     bias: bool = False
     dropout: float = 0.0
     num_eigh: int = 16
@@ -178,13 +179,11 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
-        d_model = int(embd_scale * d_in)
         d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
         d_in: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
-        d_model = int(embd_scale * d_in)
         d_out = d_in
         sl: int = 1000
 
@@ -192,7 +191,6 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        d_model = int(embd_scale * d_in)
         d_out = d_in
         sl: int = 300
     
@@ -203,6 +201,7 @@ def main() -> None:
         d_out=d_out,
         sl=sl,
         mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
         bias=bias,
         dropout=dropout,
         num_eigh=num_eigh,

@@ -45,6 +45,7 @@ class Mamba2Configs:
     n_layers: int = 2
     d_model: int = 32
     d_out: int = 29
+    embd_scale: int = 1
     d_state: int = 128
     d_conv: int = 4
     conv_init: Optional[float] = None
@@ -88,8 +89,8 @@ class MambaLayer(nn.Module):
         self.ngroups = self.configs.ngroups // self.configs.world_size
 
         # _init_dimensions
-        self.d_inner = (self.configs.expand * self.configs.d_model) // self.configs.world_size
-        assert (self.d_inner * self.configs.world_size == self.configs.expand * self.configs.d_model)
+        self.d_inner = (self.configs.expand * self.configs.d_model * self.configs.embd_scale) // self.configs.world_size
+        assert (self.d_inner * self.configs.world_size == self.configs.expand * self.configs.d_model * self.configs.embd_scale)
 
         self.d_ssm = (
             self.d_inner
@@ -105,7 +106,7 @@ class MambaLayer(nn.Module):
 
         if self.configs.process_group is None:
             self.in_proj = nn.Linear(
-                self.configs.d_model,
+                self.configs.d_model * self.configs.embd_scale,
                 d_in_proj,
                 bias=self.configs.bias,
                 device=self.configs.device,
@@ -113,7 +114,7 @@ class MambaLayer(nn.Module):
             )
         else:
             self.in_proj = ColumnParallelLinear(
-                self.configs.d_model,
+                self.configs.d_model * self.configs.embd_scale,
                 d_in_proj * self.configs.world_size,
                 bias=self.configs.bias,
                 process_group=self.configs.process_group,
@@ -147,7 +148,7 @@ class MambaLayer(nn.Module):
         if self.configs.process_group is None:
             self.out_proj = nn.Linear(
                 self.d_inner,
-                self.configs.d_out,
+                self.configs.d_model * self.configs.embd_scale,
                 bias=self.configs.bias,
                 device=self.configs.device,
                 dtype=self.configs.dtype,
@@ -155,7 +156,7 @@ class MambaLayer(nn.Module):
         else:
             self.out_proj = RowParallelLinear(
                 self.d_inner * self.configs.world_size,
-                self.configs.d_out,
+                self.configs.d_model * self.configs.embd_scale,
                 bias=self.configs.bias,
                 process_group=self.configs.process_group,
                 sequence_parallel=self.configs.sequence_parallel,

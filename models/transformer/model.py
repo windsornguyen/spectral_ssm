@@ -20,10 +20,11 @@ class TransformerConfigs:
     d_in: int = 37
     d_out: int = 29
     n_layers: int = 4
-    d_model: int = 37  # Embedding dimension
+    d_model: int = 37
     n_heads: int = 16  # Constraint: n_heads % d_model == 0
-    sl: int = 1_000  # Sequence length
-    mlp_scale: float = 4
+    sl: int = 1_000
+    mlp_scale: int = 6
+    embd_scale: int = 1
     sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
@@ -65,7 +66,7 @@ class FFN(nn.Module):
     def __init__(self, configs):
         super(FFN, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.d_model, h_dim=int(configs.mlp_scale * configs.d_model),
+            dim=(configs.d_model * configs.embd_scale), h_dim=int(configs.mlp_scale * configs.d_model),
             bias=configs.bias, use_sq_relu=configs.use_sq_relu
         )
         self.dropout = nn.Dropout(configs.dropout)
@@ -98,8 +99,8 @@ class GatedFFN(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.d_model
-        self.out_features = configs.d_model
+        self.in_features = configs.d_model * configs.embd_scale
+        self.out_features = configs.d_model * configs.embd_scale
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
@@ -132,14 +133,14 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
-        self.rn_2 = RMSNorm(configs.d_model, eps=configs.rms_norm_eps)
+        self.rn_1 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
+        self.rn_2 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
         self.attn = self._get_attn_type(configs)
 
         self.ffn_1 = MoE(
             configs,
             experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedFFN(configs)
 
     def _get_attn_type(self, configs):
@@ -166,6 +167,7 @@ class Transformer(nn.Module):
         self.d_in = configs.d_in
         self.d_model = configs.d_model
         self.d_out = configs.d_out
+        self.embd_scale = configs.embd_scale
         self.dropout = nn.Dropout(self.configs.dropout)
         
         if configs.moe:
@@ -176,7 +178,7 @@ class Transformer(nn.Module):
         self.transformer = nn.ModuleDict(
             dict(
                 # Since our tasks are continuous, we do not use token embeddings.
-                wpe=nn.Embedding(configs.sl, configs.d_model),
+                wpe=nn.Embedding(configs.sl, self.d_model * self.embd_scale),
                 dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
@@ -184,12 +186,12 @@ class Transformer(nn.Module):
             )
         )
 
-        self.input_proj = nn.Linear(configs.d_in, self.d_model, bias=configs.bias)
-        self.output_proj = nn.Linear(configs.d_model, self.d_out, bias=configs.bias)
+        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=configs.bias)
+        self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = self.d_model**-0.5
+        self.std = (self.d_model * self.embd_scale)**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -226,10 +228,15 @@ class Transformer(nn.Module):
         Returns:
             int: The number of parameters in the model.
         """
-        n_params = sum(p.numel() for p in self.parameters())
+        param_dict = {name: p.numel() for name, p in self.named_parameters() if p.requires_grad}
+        total_params = sum(param_dict.values())
+        
+        print("Top 10 parameter groups:")
+        for i, (name, count) in enumerate(sorted(param_dict.items(), key=lambda x: x[1], reverse=True)[:10], 1):
+            print(f"{i}. {name}: {count:,} parameters")
         if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
-        return n_params
+            total_params -= self.transformer.wpe.weight.numel()
+        return total_params
 
     def forward(self, inputs, targets=None):
         """
@@ -251,7 +258,7 @@ class Transformer(nn.Module):
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
 
         # Position embeddings of shape (sl, d_model)
-        pos_emb = self.transformer.wpe(pos)  # -> (sl, d_model)
+        pos_emb = self.transformer.wpe(pos)
 
         # Add positional embeddings to the input
         x = x + pos_emb

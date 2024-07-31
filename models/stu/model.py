@@ -39,6 +39,7 @@ class SpectralSSMConfigs:
     d_model: int = 37
     sl: int = 1_000
     mlp_scale: int = 4
+    embd_scale: int = 1
     bias: bool = False
     dropout: float = 0.10
     num_eigh: int = 16
@@ -87,6 +88,7 @@ class STU(nn.Module):
         self.d_in = configs.d_in
         self.d_out = configs.d_out
         self.d_model = configs.d_model
+        self.embd_scale = configs.embd_scale
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -100,15 +102,15 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
         
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_model, self.d_model))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.d_model, self.k_y, self.d_model))
+            self.M_y = nn.Parameter(torch.zeros((self.d_model * self.embd_scale), self.k_y, (self.d_model * self.embd_scale)))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_model, self.k_y, self.d_model))
+            self.register_buffer("m_y", torch.zeros((self.d_model * self.embd_scale), self.k_y, (self.d_model * self.embd_scale)))
 
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -158,7 +160,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = int(configs.mlp_scale * configs.d_model)
-        self.swiglu = SwiGLU(dim=configs.d_model, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
+        self.swiglu = SwiGLU(dim=configs.d_model * configs.embd_scale, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=False)
         self.dropout = nn.Dropout(configs.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -190,13 +192,13 @@ class GatedMLP(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.d_model
-        self.out_features = configs.d_model
+        self.in_features = configs.d_model * configs.embd_scale
+        self.out_features = configs.d_model * configs.embd_scale
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
-        self.fc1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
-        self.fc2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
+        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -210,10 +212,10 @@ class GatedMLP(nn.Module):
         Returns:
             torch.Tensor: Output tensor
         """
-        y = self.fc1(x)
+        y = self.fc_1(x)
         y, gate = y.chunk(self.chunks, dim=-1)
         y = y * self.silu(gate)
-        y = self.fc2(y)
+        y = self.fc_2(y)
         return self.dropout(y)
 
 class SimpleGateMoe(nn.Module):
@@ -230,12 +232,12 @@ class SimpleGateMoe(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(SimpleGateMoe, self).__init__()
-        self.rn = RMSNorm(configs.d_model)
+        self.rn = RMSNorm(configs.d_model * configs.embd_scale)
         self.stu_1 = STU(configs, sigma, V, padded_sl)
         self.stu_2 = STU(configs, sigma, V, padded_sl)
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
-        self.gate = nn.Linear(configs.d_model, 4, bias=configs.bias)
+        self.gate = nn.Linear(configs.d_model * configs.embd_scale, 4, bias=configs.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -349,10 +351,10 @@ class ExponentialLookbackMoE_InputDependent(nn.Module):
         self.stu_2 = STU(configs, sigma, V, padded_sl)
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
-        self.gate_1 = nn.Linear(configs.d_model, 1, bias=configs.bias)
-        self.gate_2 = nn.Linear(configs.d_model, 1, bias=configs.bias)
-        self.gate_3 = nn.Linear(configs.d_model, 1, bias=configs.bias)
-        self.gate_4 = nn.Linear(configs.d_model, 1, bias=configs.bias)
+        self.gate_1 = nn.Linear(configs.d_model * configs.embd_scale, 1, bias=configs.bias)
+        self.gate_2 = nn.Linear(configs.d_model * configs.embd_scale, 1, bias=configs.bias)
+        self.gate_3 = nn.Linear(configs.d_model * configs.embd_scale, 1, bias=configs.bias)
+        self.gate_4 = nn.Linear(configs.d_model * configs.embd_scale, 1, bias=configs.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -403,7 +405,7 @@ class SimpleGatedMoe(nn.Module):
         self.stu_2 = STU(configs, sigma, V, padded_sl)
         self.stu_3 = STU(configs, sigma, V, padded_sl)
         self.stu_4 = STU(configs, sigma, V, padded_sl)
-        self.gate = nn.Linear(configs.d_model, 4, bias=configs.bias)
+        self.gate = nn.Linear(configs.d_model * configs.embd_scale, 4, bias=configs.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -440,7 +442,7 @@ class SimplifiedResidualSTU(nn.Module):
         self.soft_detach_factor = 0.9
 
         # Input projection
-        self.input_proj = nn.Linear(configs.d_in, configs.d_model, bias=configs.bias)
+        self.input_proj = nn.Linear(configs.d_in, configs.d_model * configs.embd_scale, bias=configs.bias)
 
         # Create STU models
         self.models = nn.ModuleList([
@@ -452,7 +454,7 @@ class SimplifiedResidualSTU(nn.Module):
         self.gelu = nn.GELU()
 
         # Output projection
-        self.output_proj = nn.Linear(configs.d_model, configs.d_out, bias=configs.bias)
+        self.output_proj = nn.Linear(configs.d_model * configs.embd_scale, configs.d_out, bias=configs.bias)
 
         # Report the number of parameters
         print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
@@ -549,7 +551,7 @@ class Block(nn.Module):
 
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(Block, self).__init__()
-        self.rn = RMSNorm(configs.d_model)
+        self.rn = RMSNorm(configs.embd_scale * configs.d_model)
         self.stu = STU(configs, sigma, V, padded_sl)
         # self.stu = ExponentialLookbackMoE(configs, sigma, V, padded_sl)
 
@@ -557,7 +559,7 @@ class Block(nn.Module):
             MoE(
                 configs,
                 experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-                gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias),
+                gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias),
             )
             if configs.moe
             else GatedMLP(configs)
@@ -594,6 +596,7 @@ class SpectralSSM(nn.Module):
         self.d_model = configs.d_model
         self.d_in = configs.d_in
         self.d_out = configs.d_out
+        self.embd_scale = configs.embd_scale
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
         self.learnable_m_y = configs.learnable_m_y
@@ -609,7 +612,7 @@ class SpectralSSM(nn.Module):
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
 
-        self.input_proj = nn.Linear(self.d_in, self.d_model, bias=self.bias)
+        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
 
         self.spectral_ssm = nn.ModuleDict(
             dict(
@@ -620,11 +623,11 @@ class SpectralSSM(nn.Module):
                     ) for _ in range(self.n_layers)]),
             )
         )
-        self.output_proj = nn.Linear(self.d_model, self.d_out, bias=self.bias)
+        self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=self.bias)
 
         # Initialize all weights
-        self.m_x = self.d_model**-0.5
-        self.std = self.d_model**-0.5
+        self.m_x = (self.d_model * self.embd_scale)**-0.5
+        self.std = (self.d_model * self.embd_scale)**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -680,7 +683,7 @@ class SpectralSSM(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model * module.embd_scale)
 
     def get_num_params(self):
         """
@@ -689,8 +692,14 @@ class SpectralSSM(nn.Module):
         Returns:
             int: The number of parameters in the model.
         """
-        num_params = sum(p.numel() for p in self.parameters())
-        return num_params
+        param_dict = {name: p.numel() for name, p in self.named_parameters() if p.requires_grad}
+        total_params = sum(param_dict.values())
+        
+        print("Top 10 parameter groups:")
+        for i, (name, count) in enumerate(sorted(param_dict.items(), key=lambda x: x[1], reverse=True)[:10], 1):
+            print(f"{i}. {name}: {count:,} parameters")
+        
+        return total_params
 
     def estimate_mfu(self, fwdbwd_per_iter: float, dt: float) -> tuple[float, float]:
         """

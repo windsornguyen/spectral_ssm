@@ -31,8 +31,9 @@ from torch.nn import MSELoss
 class SpectralHybridConfigs:
     # STU settings
     d_in: int = 37
-    d_out: int = 37
-    d_proj: int = 29
+    d_out: int = 29
+    mlp_scale: int = 4
+    embd_scale: int = 1
     num_eigh: int = 16
     k_y: int = 2  # Number of parametrizable, autoregressive matrices Mʸ
     k_u: int = 3  # Number of parametrizable, autoregressive matrices Mᵘ
@@ -68,7 +69,6 @@ class SpectralHybridConfigs:
     # General training settings
     sl: int = 1_000 # Sequence length
     n_layers: int = 2
-    mlp_scale: float = 4
     bias: bool = False
     dropout: float = 0.10
     loss_fn: nn.Module = nn.MSELoss()
@@ -100,8 +100,8 @@ class STU(nn.Module):
     def __init__(self, configs, sigma, V, padded_sl) -> None:
         super(STU, self).__init__()
         self.d_in = configs.d_in
-        self.d_proj = configs.d_proj
         self.d_model = configs.d_model
+        self.embd_scale = configs.embd_scale
         self.k = configs.num_eigh
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
@@ -115,15 +115,15 @@ class STU(nn.Module):
         self.resid_dropout = nn.Dropout(configs.dropout)
         
         # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_model, self.d_model))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_model, self.d_model))
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
+        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
+        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
 
         # Parametrizable matrix Mʸ Introduced in section 5, equation 5
         if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.d_model, self.k_y, self.d_model))
+            self.M_y = nn.Parameter(torch.zeros(self.d_model * self.embd_scale, self.k_y, self.d_model * self.embd_scale))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_model, self.k_y, self.d_model))
+            self.register_buffer("m_y", torch.zeros(self.d_model * self.embd_scale, self.k_y, self.d_model * self.embd_scale))
 
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -173,7 +173,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.d_model, h_dim=int(configs.mlp_scale * configs.d_model),
+            dim=configs.d_model * configs.embd_scale, h_dim=int(configs.mlp_scale * configs.d_model),
             bias=configs.bias, use_sq_relu=configs.use_sq_relu
         )
         self.dropout = nn.Dropout(configs.dropout)
@@ -206,8 +206,8 @@ class GatedMLP(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.d_model
-        self.out_features = configs.d_model
+        self.in_features = configs.d_model * configs.embd_scale
+        self.out_features = configs.d_model * configs.embd_scale
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
@@ -251,19 +251,19 @@ class HybridBlock(nn.Module):
         self.mlp_1 = MoE(
             configs,
             experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedMLP(configs)
 
         self.mlp_2 = MoE(
             configs,
             experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedMLP(configs)
 
-        self.rn_1 = RMSNorm(configs.d_model)
-        self.rn_2 = RMSNorm(configs.d_model)
-        self.rn_3 = RMSNorm(configs.d_model)
-        self.rn_4 = RMSNorm(configs.d_model)
+        self.rn_1 = RMSNorm(configs.d_model * configs.embd_scale)
+        self.rn_2 = RMSNorm(configs.d_model * configs.embd_scale)
+        self.rn_3 = RMSNorm(configs.d_model * configs.embd_scale)
+        self.rn_4 = RMSNorm(configs.d_model * configs.embd_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -301,7 +301,7 @@ class SpectralHybrid(nn.Module):
         self.d_model = configs.d_model
         self.d_in = configs.d_in
         self.d_out = configs.d_out
-        self.d_proj = configs.d_proj
+        self.embd_scale = configs.embd_scale
         self.sl = configs.sl
         self.num_eigh = configs.num_eigh
         self.learnable_m_y = configs.learnable_m_y
@@ -318,7 +318,7 @@ class SpectralHybrid(nn.Module):
         
         self.hybrid = nn.ModuleDict(
             dict(
-                wpe=nn.Embedding(configs.sl, configs.d_model),
+                wpe=nn.Embedding(self.sl, self.d_model * self.embd_scale),
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
                     [HybridBlock(
@@ -327,13 +327,13 @@ class SpectralHybrid(nn.Module):
             )
         )
         
-        self.input_proj = nn.Linear(self.d_in, self.d_model, bias=self.bias)
-        self.output_proj = nn.Linear(self.d_model, self.d_proj, bias=configs.bias)
+        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
+        self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
         
         # Initialize all weights
         self.m_x = self.d_out**-0.5
-        self.std = self.d_model**-0.5
+        self.std = (self.d_model * self.embd_scale)**-0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
@@ -403,7 +403,7 @@ class SpectralHybrid(nn.Module):
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:
                 with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model)
+                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model * module.embd_scale)
 
     def get_num_params(self, non_embedding=True):
         """
@@ -453,7 +453,7 @@ class SpectralHybrid(nn.Module):
             total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
 
         # Output layer
-        total_flops += 2 * D * cfg.d_proj * T
+        total_flops += 2 * D * cfg.d_out * T
 
         # Dropout operations (1 FLOP per element)
         total_flops += (L + 1) * D * T  # L blocks + initial dropout

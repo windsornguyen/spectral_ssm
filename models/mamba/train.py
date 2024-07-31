@@ -167,7 +167,7 @@ def main() -> None:
     bsz: int = 2
     n_layers: int = 4
     mlp_scale: int = 4
-    embd_scale: float = 1
+    embd_scale: int = 2
     bias: bool = False
     dropout: float = 0.0
     conv_bias: bool = True
@@ -192,22 +192,18 @@ def main() -> None:
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
         d_model: int = 24 if controller != "Ant-v1" else 40
-        d_model = int(embd_scale * d_model)
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
-        d_out: int = 24 if controller != "Ant-v1" else 40
-        d_proj: int = 18 if controller != "Ant-v1" else 29
+        d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
         d_model: int = 18 if controller != "Ant-v1" else 32
-        d_model = int(embd_scale * d_model)
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
-        d_out = d_model
-        d_proj: int = 18 if controller != "Ant-v1" else 29
+        d_out: int = 18 if controller != "Ant-v1" else 29
         sl: int = 1000
 
     elif task["mujoco-v3"]:
@@ -215,7 +211,6 @@ def main() -> None:
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         d_model = d_out
-        d_proj = d_model
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
@@ -225,8 +220,8 @@ def main() -> None:
         d_in=d_in,
         d_model=d_model,
         d_out=d_out,
-        d_proj=d_proj,
         mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
         dropout=dropout,
         d_state=d_state,
         d_conv=d_conv,

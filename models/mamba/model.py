@@ -27,9 +27,9 @@ class Mamba2Configs:
     n_layers: int = 2
     d_in: int = 29
     d_model: int = 32
-    d_out: int = 32
-    d_proj: int = 29
+    d_out: int = 29
     mlp_scale: int = 4
+    embd_scale: int = 1
     dropout: float = 0.10
     d_state: int = 128
     d_conv: int = 4
@@ -85,7 +85,7 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.h_dim = int(configs.mlp_scale * configs.d_model)
-        self.swiglu = SwiGLU(dim=configs.d_model, h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
+        self.swiglu = SwiGLU(dim=(configs.d_model * configs.embd_scale), h_dim=self.h_dim, bias=configs.bias, use_sq_relu=configs.use_sq_relu)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -114,8 +114,8 @@ class GatedMLP(nn.Module):
 
     def __init__(self, configs):
         super().__init__()
-        self.in_features = configs.d_model
-        self.out_features = configs.d_model
+        self.in_features = configs.d_model * configs.embd_scale
+        self.out_features = configs.d_model * configs.embd_scale
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
@@ -154,11 +154,11 @@ class MambaBlock(nn.Module):
     def __init__(self, configs) -> None:
         super(MambaBlock, self).__init__()
         self.mamba = MambaLayer(configs)
-        self.rn = RMSNorm(configs.d_model)
+        self.rn = RMSNorm(configs.d_model * configs.embd_scale)
         self.mlp = MoE(
             configs,
             experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
+            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedMLP(configs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -194,7 +194,7 @@ class Mamba2(nn.Module):
         self.d_in = self.configs.d_in
         self.d_model = self.configs.d_model
         self.d_out = self.configs.d_out
-        self.d_proj = configs.d_proj
+        self.embd_scale = self.configs.embd_scale
         self.bias = self.configs.bias
         self.loss_fn = self.configs.loss_fn
         self.controls = self.configs.controls
@@ -204,7 +204,7 @@ class Mamba2(nn.Module):
         else:
             print("\nMoE?: Disabled")
             
-        self.input_proj = nn.Linear(self.d_in, self.d_model, bias=self.bias)
+        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
 
         self.mamba = nn.ModuleDict(
             dict(
@@ -212,7 +212,7 @@ class Mamba2(nn.Module):
                     [MambaBlock(self.configs) for _ in range(self.n_layers)]),
             )
         )
-        self.output_proj = nn.Linear(self.d_model, self.d_proj, bias=self.bias)
+        self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=self.bias)
 
         # Report the number of parameters
         print(
@@ -290,7 +290,7 @@ class Mamba2(nn.Module):
             total_flops += self._compute_swiglu_flops(D, cfg.scale, T)
 
         # Output layer
-        total_flops += 2 * D * cfg.d_proj * T
+        total_flops += 2 * D * cfg.d_out * T
 
         # Dropout operations (1 FLOP per element)
         total_flops += (L + 1) * D * T  # L blocks + initial dropout
