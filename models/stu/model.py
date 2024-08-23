@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from dataclasses import dataclass, field
-from models.stu.stu_utils import (
+from spectral_ssm.models.stu.stu_utils_old import (
     get_top_eigh,
     preconvolve,
     compute_ar_u,

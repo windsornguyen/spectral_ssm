@@ -9,13 +9,15 @@ import math
 
 import torch
 import torch.nn as nn
+from typing import Optional
+from flashfftconv import FlashFFTConv
 
 from dataclasses import dataclass, field
 from models.stu.stu_utils import (
-    get_top_eigh, 
+    get_spectral_filters,
     preconvolve,
-    compute_ar_u, 
-    compute_spectral, 
+    compute_ar_u,
+    compute_spectral,
     compute_ar_y
 )
 from models.transformer.attn import CausalSelfAttention
@@ -42,6 +44,8 @@ class SpectralHybridConfigs:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
+    use_flash_fft: bool = True
+    use_approx: bool = True
     
     # Transformer settings
     d_model: int = 37 # Constraint: n_heads % d_model == 0
@@ -97,66 +101,65 @@ class STU(nn.Module):
         V (torch.Tensor): Precomputed FFT of top K eigenvectors.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs: SpectralHybridConfigs, phi: torch.Tensor, sigma: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
         super(STU, self).__init__()
-        self.d_in = configs.d_in
+        self.configs = configs
+        self.phi = phi
+        self.sigma = sigma
+        self.n = n
+        self.flash_fft = flash_fft
+        self.K = configs.num_eigh
+        self.d_in = configs.d_model
+        self.d_out = configs.d_model
         self.d_model = configs.d_model
         self.embd_scale = configs.embd_scale
-        self.k = configs.num_eigh
+        self.use_hankel_L = configs.use_hankel_L
+        self.use_approx = configs.use_approx
         self.use_ar_y = configs.use_ar_y
         self.use_ar_u = configs.use_ar_u
-        self.sigma = sigma
-        self.V = V # Precomputed FFT of top K eigenvectors.
-        self.padded_sl = padded_sl
         self.k_u = configs.k_u
         self.k_y = configs.k_y
         self.learnable_m_y = configs.learnable_m_y
         self.stu_dropout = nn.Dropout(configs.dropout)
         self.resid_dropout = nn.Dropout(configs.dropout)
-        
-        # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, self.d_model * self.embd_scale, self.d_model * self.embd_scale))
 
-        # Parametrizable matrix Mʸ Introduced in section 5, equation 5
-        if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros(self.d_model * self.embd_scale, self.k_y, self.d_model * self.embd_scale))
+        if self.use_approx:
+            self.M_inputs = nn.Parameter(torch.empty(self.d_in, self.d_out))
+            self.M_filters = nn.Parameter(torch.empty(self.K, self.d_in))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_model * self.embd_scale, self.k_y, self.d_model * self.embd_scale))
+            self.M_phi_plus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
+            self.M_phi_minus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
 
+        self.M_u = nn.Parameter(torch.empty(self.k_u, self.d_out, self.d_in))
+        
+        if self.learnable_m_y:
+            self.M_y = nn.Parameter(torch.zeros(self.d_out, self.k_y, self.d_out))
+        else:
+            self.register_buffer("M_y", torch.zeros(self.d_out, self.k_y, self.d_out))
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the STU layer.
-
-        Args:
-            inputs (torch.Tensor): Input tensor of shape (bsz, sl, d_in)
-
-        Returns:
-            torch.Tensor: Output tensor of shape (bsz, sl, d_out)
-        """
-        spectral = self.stu_dropout(
-            compute_spectral(
-                inputs, self.sigma, self.V, self.M_phi_plus, 
-                self.M_phi_minus, self.M_y, self.padded_sl, self.use_ar_y
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_approx:
+            x_proj = x @ self.M_inputs
+            phi_proj = self.phi @ self.M_filters
+            spectral = compute_spectral(
+                x_proj, self.sigma, phi_proj, self.M_inputs, self.M_inputs, 
+                self.M_y, self.n, self.use_ar_y, self.flash_fft, self.use_approx
             )
-        )
+        else:
+            spectral = compute_spectral(
+                x, self.sigma, self.phi, self.M_phi_plus, self.M_phi_minus, 
+                self.M_y, self.n, self.use_ar_y, self.flash_fft, self.use_approx
+            )
 
-        match (self.use_ar_u, self.use_ar_y):
-            case (True, True):
-                y_t = spectral + compute_ar_u(self.M_u, inputs)
-                y_t += compute_ar_y(self.M_y, y_t)
-            case (True, False):
-                y_t = spectral + compute_ar_u(self.M_u, inputs)
-            case (False, True):
-                y_t = spectral
-                y_t += compute_ar_y(self.M_y, y_t)
-            case (False, False):
-                y_t = spectral
+        spectral = self.stu_dropout(spectral)
 
-        return self.resid_dropout(y_t)
+        if self.use_ar_u:
+            spectral += compute_ar_u(self.M_u, x)
+        
+        if self.use_ar_y:
+            spectral += compute_ar_y(self.M_y, spectral)
 
+        return self.resid_dropout(spectral)
 
 class MLP(nn.Module):
     """
@@ -243,9 +246,9 @@ class HybridBlock(nn.Module):
         padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs: SpectralHybridConfigs, phi: torch.Tensor, sigma: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
         super(HybridBlock, self).__init__()
-        self.stu = STU(configs, sigma, V, padded_sl)
+        self.stu = STU(configs, phi, sigma, n, flash_fft)
         self.attn = CausalSelfAttention(configs)
 
         self.mlp_1 = MoE(
@@ -294,9 +297,10 @@ class SpectralHybrid(nn.Module):
         configs: Configuration object containing model hyperparameters.
     """
 
-    def __init__(self, configs) -> None:
+    def __init__(self, configs: SpectralHybridConfigs, flash_fft: Optional[FlashFFTConv] = None) -> None:
         super(SpectralHybrid, self).__init__()
         self.configs = configs
+        self.flash_fft = flash_fft
         self.n_layers = configs.n_layers
         self.d_model = configs.d_model
         self.d_in = configs.d_in
@@ -309,8 +313,9 @@ class SpectralHybrid(nn.Module):
         self.use_hankel_L = configs.use_hankel_L
         self.device = configs.device
 
-        self.sigma, self.phi = get_top_eigh(self.sl, self.num_eigh, self.use_hankel_L, self.device)
-        self.V, self.padded_sl = preconvolve(self.phi, self.sl) # Precomputed.
+        self.phi, self.sigma = get_spectral_filters(self.sl, self.num_eigh, self.use_hankel_L)
+        self.n = nearest_power_of_2(self.sl * 2 - 1)
+        self.V = preconvolve(self.phi, self.n, configs.use_approx)
 
         self.bias = configs.bias
         self.dropout = configs.dropout
@@ -318,11 +323,11 @@ class SpectralHybrid(nn.Module):
         
         self.hybrid = nn.ModuleDict(
             dict(
-                wpe=nn.Embedding(self.sl, self.d_model * self.embd_scale),
-                dropout=nn.Dropout(self.dropout),
+                wpe=nn.Embedding(self.sl, self.d_model * configs.embd_scale),
+                dropout=nn.Dropout(configs.dropout),
                 hidden=nn.ModuleList(
                     [HybridBlock(
-                        self.configs, self.sigma, self.V, self.padded_sl
+                        self.configs, self.phi, self.sigma, self.n, self.flash_fft
                     ) for _ in range(self.n_layers)]),
             )
         )
@@ -396,9 +401,13 @@ class SpectralHybrid(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
         elif isinstance(module, STU):
+            if module.use_approx:
+                torch.nn.init.xavier_normal_(module.M_inputs)
+                torch.nn.init.xavier_normal_(module.M_filters)
+            else:
+                torch.nn.init.xavier_normal_(module.M_phi_plus)
+                torch.nn.init.xavier_normal_(module.M_phi_minus)
             torch.nn.init.uniform_(module.M_u, -self.m_x, self.m_x)
-            torch.nn.init.xavier_normal_(module.M_phi_plus)
-            torch.nn.init.xavier_normal_(module.M_phi_minus)
 
             # Initialize Mʸ₂ = α * I, page 8.
             if self.learnable_m_y and module.k_y > 1:

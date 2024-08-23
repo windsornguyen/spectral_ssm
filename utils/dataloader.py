@@ -38,6 +38,9 @@ class Dataloader(Dataset):
         self.eps = eps
         self.rng = np.random.default_rng()  # Already seeded in main training script.
 
+        if self.sl is not None:
+            print(f"Using sequence length: {self.sl}")
+
         if task in ["mujoco-v1", "mujoco-v2"]:
             # For .txt files
             if isinstance(data["inputs"], str) and isinstance(data["targets"], str):
@@ -114,8 +117,9 @@ class Dataloader(Dataset):
 
     def __getitem__(self, index):
         if self.task == "mujoco-v3":
-            # MuJoCo-v3 data does not come offset by one
             features = self.data[index]
+            if self.sl:
+                features = features[:self.sl]  # Truncate to specified sequence length
             input_frames = features[: -self.shift]
             target_frames = features[self.shift :]
             return input_frames, target_frames

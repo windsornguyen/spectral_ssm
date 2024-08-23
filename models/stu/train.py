@@ -26,7 +26,7 @@ from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 from models.stu.model import SpectralSSM, ResidualSTU, SimplifiedResidualSTU, SpectralSSMConfigs
 from utils.loss_landscape import LossLandscape
-from models.stu.stu_utils import get_top_eigh, preconvolve
+from spectral_ssm.models.stu.stu_utils_old import get_top_eigh, preconvolve
 
 def save_results(
     task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None

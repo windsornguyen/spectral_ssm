@@ -99,7 +99,7 @@ class Benchmark:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
-            betas=(0.9, 0.95),
+            # betas=(0.9, 0.95),
             fused=(device.type == "cuda"),
         )
         self.task = task

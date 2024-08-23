@@ -29,6 +29,8 @@ from utils.loss_landscape import LossLandscape
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
+from flashfftconv import FlashFFTConv
+
 
 def save_results(
     task, ctrl, data, name, ts, directory="results", prefix="hybrid", meta=None
@@ -158,6 +160,18 @@ def main() -> None:
         default=False,
         help="Whether to use multiway attention. Defaults to False.",
     )
+    parser.add_argument(
+        "--use_flash_fft", 
+        type=bool, 
+        default=True, 
+        help="Whether to use FlashFFTConv. Defaults to True.",
+    )
+    parser.add_argument(
+        "--use_approx", 
+        type=bool, 
+        default=True, 
+        help="Whether to use approximate computation. Defaults to True.",
+    )
 
     args = parser.parse_args()
 
@@ -243,7 +257,7 @@ def main() -> None:
         d_in: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 1000
+        sl: int = 512
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
@@ -273,6 +287,8 @@ def main() -> None:
         use_ar_y=use_ar_y,
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
+        use_flash_fft=args.use_flash_fft,
+        use_approx=args.use_approx,
 
         # Transformer settings
         d_model=d_model,
@@ -308,7 +324,8 @@ def main() -> None:
         device=device,
     )
 
-    model = SpectralHybrid(configs).to(device)
+    flash_fft = FlashFFTConv(configs.sl) if configs.use_flash_fft else None
+    model = SpectralHybrid(configs, flash_fft).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
@@ -368,6 +385,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=configs.sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -387,6 +405,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=configs.sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
