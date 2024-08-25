@@ -29,8 +29,6 @@ from utils.loss_landscape import LossLandscape
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
 
-from flashfftconv import FlashFFTConv
-
 
 def save_results(
     task, ctrl, data, name, ts, directory="results", prefix="hybrid", meta=None
@@ -160,18 +158,6 @@ def main() -> None:
         default=False,
         help="Whether to use multiway attention. Defaults to False.",
     )
-    parser.add_argument(
-        "--use_flash_fft", 
-        type=bool, 
-        default=True, 
-        help="Whether to use FlashFFTConv. Defaults to True.",
-    )
-    parser.add_argument(
-        "--use_approx", 
-        type=bool, 
-        default=True, 
-        help="Whether to use approximate computation. Defaults to True.",
-    )
 
     args = parser.parse_args()
 
@@ -204,7 +190,6 @@ def main() -> None:
     num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
-    learnable_m_y: bool = True
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     use_ar_y: bool = False
     use_ar_u: bool = True
@@ -238,7 +223,9 @@ def main() -> None:
     bias: bool = False
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
-    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
+    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU\
+    use_flash_fft: bool = False
+    use_approx: bool = True
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -257,13 +244,13 @@ def main() -> None:
         d_in: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 512
+        sl: int = 512   # sl supported by flashfftconv
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
         n_heads: int = 9 if controller != "Ant-v1" else 1
         d_out = d_in
-        sl: int = 1000
+        sl: int = 512
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -282,13 +269,12 @@ def main() -> None:
         num_eigh=num_eigh,
         k_y=k_y,
         k_u=k_u,
-        learnable_m_y=learnable_m_y,
         alpha=alpha,
         use_ar_y=use_ar_y,
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
-        use_flash_fft=args.use_flash_fft,
-        use_approx=args.use_approx,
+        use_flash_fft=use_flash_fft,
+        use_approx=use_approx,
 
         # Transformer settings
         d_model=d_model,
@@ -324,8 +310,7 @@ def main() -> None:
         device=device,
     )
 
-    flash_fft = FlashFFTConv(configs.sl) if configs.use_flash_fft else None
-    model = SpectralHybrid(configs, flash_fft).to(device)
+    model = SpectralHybrid(configs).to(device)
     # model = torch.compile(model)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
@@ -538,13 +523,11 @@ def main() -> None:
                         model_checkpoint = f"hybrid-{controller}-model_step-{relative_step}-{timestamp}.pt"
                         model_path = os.path.join(checkpoint_dir, model_checkpoint)
 
+                        # Save model state dict using torch.save instead of safetensors
+                        torch.save(training_run.model.state_dict(), model_path)
+
                         extra_info = f"hybrid-{controller}-other_step-{relative_step}-{timestamp}.pt"
                         extra_info_path = os.path.join(checkpoint_dir, extra_info)
-
-                        best_checkpoint = (model_checkpoint, extra_info)
-
-                        # Save model state dict using safetensors
-                        save_file(training_run.model.state_dict(), model_path)
 
                         # Save optimizer state and other metadata using torch.save
                         torch.save(
@@ -563,6 +546,8 @@ def main() -> None:
                             },
                             extra_info_path,
                         )
+
+                        best_checkpoint = (model_checkpoint, extra_info)
 
                         colored_print(
                             f"Lyla: Wow! We have a new personal best for the STU-Attention hybrid model at step {relative_step}. "
@@ -616,7 +601,7 @@ def main() -> None:
                 # Load the best checkpoint on the main process and broadcast it to all processes
                 if main_process:
                     # Load model state dict
-                    state_dict = load_file(best_model_path, device=rank)
+                    state_dict = torch.load(best_model_path, map_location=f"cuda:{rank}")
                     training_run.model.load_state_dict(state_dict)
 
                     # Load optimizer and other data
@@ -627,7 +612,7 @@ def main() -> None:
                 dist.barrier()
             else:
                 # Load model state dict
-                state_dict = load_file(best_model_path, device="cpu")
+                state_dict = torch.load(best_model_path, map_location="cpu")
                 training_run.model.load_state_dict(state_dict)
 
                 # Load optimizer and other data
@@ -687,20 +672,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    if main_process and generate_loss_landscape:
-        loss_landscape = LossLandscape(
-            hybrid_model, device, training_run.optimizer, max_lr, main_process
-        )
-        x_range = (-1, 1, 10)   # adjust as needed
-        y_range = (-1, 1, 10)
-        loss_landscape.generate(
-            train_loader,
-            f"landscapes/loss_landscape-{timestamp}",
-            x_range=x_range,
-            y_range=y_range,
-            plot_loss_landscape=True,
-            plot_hessian=True,
-        )
+    # if main_process and generate_loss_landscape:
+    #     loss_landscape = LossLandscape(
+    #         hybrid_model, device, training_run.optimizer, max_lr, main_process
+    #     )
+    #     x_range = (-1, 1, 10)   # adjust as needed
+    #     y_range = (-1, 1, 10)
+    #     loss_landscape.generate(
+    #         train_loader,
+    #         f"landscapes/loss_landscape-{timestamp}",
+    #         x_range=x_range,
+    #         y_range=y_range,
+    #         plot_loss_landscape=True,
+    #         plot_hessian=True,
+    #     )
 
 if __name__ == "__main__":
     main()

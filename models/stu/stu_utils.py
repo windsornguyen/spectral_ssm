@@ -25,7 +25,7 @@ def get_spectral_filters(
     sigma, phi = torch.linalg.eigh(Z)
     sigma, phi = sigma[-K:], phi[:, -K:]
     phi *= sigma
-    return phi, sigma
+    return phi
 
 def preconvolve(phi: torch.Tensor, n: int, approx: bool = True) -> tuple[torch.Tensor, int]:
     seq_len, K = phi.shape
@@ -123,34 +123,3 @@ def compute_ar_y(M_y: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
         ys.append(y[:, :d_out, 0])
 
     return torch.stack(ys, dim=1)
-
-def compute_spectral(
-    inputs: torch.Tensor,
-    sigma: torch.Tensor,
-    V: torch.Tensor,
-    M_phi_plus: torch.Tensor,
-    M_phi_minus: torch.Tensor,
-    M_y: torch.Tensor,
-    n: int,
-    use_ar_y: bool,
-    flash_fft: FlashFFTConv = None,
-    approx: bool = True
-) -> torch.Tensor:
-    k_y = M_y.shape[1]
-    K = M_phi_plus.shape[0]
-
-    if flash_fft is not None:
-        U_plus, U_minus = flash_convolve(inputs, V.squeeze(0).squeeze(-1), flash_fft, approx)
-    else:
-        U_plus, U_minus = convolve(inputs, V, n, approx)
-
-    if use_ar_y:
-        U_plus, U_minus = shift(U_plus, k_y), shift(U_minus, k_y)
-
-    sigma_root = (sigma**0.25).view(1, 1, K, 1)
-    U_plus_filtered, U_minus_filtered = U_plus * sigma_root, U_minus * sigma_root
-
-    spectral_plus = torch.einsum("bsKi,Koi->bso", U_plus_filtered, M_phi_plus)
-    spectral_minus = torch.einsum("bsKi,Koi->bso", U_minus_filtered, M_phi_minus)
-
-    return spectral_plus + spectral_minus

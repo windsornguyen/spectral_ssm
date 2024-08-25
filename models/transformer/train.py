@@ -184,7 +184,7 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 4
+    n_layers: int = 2
     d_model: int = 32
     embd_scale: int = 1
     mlp_scale: int = 6
@@ -226,13 +226,13 @@ def main() -> None:
         d_in: int = 24 if controller != "Ant-v1" else 37
         n_heads: int = 8 if controller != "Ant-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 1000
+        sl: int = 512
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
         n_heads: int = 9 if controller != "Ant-v1" else 1
         d_out = d_in
-        sl: int = 1000
+        sl: int = 512
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -339,7 +339,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
-        sl=1000, # TODO: Set to None or sl?
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -359,7 +359,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
-        sl=None,
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
