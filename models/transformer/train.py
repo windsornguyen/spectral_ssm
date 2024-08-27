@@ -193,6 +193,7 @@ def main() -> None:
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
     use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
+    use_alibi: bool = True
 
     # MoE
     moe: bool = True
@@ -257,6 +258,7 @@ def main() -> None:
         dropout=dropout,
         flash_attn=flash_attn,
         use_sq_relu=use_sq_relu,
+        use_alibi=use_alibi,
         loss_fn=loss_fn,
         controls={"task": "mujoco-v1", "controller": controller},
         device=device,
@@ -641,20 +643,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    if main_process and generate_loss_landscape:
-        loss_landscape = LossLandscape(
-            transformer_model, device, training_run.optimizer, max_lr, main_process
-        )
-        x_range = (-1, 1, 10)    # adjust as needed
-        y_range = (-1, 1, 10)
-        loss_landscape.generate(
-            train_loader,
-            f"landscapes/loss_landscape-{timestamp}",
-            x_range=x_range,
-            y_range=y_range,
-            plot_loss_landscape=True,
-            plot_hessian=True,
-        )
+    # if main_process and generate_loss_landscape:
+    #     loss_landscape = LossLandscape(
+    #         transformer_model, device, training_run.optimizer, max_lr, main_process
+    #     )
+    #     x_range = (-1, 1, 10)    # adjust as needed
+    #     y_range = (-1, 1, 10)
+    #     loss_landscape.generate(
+    #         train_loader,
+    #         f"landscapes/loss_landscape-{timestamp}",
+    #         x_range=x_range,
+    #         y_range=y_range,
+    #         plot_loss_landscape=True,
+    #         plot_hessian=True,
+    #     )
 
 if __name__ == "__main__":
     main()

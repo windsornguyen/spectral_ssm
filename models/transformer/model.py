@@ -23,6 +23,7 @@ class TransformerConfigs:
     d_model: int = 37
     n_heads: int = 16  # Constraint: n_heads % d_model == 0
     sl: int = 1_000
+    window_size: int = 0  # Default to 0, which means no windowing
     mlp_scale: int = 6
     embd_scale: int = 1
     sub_rn: bool = True
@@ -30,6 +31,7 @@ class TransformerConfigs:
     dropout: float = 0.10
     flash_attn: bool = True
     use_sq_relu: bool = False
+    use_alibi: bool = True
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
@@ -135,7 +137,7 @@ class TransformerBlock(nn.Module):
         self.configs = configs
         self.rn_1 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
         self.rn_2 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
-        self.attn = self._get_attn_type(configs)
+        self.attn = CausalSelfAttention(configs)
 
         self.ffn_1 = MoE(
             configs,

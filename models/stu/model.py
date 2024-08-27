@@ -15,14 +15,14 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flashfftconv import FlashFFTConv
 
 from dataclasses import dataclass, field
-from spectral_ssm.models.stu.stu_utils_old import (
-    get_top_eigh,
+from models.stu.stu_utils import (
+    get_spectral_filters,
     preconvolve,
-    compute_ar_u,
-    compute_spectral,
-    compute_ar_y,
+    convolve,
+    flash_convolve,
 )
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
@@ -50,7 +50,8 @@ class SpectralSSMConfigs:
     use_ar_y: bool = False
     use_ar_u: bool = False
     use_hankel_L: bool = False
-    # num_stu_mlp_pairs: int = 3
+    use_flash_fft: bool = True
+    use_approx: bool = True
     num_models: int = 3
     loss_fn: nn.Module = nn.MSELoss()
     controls: dict = field(
@@ -83,67 +84,46 @@ class STU(nn.Module):
         V (torch.Tensor): Precomputed FFT of top K eigenvectors.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs: SpectralSSMConfigs, phi: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
         super(STU, self).__init__()
-        self.d_in = configs.d_in
-        self.d_out = configs.d_out
-        self.d_model = configs.d_model
-        self.embd_scale = configs.embd_scale
-        self.k = configs.num_eigh
-        self.use_ar_y = configs.use_ar_y
-        self.use_ar_u = configs.use_ar_u
-        self.sigma = sigma
-        self.V = V # Precomputed FFT of top K eigenvectors.
-        self.padded_sl = padded_sl
-        self.k_u = configs.k_u
-        self.k_y = configs.k_y
-        self.learnable_m_y = configs.learnable_m_y
-        self.stu_dropout = nn.Dropout(configs.dropout)
-        self.resid_dropout = nn.Dropout(configs.dropout)
+        self.configs = configs
+        self.phi = phi
+        self.n = n
+        self.flash_fft = flash_fft
+        self.use_flash_fft = configs.use_flash_fft
+        self.K = configs.num_eigh
+        self.d_in = configs.d_model
+        self.d_out = configs.d_model
+        self.use_hankel_L = configs.use_hankel_L
+        self.use_approx = configs.use_approx
         
-        # Parameterizable matrix Mᵘ, Mᵠ⁺, and Mᵠ⁻, per section 3
-        self.M_u = nn.Parameter(torch.empty(self.k_u, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
-        self.M_phi_plus = nn.Parameter(torch.empty(self.k, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
-        self.M_phi_minus = nn.Parameter(torch.empty(self.k, (self.d_model * self.embd_scale), (self.d_model * self.embd_scale)))
-
-        # Parametrizable matrix Mʸ Introduced in section 5, equation 5
-        if self.learnable_m_y:
-            self.M_y = nn.Parameter(torch.zeros((self.d_model * self.embd_scale), self.k_y, (self.d_model * self.embd_scale)))
+        if self.use_approx:
+            self.M_inputs = nn.Parameter(torch.empty(self.d_in, self.d_out))
+            self.M_filters = nn.Parameter(torch.empty(self.K, self.d_in))
         else:
-            self.register_buffer("m_y", torch.zeros((self.d_model * self.embd_scale), self.k_y, (self.d_model * self.embd_scale)))
+            self.M_phi_plus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
+            self.M_phi_minus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_approx:
+            # Contract inputs and filters over the K and d_in dimensions, then convolve
+            x_proj = x @ self.M_inputs
+            phi_proj = self.phi @ self.M_filters
+            if self.use_flash_fft and self.flash_fft is not None: 
+                spectral_plus, spectral_minus = flash_convolve(x_proj, phi_proj, self.flash_fft, self.use_approx)
+            else:
+                spectral_plus, spectral_minus = convolve(x_proj, phi_proj, self.n, self.use_approx)
+        else:
+            # Convolve inputs and filters,
+            if self.use_flash_fft and self.flash_fft is not None: 
+                U_plus, U_minus = flash_convolve(x, self.phi, self.flash_fft, self.use_approx)
+            else:
+                U_plus, U_minus = convolve(x, self.phi, self.n, self.use_approx)
+            # Then, contract over the K and d_in dimensions
+            spectral_plus = torch.tensordot(U_plus, self.M_phi_plus, dims=([2, 3], [0, 1]))
+            spectral_minus = torch.tensordot(U_minus, self.M_phi_minus, dims=([2, 3], [0, 1]))
 
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the STU layer.
-
-        Args:
-            inputs (torch.Tensor): Input tensor of shape (bsz, sl, d_model)
-
-        Returns:
-            torch.Tensor: Output tensor of shape (bsz, sl, d_model)
-        """
-        spectral = self.stu_dropout(
-            compute_spectral(
-                inputs, self.sigma, self.V, self.M_phi_plus, 
-                self.M_phi_minus, self.M_y, self.padded_sl, self.use_ar_y
-            )
-        )
-
-        match (self.use_ar_u, self.use_ar_y):
-            case (True, True):
-                y_t = spectral + compute_ar_u(self.M_u, inputs)
-                y_t += compute_ar_y(self.M_y, y_t)
-            case (True, False):
-                y_t = spectral + compute_ar_u(self.M_u, inputs)
-            case (False, True):
-                y_t = spectral
-                y_t += compute_ar_y(self.M_y, y_t)
-            case (False, False):
-                y_t = spectral
-
-        return self.resid_dropout(y_t)
-
+        return spectral_plus + spectral_minus
 
 class MLP(nn.Module):
     """
@@ -151,7 +131,7 @@ class MLP(nn.Module):
 
     Args:
         configs: Configuration object containing the following attributes:
-            scale (float): Scaling factor for hidden dimension.
+            mlp_scale (float): Scaling factor for hidden dimension.
             d_model (int): Embedding dimension.
             bias (bool): Whether to use bias in linear layers.
             dropout (float): Dropout rate.
@@ -432,74 +412,6 @@ class SimpleGatedMoe(nn.Module):
 
         return output
 
-#TODO: instead of MLPs, GELU for non-linearities
-class SimplifiedResidualSTU(nn.Module):
-    def __init__(self, configs):
-        super(SimplifiedResidualSTU, self).__init__()
-        self.configs = configs
-        self.loss_fn = configs.loss_fn
-        self.num_models = configs.num_models
-        self.soft_detach_factor = 0.9
-
-        # Input projection
-        self.input_proj = nn.Linear(configs.d_in, configs.d_model * configs.embd_scale, bias=configs.bias)
-
-        # Create STU models
-        self.models = nn.ModuleList([
-            STU(configs, configs.sigma, configs.V, configs.padded_sl)
-            for _ in range(self.num_models)
-        ])
-        
-        # Add GELU activation
-        self.gelu = nn.GELU()
-
-        # Output projection
-        self.output_proj = nn.Linear(configs.d_model * configs.embd_scale, configs.d_out, bias=configs.bias)
-
-        # Report the number of parameters
-        print("\nSTU Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, list, list]]:
-        # Apply input projection
-        x = self.input_proj(inputs)
-
-        residual = targets
-        all_preds = []
-        all_targets = []
-        individual_metrics = []
-
-        for i, model in enumerate(self.models):
-            preds = model(x)
-            preds = self.output_proj(preds)
-            all_preds.append(preds)
-            all_targets.append(residual)
-            
-            individual_metrics.append({
-                f"model_{i}_pred": preds,
-                f"model_{i}_target": residual,
-            })
-            
-            residual = residual - preds.detach()
-            
-            # Apply GELU activation between models, except for the last one
-            if i < len(self.models) - 1:
-                residual = self.gelu(residual)
-
-        # Sum all predictions and apply output projection
-        final_preds = sum(all_preds)
-
-        return final_preds, (all_preds, all_targets, individual_metrics)
-    
-    def get_num_params(self):
-        """
-        Return the number of parameters in the model.
-
-        Returns:
-            int: The number of parameters in the model.
-        """
-        num_params = sum(p.numel() for p in self.parameters())
-        return num_params
-
 class ResidualSTU(nn.Module):
     def __init__(self, configs):
         super(ResidualSTU, self).__init__()
@@ -549,10 +461,10 @@ class Block(nn.Module):
         padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs, sigma, V, padded_sl) -> None:
+    def __init__(self, configs: SpectralSSMConfigs, phi: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
         super(Block, self).__init__()
         self.rn = RMSNorm(configs.embd_scale * configs.d_model)
-        self.stu = STU(configs, sigma, V, padded_sl)
+        self.stu = STU(configs, phi, n, flash_fft)
         # self.stu = ExponentialLookbackMoE(configs, sigma, V, padded_sl)
 
         self.mlp = (
@@ -604,25 +516,26 @@ class SpectralSSM(nn.Module):
         self.use_hankel_L = configs.use_hankel_L
         self.device = configs.device
 
-        self.sigma, self.phi = get_top_eigh(self.sl, self.num_eigh, self.use_hankel_L, self.device)
-        self.V, self.padded_sl = preconvolve(self.phi, self.sl) # Precomputed.
+        self.phi = get_spectral_filters(self.sl, self.num_eigh, self.use_hankel_L)
+        self.n = nearest_power_of_2(self.sl * 2 - 1)
+        self.V = preconvolve(self.phi, self.n, configs.use_approx)
 
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.loss_fn = configs.loss_fn
         self.controls = configs.controls
 
-        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
-
         self.spectral_ssm = nn.ModuleDict(
             dict(
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
                     [Block(
-                        self.configs, self.sigma, self.V, self.padded_sl
+                        self.configs, self.phi, self.n, FlashFFTConv(configs.sl) if configs.use_flash_fft else None
                     ) for _ in range(self.n_layers)]),
             )
         )
+
+        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
         self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=self.bias)
 
         # Initialize all weights
@@ -676,14 +589,12 @@ class SpectralSSM(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.std)
         elif isinstance(module, STU):
-            torch.nn.init.uniform_(module.M_u, -self.m_x, self.m_x)
-            torch.nn.init.xavier_normal_(module.M_phi_plus)
-            torch.nn.init.xavier_normal_(module.M_phi_minus)
-
-            # Initialize Mʸ₂ = α * I, page 8.
-            if self.learnable_m_y and module.k_y > 1:
-                with torch.no_grad():
-                    module.M_y[:, 1] = self.alpha * torch.eye(module.d_model * module.embd_scale)
+            if module.use_approx:
+                torch.nn.init.xavier_normal_(module.M_inputs)
+                torch.nn.init.xavier_normal_(module.M_filters)
+            else:
+                torch.nn.init.xavier_normal_(module.M_phi_plus)
+                torch.nn.init.xavier_normal_(module.M_phi_minus)
 
     def get_num_params(self):
         """

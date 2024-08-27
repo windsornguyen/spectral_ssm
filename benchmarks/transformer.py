@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from models.transformer.attn import CausalSelfAttention
+from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
 from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm

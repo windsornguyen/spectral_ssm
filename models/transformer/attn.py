@@ -7,111 +7,88 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import math
 
+try:
+    from flash_attn import flash_attn_func as fa2
+except ImportError as e:
+    print(f"Unable to import Triton-based flash attention: {e}. No alternative currently available.")
+
+
+def nearest_power_of_two(x: int, round_up: bool = False) -> int:
+    return (
+        1 << math.floor(math.log2(x)) if not round_up else 1 << math.ceil(math.log2(x))
+    )
 
 class CausalSelfAttention(nn.Module):
-    """
-    Self-attention layer for the Transformer.
-
-    Note: scaled_dot_product_attention enables FlashAttention-2
-    (Tri Dao, 2023, "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning")
-    and Memory-Efficient Attention (Rabe et al., 2022, "Self-attention Does Not Need O(n^2) Memory"),
-    all written in C++, per the PyTorch documentation:
-    https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
-    """
-
     def __init__(self, configs):
         super(CausalSelfAttention, self).__init__()
         self.configs = configs
         assert (configs.d_model * configs.embd_scale) % configs.n_heads == 0
 
+        self.n_heads = configs.n_heads
+        self.d_model = configs.d_model
+        self.embd_scale = configs.embd_scale
+
         # Key, query, value projections for all heads, concatenated
         self.c_attn = nn.Linear(configs.d_model * configs.embd_scale, 3 * configs.d_model * configs.embd_scale, bias=configs.bias)
 
-        # The output projection, concatenated
+        # The output projection
         self.c_proj = nn.Linear(configs.d_model * configs.embd_scale, configs.d_model * configs.embd_scale, bias=configs.bias)
         self.c_proj.SCALE_INIT = 1
 
         # Regularization
         self.dropout = configs.dropout
-        self.attn_dropout = nn.Dropout(self.dropout)
         self.resid_dropout = nn.Dropout(self.dropout)
-        self.d_model = configs.d_model
-        self.embd_scale = configs.embd_scale
-        self.n_heads = configs.n_heads
 
-        # Flash attention makes the GPUs go brrr, but support is only in PyTorch >= 2.0
-        has_flash_attn = hasattr(nn.functional, "scaled_dot_product_attention")
-        use_flash_attn = has_flash_attn and configs.flash_attn
-        self.flash_attn = use_flash_attn
+        # Flash attention specific
+        self.window_size = getattr(configs, 'window_size', 0) # Default to 0 if not specified 
+        self.use_alibi = configs.use_alibi
+        self.alibi_slopes = self._get_alibi_slopes(self.n_heads)
 
-        if not use_flash_attn:
-            # TODO: This prints n_layers times. Move it somewhere better.
-            if not has_flash_attn:
-                print("WARNING: Using slow attention. Flash Attention requires PyTorch >= 2.0")
-            else:
-                print("WARNING: Using slow attention. Flash Attention is disabled.")
-            
-            # Manual implementation of the causal mask
-            self.register_buffer(
-                "mask",
-                torch.tril(torch.ones(configs.sl, configs.sl)).view(
-                    1, 1, configs.sl, configs.sl
-                ),
-            )
-            
+    def _generate_slopes(self, n: int):
+        start = 2 ** (-2 ** -(math.log2(n) - 3))
+        return [start * (start ** i) for i in range(n)]
+
+    def _get_alibi_slopes(self, n_heads: int, interpolation_factor: float = 0.25):
+        if math.log2(n_heads).is_integer():
+            slopes = self._generate_slopes(n_heads)
+        else:
+            n = nearest_power_of_two(n_heads, round_up=False)
+            slopes_power_of_two = self._generate_slopes(n)
+            extra_slopes = self._generate_slopes(2 * n)
+            extra_slopes_trunc = extra_slopes[0::2][:n_heads - n]
+            slopes = slopes_power_of_two + extra_slopes_trunc
+        slopes = torch.tensor(slopes, device=self.configs.device)
+        slopes = slopes * interpolation_factor
+        return slopes
 
     def forward(self, x):
-        """
-        Performs the forward pass of the causal self attention layer.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (bsz, sl, d_model), where bsz is the batch size,
-                sl is the sequence length, and d_model is the embedding dimensionality (d_model).
-
-        Returns:
-            torch.Tensor: Output tensor of shape (bsz, sl, d_model) after applying self-attention.
-        """
         bsz, sl, _ = x.size()
 
-        # Compute query, key, values for all heads in batch, and move head forward to be the batch dim
+        # Compute query, key, values for all heads in batch
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.d_model * self.embd_scale, dim=2)
 
         # Reshape for multi-head attention
-        k = k.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads).transpose(
-            1, 2
-        )  # -> (B, nh, sl, hs)
-        q = q.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads).transpose(
-            1, 2
-        )  # (B, nh, sl, hs)
-        v = v.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads).transpose(
-            1, 2
-        )  # (B, nh, sl, hs)
+        q = q.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads)
+        k = k.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads)
+        v = v.view(bsz, sl, self.n_heads, (self.d_model * self.embd_scale) // self.n_heads)
 
-        # Causal self-attention; self-attend: (bsz, nh, sl, hs) x (bsz, nh, hs, sl) -> (B, nh, sl, sl)
-        if self.flash_attn:
-            # Efficient attention using Flash Attention CUDA kernels
-            y = nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
-                is_causal=True,
-            )
-        else:
-            # Manual implementation of self-attention
-            q = q * k.size(-1) ** -0.5
-            att = q @ k.transpose(-2, -1)
-            att = att.masked_fill(self.mask[:, :, :sl, :sl] == 0, float("-inf"))
-            att = nn.functional.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v  # (bsz, nh, sl, sl) x (bsz, nh, sl, hs) -> (bsz, nh, sl, hs)
+        # Use Flash Attention
+        y = fa2(
+            q, k, v,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=True,
+            window_size=(self.window_size, 0),
+            alibi_slopes=self.alibi_slopes if self.use_alibi else None,
+        )
 
-        # Re-assemble / "concat" all attention head outputs side-by-side
+        # Re-assemble all head outputs side by side
         y = y.transpose(1, 2).contiguous().view(bsz, sl, self.d_model * self.embd_scale)
 
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+    

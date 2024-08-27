@@ -9,7 +9,6 @@ import math
 
 import torch
 import torch.nn as nn
-from typing import Optional
 from flashfftconv import FlashFFTConv
 
 from dataclasses import dataclass, field
@@ -19,13 +18,12 @@ from models.stu.stu_utils import (
     convolve,
     flash_convolve,
 )
-from models.transformer.attn import CausalSelfAttention
+from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
 from tqdm import tqdm
-from torch.nn import MSELoss
 
 
 @dataclass
@@ -120,8 +118,6 @@ class STU(nn.Module):
             self.M_phi_minus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        bsz, seq_len, d_in = x.shape
-
         if self.use_approx:
             # Contract inputs and filters over the K and d_in dimensions, then convolve
             x_proj = x @ self.M_inputs

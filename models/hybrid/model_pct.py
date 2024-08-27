@@ -18,7 +18,7 @@ from spectral_ssm.models.stu.stu_utils_old import (
     compute_spectral, 
     compute_ar_y
 )
-from models.transformer.attn import CausalSelfAttention
+from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm

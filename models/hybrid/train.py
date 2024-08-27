@@ -13,8 +13,6 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
-from safetensors.torch import load_file, save_file
-from safetensors import safe_open
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 
@@ -194,6 +192,8 @@ def main() -> None:
     use_ar_y: bool = False
     use_ar_u: bool = True
     use_hankel_L: bool = False
+    use_flash_fft: bool = False
+    use_approx: bool = True
 
     # Transformer settings
     sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
@@ -224,8 +224,6 @@ def main() -> None:
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
     use_sq_relu: bool = False # Performs BETTER with Squared ReGLU\
-    use_flash_fft: bool = False
-    use_approx: bool = True
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -317,9 +315,6 @@ def main() -> None:
     hybrid_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    # TODO: Add accumulated gradients to this
-    # TODO: Make data loader better
-    # TODO: Add print statement reporting our batch size and accumulated batch size
     bsz: int = 2 // world_size
     preprocess: bool = True
 

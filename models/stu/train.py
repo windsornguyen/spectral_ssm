@@ -12,7 +12,6 @@ import os
 import numpy as np
 import torch
 import torch.distributed as dist
-from safetensors.torch import load_file, save_file
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torch.nn import MSELoss
@@ -24,9 +23,8 @@ from utils.dataloader import get_dataloader, split_data
 from utils import experiment as exp
 from utils.colors import Colors, colored_print
 from utils.dist import setup, cleanup
-from models.stu.model import SpectralSSM, ResidualSTU, SimplifiedResidualSTU, SpectralSSMConfigs
+from models.stu.model import SpectralSSM, ResidualSTU, SpectralSSMConfigs
 from utils.loss_landscape import LossLandscape
-from spectral_ssm.models.stu.stu_utils_old import get_top_eigh, preconvolve
 
 def save_results(
     task, ctrl, data, name, ts, directory="results", prefix="sssm", meta=None
@@ -139,10 +137,10 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 4
+    n_layers: int = 2
     d_model: int = 32
     embd_scale: int = 1
-    mlp_scale: int = 3
+    mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.0
     num_eigh: int = 16
@@ -153,6 +151,8 @@ def main() -> None:
     use_ar_y: bool = False
     use_ar_u: bool = True
     use_hankel_L: bool = False
+    use_flash_fft: bool = True
+    use_approx: bool = True
 
     # MoE
     moe: bool = True
@@ -180,12 +180,12 @@ def main() -> None:
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
         d_out: int = 18 if controller != "Ant-v1" else 29
-        sl: int = 1000
+        sl: int = 512   # sl supported by flashfftconv
 
     elif task["mujoco-v2"]:
         d_in: int = 29 if controller == "Ant-v1" else (4 if controller == "CartPole-v1" else 18)
         d_out = d_in
-        sl: int = 1000
+        sl: int = 512
 
     elif task["mujoco-v3"]:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
@@ -212,7 +212,8 @@ def main() -> None:
         use_ar_y=use_ar_y,
         use_ar_u=use_ar_u,
         use_hankel_L=use_hankel_L,
-        # num_stu_mlp_pairs=3,
+        use_flash_fft=use_flash_fft,
+        use_approx=use_approx,
         num_models=num_models,
 
         # MoE
@@ -224,18 +225,6 @@ def main() -> None:
         controls={"task": args.task, "controller": controller},
         device=device,
     )
-
-    # # Additional configs to pass into Simplified Residual STU
-    # # Compute sigma and V here, as they're needed for each STU model
-    # sigma, phi = get_top_eigh(sl, num_eigh, use_hankel_L, device)
-    # V, padded_sl = preconvolve(phi, sl)
-    
-    # # Add sigma, V, and padded_sl to configs
-    # configs.sigma = sigma
-    # configs.V = V
-    # configs.padded_sl = padded_sl
-
-    # model = SimplifiedResidualSTU(configs).to(device)
 
     model = SpectralSSM(configs).to(device)
     # model = ResidualSTU(configs).to(device)
@@ -455,13 +444,11 @@ def main() -> None:
                         model_checkpoint = f"sssm-{controller}-model_step-{relative_step}-{timestamp}.pt"
                         model_path = os.path.join(checkpoint_dir, model_checkpoint)
 
+                        # Save model state dict using torch.save instead of safetensors
+                        torch.save(training_run.model.state_dict(), model_path)
+
                         extra_info = f"sssm-{controller}-other_step-{relative_step}-{timestamp}.pt"
                         extra_info_path = os.path.join(checkpoint_dir, extra_info)
-
-                        best_checkpoint = (model_checkpoint, extra_info)
-
-                        # Save model state dict using safetensors
-                        save_file(training_run.model.state_dict(), model_path)
 
                         # Save optimizer state and other metadata using torch.save
                         torch.save(
@@ -480,6 +467,8 @@ def main() -> None:
                             },
                             extra_info_path,
                         )
+
+                        best_checkpoint = (model_checkpoint, extra_info)
 
                         colored_print(
                             f"Lyla: Wow! We have a new personal best for the spectral SSM model at step {relative_step}. "
@@ -555,7 +544,7 @@ def main() -> None:
                 # Load the best checkpoint on the main process and broadcast it to all processes
                 if main_process:
                     # Load model state dict
-                    state_dict = load_file(best_model_path, device=rank)
+                    state_dict = torch.load(best_model_path, map_location=f"cuda:{rank}")
                     training_run.model.load_state_dict(state_dict)
 
                     # Load optimizer and other data
@@ -566,7 +555,7 @@ def main() -> None:
                 dist.barrier()
             else:
                 # Load model state dict
-                state_dict = load_file(best_model_path, device="cpu")
+                state_dict = torch.load(best_model_path, map_location="cpu")
                 training_run.model.load_state_dict(state_dict)
 
                 # Load optimizer and other data
@@ -626,20 +615,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    if main_process and generate_loss_landscape:
-        loss_landscape = LossLandscape(
-            stu_model, device, training_run.optimizer, max_lr, main_process
-        )
-        x_range = (-1, 1, 10)   # adjust as needed
-        y_range = (-1, 1, 10)
-        loss_landscape.generate(
-            train_loader,
-            f"landscapes/loss_landscape-{timestamp}",
-            x_range=x_range,
-            y_range=y_range,
-            plot_loss_landscape=True,
-            plot_hessian=True,
-        )
+    # if main_process and generate_loss_landscape:
+    #     loss_landscape = LossLandscape(
+    #         stu_model, device, training_run.optimizer, max_lr, main_process
+    #     )
+    #     x_range = (-1, 1, 10)   # adjust as needed
+    #     y_range = (-1, 1, 10)
+    #     loss_landscape.generate(
+    #         train_loader,
+    #         f"landscapes/loss_landscape-{timestamp}",
+    #         x_range=x_range,
+    #         y_range=y_range,
+    #         plot_loss_landscape=True,
+    #         plot_hessian=True,
+    #     )
 
 if __name__ == "__main__":
     main()
