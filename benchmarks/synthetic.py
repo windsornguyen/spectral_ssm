@@ -1,8 +1,3 @@
-# =============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu
-# File: synthetic.py
-# =============================================================================#
-
 """
 Synthetic long-context benchmarks.
 """
@@ -197,34 +192,33 @@ def generate_mode_tracking(
 
 
 def generate_induction_heads(
-    num_examples: int = 10,
-    sequence_len: int = 30,
+    num_examples: int = 10_000,
+    sequence_len: int = 512,
     vocab_size: int = 20,
-    min_prefix_len: int = 1,
-    max_prefix_len: int = 1,
-    min_pattern_len: int = 1,
-    max_pattern_len: int = 1,
-    num_patterns: int = 1,
+    min_prefix_len: int = 50,
+    max_prefix_len: int = 100,
+    min_pattern_len: int = 3,
+    max_pattern_len: int = 4,
+    num_patterns: int = 8,
     seed: int = 1_337,
+    num_pairs: int = 5,
+    assoc_recall: bool = False,
 ) -> TensorDataset:
     """
-    Generates an induction heads task that creates sequence with multiple
-    patterns, varying distances, and tests for both prefix matching and copying
-    abilities of the model.
-
-    Induction heads were formally defined in (Olsson et al., 2022) from which
-    this dataset is based on.
+    Generates an induction heads task or an associative recall task.
 
     Args:
         num_examples: Number of sequences to generate.
         sequence_len: Length of each sequence.
         vocab_size: Size of the vocabulary (excluding special tokens).
-        min_prefix_len: Minimum length of the prefix.
-        max_prefix_len: Maximum length of the prefix.
-        min_pattern_len: Minimum length of the pattern (excluding prefix).
-        max_pattern_len: Maximum length of the pattern (excluding prefix).
-        num_patterns: Number of patterns in each sequence.
+        min_prefix_len: Minimum length of the prefix (for induction heads).
+        max_prefix_len: Maximum length of the prefix (for induction heads).
+        min_pattern_len: Minimum length of the pattern (for induction heads).
+        max_pattern_len: Maximum length of the pattern (for induction heads).
+        num_patterns: Number of patterns in each sequence (for induction heads).
         seed: Random seed for reproducibility.
+        assoc_recall: If True, generate an associative recall task instead.
+        num_pairs: Number of key-value pairs (for associative recall).
 
     Note:
         The CrossEntropyLoss objective function should set ignore_index=-1.
@@ -232,19 +226,6 @@ def generate_induction_heads(
     Returns:
         A PyTorch dataset with input sequences and corresponding targets.
     """
-    assert num_examples > 0, f"num_examples must be positive, got {num_examples}"
-    assert sequence_len > 3, f"sequence_len must be greater than 3, got {sequence_len}"
-    assert sequence_len > 3, f"sequence_len must be greater than 3, got {sequence_len}"
-    assert vocab_size > 1, f"vocab_size must be greater than 1, got {vocab_size}"
-    assert 0 < min_prefix_len <= max_prefix_len, f"Invalid prefix length range, got {min_prefix_len} and {max_prefix_len}"
-    assert 0 < min_pattern_len <= max_pattern_len, f"Invalid pattern length range, got {min_pattern_len} and {max_pattern_len}"
-    assert max_prefix_len + max_pattern_len < sequence_len - 3, f"Invalid sequence length, got {sequence_len}"
-    
-    # Calculate minimum required sequence length (worst case: all patterns are max length)
-    max_pattern_total_len = max_prefix_len + max_pattern_len
-    min_seq_len = 2 + num_patterns * (2 * max_pattern_total_len + 1)  # START, END, patterns, min gaps
-    assert sequence_len >= min_seq_len, f"sequence_len must be at least {min_seq_len}"
-
     torch.manual_seed(seed)
     random.seed(seed)
 
@@ -254,112 +235,96 @@ def generate_induction_heads(
     inputs = torch.full((num_examples, sequence_len), PAD, dtype=torch.long)
     targets = torch.full((num_examples, sequence_len), -1, dtype=torch.long)
 
-    for i in range(num_examples):
-        inputs[i, 0] = START  # Start token
-        idx = 1
+    if assoc_recall:
+        assert (
+            sequence_len >= 2 * num_pairs + 1
+        ), "Sequence length must be at least 2 * num_pairs + 1"
 
-        # Generate patterns with variable-length prefixes
-        patterns = []
-        for _ in range(num_patterns):
-            prefix_len = random.randint(min_prefix_len, max_prefix_len)
-            pattern_len = random.randint(min_pattern_len, max_pattern_len)
-            prefix = [random.randint(0, vocab_size - 1) for _ in range(prefix_len)]
-            pattern = [random.randint(0, vocab_size - 1) for _ in range(pattern_len)]
-            patterns.append((prefix, pattern))
+        for i in range(num_examples):
+            inputs[i, 0] = START  # Start token
+            idx = 1
 
-        for prefix, pattern in patterns:
-            total_len = len(prefix) + len(pattern)
-            # Ensure space for pattern and gap
-            if idx + total_len * 2 + 1 > sequence_len - 1:
-                break
+            # Generate key-value pairs
+            pairs = [
+                (random.randint(0, vocab_size - 1), random.randint(0, vocab_size - 1))
+                for _ in range(num_pairs)
+            ]
 
-            # First occurrence
-            inputs[i, idx:idx+len(prefix)] = torch.tensor(prefix, dtype=torch.long)
-            inputs[i, idx+len(prefix):idx+total_len] = torch.tensor(pattern, dtype=torch.long)
-            idx += total_len
+            # Place key-value pairs
+            for key, value in pairs:
+                inputs[i, idx] = key
+                inputs[i, idx + 1] = value
+                idx += 2
 
-            # Random gap (at least 1 token)
-            remaining_space = sequence_len - idx - total_len - 1
-            max_gap = max(1, remaining_space // (num_patterns - patterns.index((prefix, pattern))))
-            gap = random.randint(1, max_gap)
-            idx += gap
+            # Choose a random key to recall
+            recall_key = random.choice([pair[0] for pair in pairs])
+            inputs[i, idx] = recall_key
 
-            # Second occurrence
-            inputs[i, idx:idx+len(prefix)] = torch.tensor(prefix, dtype=torch.long)
-            inputs[i, idx+len(prefix):idx+total_len] = torch.tensor(pattern, dtype=torch.long)
-            targets[i, idx+len(prefix):idx+total_len] = torch.tensor(pattern, dtype=torch.long)  # Set target, excluding prefix
-            idx += total_len
+            # Set the target as the corresponding value
+            target_value = next(pair[1] for pair in pairs if pair[0] == recall_key)
+            targets[i, idx] = target_value
 
-        # Fill remaining space with random tokens
-        while idx < sequence_len - 1:
-            inputs[i, idx] = random.randint(0, vocab_size - 1)
-            idx += 1
+            inputs[i, -1] = END  # End token
 
-        inputs[i, -1] = END  # End token
+    else:
+        for i in range(num_examples):
+            inputs[i, 0] = START  # Start token
+            idx = 1
 
-    return TensorDataset(inputs, targets)
+            # Generate patterns with variable-length prefixes
+            patterns = []
+            for _ in range(num_patterns):
+                prefix_len = random.randint(min_prefix_len, max_prefix_len)
+                pattern_len = random.randint(min_pattern_len, max_pattern_len)
+                prefix = [random.randint(0, vocab_size - 1) for _ in range(prefix_len)]
+                pattern = [
+                    random.randint(0, vocab_size - 1) for _ in range(pattern_len)
+                ]
+                patterns.append((prefix, pattern))
 
+            for prefix, pattern in patterns:
+                total_len = len(prefix) + len(pattern)
+                # Ensure space for pattern and gap
+                if idx + total_len * 2 + 1 > sequence_len - 1:
+                    break
 
-def generate_associative_recall(
-    num_examples: int = 10,
-    sequence_len: int = 20,
-    vocab_size: int = 10,
-    num_pairs: int = 8,
-    seed: int = 1_337,
-) -> TensorDataset:
-    """
-    Generate an associative recall task.
+                # First occurrence
+                inputs[i, idx : idx + len(prefix)] = torch.tensor(
+                    prefix, dtype=torch.long
+                )
+                inputs[i, idx + len(prefix) : idx + total_len] = torch.tensor(
+                    pattern, dtype=torch.long
+                )
+                idx += total_len
 
-    This associative recall task is taken from (Dao, Fu, Saab, 2023). From their
-    paper:
+                # Random gap (at least 1 token)
+                remaining_space = sequence_len - idx - total_len - 1
+                max_gap = max(
+                    1,
+                    remaining_space
+                    // (num_patterns - patterns.index((prefix, pattern))),
+                )
+                gap = random.randint(1, max_gap)
+                idx += gap
 
-        Associative Recall is similar to the induction head task, but requires the
-        model to remember multiple key-value pairs. At the end of the sequence, the
-        model must recall a specific value belonging to a specific key.
+                # Second occurrence
+                inputs[i, idx : idx + len(prefix)] = torch.tensor(
+                    prefix, dtype=torch.long
+                )
+                inputs[i, idx + len(prefix) : idx + total_len] = torch.tensor(
+                    pattern, dtype=torch.long
+                )
+                targets[i, idx + len(prefix) : idx + total_len] = torch.tensor(
+                    pattern, dtype=torch.long
+                )  # Set target, excluding prefix
+                idx += total_len
 
-    Args:
-        num_examples: Number of examples to generate.
-        sequence_len: Length of each sequence (must be at least 2 * num_pairs + 1).
-        vocab_size: Size of the vocabulary for keys and values.
-        num_pairs: Number of key-value pairs in each sequence.
-        seed: Random seed for reproducibility.
+            # Fill remaining space with random tokens
+            while idx < sequence_len - 1:
+                inputs[i, idx] = random.randint(0, vocab_size - 1)
+                idx += 1
 
-    Returns:
-      A PyTorch dataset.
-    """
-    assert num_examples > 0, "num_examples must be positive"
-    assert vocab_size > 1, "vocab_size must be greater than 1"
-    assert num_pairs > 0, "num_pairs must be positive"
-    assert sequence_len >= 2 * num_pairs + 1, f"sequence_len must be at least {2 * num_pairs + 1}"
-
-    torch.manual_seed(seed)
-
-    # Generate fixed set of key-value pairs
-    keys = torch.randperm(vocab_size)[:num_pairs]
-    values = torch.randperm(vocab_size)[:num_pairs]
-
-    # Create input sequences
-    inputs = torch.full((num_examples, sequence_len), vocab_size, dtype=torch.long)  # Use vocab_size as padding
-    for i in range(num_examples):
-        # Shuffle the order of key-value pairs for each example
-        indices = torch.randperm(num_pairs)
-        shuffled_keys = keys[indices]
-        shuffled_values = values[indices]
-
-        # Place key-value pairs in the sequence
-        inputs[i, :2*num_pairs:2] = shuffled_keys
-        inputs[i, 1:2*num_pairs:2] = shuffled_values
-
-        # Add query key at the end
-        query_idx = torch.randint(num_pairs, (1,))
-        inputs[i, -1] = shuffled_keys[query_idx]
-
-    # Generate targets
-    targets = torch.zeros(num_examples, dtype=torch.long)
-    for i in range(num_examples):
-        query_key = inputs[i, -1]
-        key_positions = (inputs[i, :2*num_pairs:2] == query_key).nonzero().item()
-        targets[i] = inputs[i, key_positions * 2 + 1]
+            inputs[i, -1] = END  # End token
 
     return TensorDataset(inputs, targets)
 
@@ -419,101 +384,5 @@ def generate_multi_scale_adaptive(
 
     inputs = torch.tensor(np.array(inputs, dtype=np.float32))
     targets = torch.tensor(np.array(targets, dtype=np.float32))
-
-    return TensorDataset(inputs, targets)
-
-
-def generate_needle_in_haystack(
-    num_examples: int = 10,
-    sequence_len: int = 1000,
-    needle_len: int = 5,
-    vocab_size: int = 26,
-    seed: int = 1_337,
-) -> TensorDataset:
-    """
-    Generates a needle-in-a-haystack retrieval task.
-
-    This task tests the model's ability to find and remember a specific short
-    sequence (the needle) within a much longer sequence (the haystack).
-
-    Args:
-        num_examples: Number of examples to generate.
-        sequence_len: Length of each sequence (haystack).
-        needle_len: Length of the sequence to be found (needle).
-        vocab_size: Size of the vocabulary.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        A PyTorch dataset with inputs and targets.
-    """
-    torch.manual_seed(seed)
-
-    inputs = torch.randint(0, vocab_size, (num_examples, sequence_len))
-    needles = torch.randint(0, vocab_size, (num_examples, needle_len))
-
-    # Insert needles at random positions
-    for i in range(num_examples):
-        start_pos = torch.randint(0, sequence_len - needle_len, (1,))
-        inputs[i, start_pos : start_pos + needle_len] = needles[i]
-
-    # Target is the position of the needle
-    targets = torch.zeros(num_examples, dtype=torch.long)
-    for i in range(num_examples):
-        for j in range(sequence_len - needle_len + 1):
-            if torch.all(inputs[i, j : j + needle_len] == needles[i]):
-                targets[i] = j
-                break
-
-    return TensorDataset(inputs, targets)
-
-
-def generate_telephone_book(
-    num_examples: int = 10,
-    num_entries: int = 100,
-    name_len: int = 10,
-    number_len: int = 10,
-    vocab_size: int = 26,
-    seed: int = 1_337,
-) -> TensorDataset:
-    """
-    Generate a telephone book-like task.
-
-    This task tests the model's ability to remember and recall specific key-value
-    pairs from a large set, similar to looking up a number in a telephone book.
-
-    Args:
-        num_examples: Number of examples to generate.
-        num_entries: Number of key-value pairs in each "book".
-        name_len: Length of each name (key).
-        vocab_size: Size of the vocabulary for names.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        A PyTorch dataset with inputs and targets.
-    """
-    torch.manual_seed(seed)
-
-    # Generate the names (keys)
-    names = torch.randint(0, vocab_size, (num_examples, num_entries, name_len))
-
-    # Generate numbers (values)
-    numbers = torch.randint(0, 10, (num_examples, num_entries, number_len))
-
-    # Combine names and numbers
-    book = torch.cat((names, numbers), dim=2)
-
-    # Shuffle each book
-    for i in range(num_examples):
-        book[i] = book[i][torch.randperm(num_entries)]
-
-    # Choose a random entry to query
-    query_indices = torch.randint(0, num_entries, (num_examples,))
-    queries = names[torch.arange(num_examples), query_indices]
-
-    # Combine book and query
-    inputs = torch.cat((book.view(num_examples, -1), queries), dim=1)
-
-    # Target is the corresponding number
-    targets = numbers[torch.arange(num_examples), query_indices]
 
     return TensorDataset(inputs, targets)

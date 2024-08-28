@@ -1,3 +1,6 @@
+
+
+
 # =============================================================================#
 # Authors: Windsor Nguyen, Isabel Liu
 # File: benchmark.py
@@ -9,7 +12,7 @@ import argparse
 import time
 import torch
 
-from benchmarks.stu import SpectralSSM, SpectralSSMConfigs, ResidualSTU
+from benchmarks.stu import SpectralSSM, SpectralSSMConfigs
 
 #from benchmarks.stu2 import SpectralSSM, SpectralSSMConfigs
 from benchmarks.transformer import Transformer, TransformerConfigs
@@ -28,10 +31,7 @@ from benchmarks.synthetic import (
     generate_adding,
     generate_mode_tracking,
     generate_induction_heads,
-    generate_associative_recall,
     generate_multi_scale_adaptive,
-    generate_needle_in_haystack,
-    generate_telephone_book,
 )
 
 
@@ -808,14 +808,20 @@ def main():
             args.max_pattern_len,
             args.num_patterns,
             args.seed,
+            assoc_recall=False,
         )
     elif args.task == "associative":
-        dataset = generate_associative_recall(
+        dataset = generate_induction_heads(
             args.num_examples,
             args.sequence_len,
             args.vocab_size,
-            args.num_pairs,
+            args.min_prefix_len,
+            args.max_prefix_len,
+            args.min_pattern_len,
+            args.max_pattern_len,
+            args.num_patterns,
             args.seed,
+            assoc_recall=True,
         )
     elif args.task == "multi_scale_adaptive":
         dataset = generate_multi_scale_adaptive(

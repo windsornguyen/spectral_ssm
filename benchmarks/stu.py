@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass
-from spectral_ssm.models.stu.stu_utils_old import (
+from models.stu.stu_utils_old import (
     get_top_eigh,
     preconvolve,
     compute_ar_u,
