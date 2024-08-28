@@ -8,9 +8,8 @@
 import torch
 import torch.nn as nn
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
-from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
@@ -26,7 +25,6 @@ class TransformerConfigs:
     sl: int = 1000  # Sequence length
     mlp_scale: int = 8
     embd_scale: int = 1
-    sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
     flash_attn: bool = True
@@ -40,20 +38,6 @@ class TransformerConfigs:
     moe: bool = True
     num_experts: int = 8
     num_experts_per_timestep: int = 2
-
-    # Dilated Attention
-    dilated_attn: bool = False
-    segment_lengths: list[int] = field(
-        default_factory=lambda: [128]
-    )  # TODO: Check this makes sense (and follows paper)
-    dilated_ratios: list[int] = field(
-        default_factory=lambda: [1]
-    )  # TODO: Check this makes sense (and follows paper)
-    seq_parallel: bool = True
-    xpos_rel_pos: bool = True
-    xpos_scale_base: int = 512
-    rms_norm_eps: float = 1e-5
-    multiway: bool = False
 
 
 class FFN(nn.Module):
@@ -146,25 +130,27 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps)
-        self.rn_2 = RMSNorm(configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps)
-        self.attn = self._get_attn_type(configs)
+        self.rn_1 = RMSNorm(
+            configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps
+        )
+        self.rn_2 = RMSNorm(
+            configs.d_model * configs.embd_scale, eps=configs.rms_norm_eps
+        )
+        self.attn = CausalSelfAttention(configs)
 
         self.ffn = (
             MoE(
                 configs,
                 experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
-                gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias),
+                gate=nn.Linear(
+                    configs.d_model * configs.embd_scale,
+                    configs.num_experts,
+                    bias=configs.bias,
+                ),
             )
             if configs.moe
             else GatedFFN(configs)
         )
-
-    def _get_attn_type(self, configs):
-        if configs.dilated_attn:
-            return DilatedCausalSelfAttention(configs)
-        else:
-            return CausalSelfAttention(configs)
 
     def forward(self, x):
         x = x + self.attn(self.rn_1(x))
@@ -206,11 +192,13 @@ class Transformer(nn.Module):
         elif configs.task in ["copy", "induction", "associative"]:
             self.embed = nn.Embedding(configs.d_in, self.d_model * configs.embd_scale)
 
-        self.output = nn.Linear(configs.d_model * configs.embd_scale, configs.d_out, bias=configs.bias)
+        self.output = nn.Linear(
+            configs.d_model * configs.embd_scale, configs.d_out, bias=configs.bias
+        )
         self.loss_fn = self.configs.loss_fn
 
         # Initialize all weights
-        self.std = (self.d_model * configs.embd_scale)**-0.5
+        self.std = (self.d_model * configs.embd_scale) ** -0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters

@@ -5,26 +5,21 @@
 
 """The Spectral State Space Model architecture with attention for benchmark tasks."""
 
-import math
-
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
 from spectral_ssm.models.stu.stu_utils_old import (
-    get_top_eigh, 
+    get_top_eigh,
     preconvolve,
-    compute_ar_u, 
-    compute_spectral, 
-    compute_ar_y
+    compute_ar_u,
+    compute_spectral,
+    compute_ar_y,
 )
 from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
-from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
-from tqdm import tqdm
-from torch.nn import MSELoss
 
 
 @dataclass
@@ -118,7 +113,9 @@ class STU(nn.Module):
         if self.learnable_m_y:
             self.M_y = nn.Parameter(torch.zeros(self.d_model, self.k_y, self.d_model))
         else:
-            self.register_buffer("m_y", torch.zeros(self.d_model, self.k_y, self.d_model))
+            self.register_buffer(
+                "m_y", torch.zeros(self.d_model, self.k_y, self.d_model)
+            )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -174,8 +171,10 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.d_model, h_dim=int(configs.mlp_scale * configs.d_model),
-            bias=configs.bias, use_sq_relu=configs.use_sq_relu
+            dim=configs.d_model,
+            h_dim=int(configs.mlp_scale * configs.d_model),
+            bias=configs.bias,
+            use_sq_relu=configs.use_sq_relu,
         )
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -192,6 +191,7 @@ class MLP(nn.Module):
         x = self.swiglu(x)
         x = self.dropout(x)
         return x
+
 
 class GatedMLP(nn.Module):
     """
@@ -212,8 +212,12 @@ class GatedMLP(nn.Module):
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
-        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
-        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.fc_1 = nn.Linear(
+            self.in_features, self.chunks * self.hidden_features, bias=configs.bias
+        )
+        self.fc_2 = nn.Linear(
+            self.hidden_features, self.out_features, bias=configs.bias
+        )
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -233,6 +237,7 @@ class GatedMLP(nn.Module):
         y = self.fc_2(y)
         return self.dropout(y)
 
+
 class HybridBlock(nn.Module):
     """
     A single block of the hybrid spectral SSM model (spectral filtering + attention).
@@ -249,17 +254,25 @@ class HybridBlock(nn.Module):
         self.stu = STU(configs, sigma, V, padded_sl)
         self.attn = CausalSelfAttention(configs)
 
-        self.mlp_1 = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp_1 = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
-        self.mlp_2 = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp_2 = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(configs.d_model, configs.num_experts, bias=configs.bias),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
         self.rn_1 = RMSNorm(configs.d_model)
         self.rn_2 = RMSNorm(configs.d_model)
@@ -287,6 +300,7 @@ class HybridBlock(nn.Module):
 
         return x
 
+
 class SpectralHybrid(nn.Module):
     """
     Model architecture based on stacked blocks of STU, attention, and MLP layers.
@@ -310,23 +324,27 @@ class SpectralHybrid(nn.Module):
         self.use_hankel_L = configs.use_hankel_L
         self.device = configs.device
 
-        self.sigma, self.phi = get_top_eigh(self.sl, self.num_eigh, self.use_hankel_L, self.device)
-        self.V, self.padded_sl = preconvolve(self.phi, self.sl) # Precomputed.
+        self.sigma, self.phi = get_top_eigh(
+            self.sl, self.num_eigh, self.use_hankel_L, self.device
+        )
+        self.V, self.padded_sl = preconvolve(self.phi, self.sl)  # Precomputed.
 
         self.bias = configs.bias
         self.dropout = configs.dropout
-        
+
         self.hybrid = nn.ModuleDict(
             dict(
                 wpe=nn.Embedding(self.sl, self.d_model),
                 dropout=nn.Dropout(self.dropout),
                 hidden=nn.ModuleList(
-                    [HybridBlock(
-                        self.configs, self.sigma, self.V, self.padded_sl
-                    ) for _ in range(self.n_layers)]),
+                    [
+                        HybridBlock(self.configs, self.sigma, self.V, self.padded_sl)
+                        for _ in range(self.n_layers)
+                    ]
+                ),
             )
         )
-        
+
         if configs.task == "adding":
             self.embed = nn.Linear(self.d_in, self.d_model)
         elif configs.task in ["copy", "induction"]:
@@ -335,14 +353,17 @@ class SpectralHybrid(nn.Module):
         self.output = nn.Linear(self.d_model, self.d_out, bias=configs.bias)
         self.loss_fn = self.configs.loss_fn
         self.task = self.configs.task
-        
+
         # Initialize all weights
         self.m_x = self.d_out**-0.5
-        self.std = (self.d_model)**-0.5
+        self.std = (self.d_model) ** -0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("\nSTU-Attention Hybrid Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print(
+            "\nSTU-Attention Hybrid Model Parameter Count: %.2fM"
+            % (self.get_num_params() / 1e6,)
+        )
 
     def forward(self, inputs, targets):
         """
@@ -367,7 +388,7 @@ class SpectralHybrid(nn.Module):
         pos = torch.arange(0, sl, dtype=torch.long, device=x.device).unsqueeze(0)
         pos_emb = self.hybrid.wpe(pos)
         x = x + pos_emb
-        
+
         x = self.hybrid.dropout(x)
         for block in self.hybrid.hidden:
             x = block(x)

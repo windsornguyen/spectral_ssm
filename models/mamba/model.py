@@ -225,9 +225,15 @@ class Mamba2(nn.Module):
         Returns:
             int: The number of parameters in the model.
         """
-        num_params = sum(p.numel() for p in self.parameters())
-        return num_params
-    
+        param_dict = {name: p.numel() for name, p in self.named_parameters() if p.requires_grad}
+        total_params = sum(param_dict.values())
+
+        print("Top 10 parameter groups:")
+        for i, (name, count) in enumerate(sorted(param_dict.items(), key=lambda x: x[1], reverse=True)[:10], 1):
+            print(f"{i}. {name}: {count:,} parameters")
+
+        return total_params
+
     def forward(self, inputs, targets):
         """
         Forward pass of the spectral SSM model.

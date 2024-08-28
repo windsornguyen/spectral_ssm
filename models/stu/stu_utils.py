@@ -1,6 +1,4 @@
-import math
 import torch
-import torch.nn as nn
 from flashfftconv import FlashFFTConv
 
 def get_hankel(seq_len: int, use_hankel_L: bool = False) -> torch.Tensor:

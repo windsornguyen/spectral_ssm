@@ -20,7 +20,6 @@ from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader
 
 
-
 def smooth_curve(points, sigma=2):
     return gaussian_filter1d(points, sigma=sigma)
 
@@ -116,7 +115,6 @@ def main():
         n_heads=n_heads,
         sl=sl,
         scale=16,
-        sub_rn=True,
         bias=False,
         dropout=0.0,
         flash_attn=True,

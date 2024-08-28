@@ -3,11 +3,10 @@
 # File: attn.py
 # =============================================================================#
 
-"""Vanilla Self-Attention."""
+"""Flash Attention."""
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 
 try:
@@ -43,9 +42,10 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(self.dropout)
 
         # Flash attention specific
-        self.window_size = getattr(configs, 'window_size', 0) # Default to 0 if not specified 
+        self.window_size = configs.window_size
         self.use_alibi = configs.use_alibi
-        self.alibi_slopes = self._get_alibi_slopes(self.n_heads)
+        if self.use_alibi:
+            self.alibi_slopes = self._get_alibi_slopes(self.n_heads)
 
     def _generate_slopes(self, n: int):
         start = 2 ** (-2 ** -(math.log2(n) - 3))
@@ -91,4 +91,3 @@ class CausalSelfAttention(nn.Module):
         # Output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
-    

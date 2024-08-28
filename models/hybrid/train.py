@@ -14,7 +14,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from tqdm import tqdm
 
 from torch.nn import MSELoss
 from losses.loss_ant import AntLoss
@@ -106,56 +105,6 @@ def main() -> None:
         help="Training on the Princeton Della cluster. Defaults to True.",
         # NOTE: You MUST run with `torchrun` for this to work in the general setting.
     )
-    parser.add_argument(
-        "--dilated_attn",
-        type=bool,
-        default=False,
-        help="Whether to use dilated attention. Defaults to False.",
-    )
-    parser.add_argument(
-        "--segment_lengths",
-        type=int,
-        nargs='+',
-        default=[128, 256, 512],
-        help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
-    )
-    parser.add_argument(
-        "--dilated_ratios",
-        type=int,
-        nargs='+',
-        default=[1, 2, 4],
-        help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
-    )
-    parser.add_argument(
-        "--seq_parallel",
-        type=bool,
-        default=True,
-        help="Whether to use sequence parallelism. Defaults to True.",
-    )
-    parser.add_argument(
-        "--xpos_rel_pos",
-        type=bool,
-        default=True,
-        help="Whether to use relative positional embeddings. Defaults to True.",
-    )
-    parser.add_argument(
-        "--xpos_scale_base",
-        type=int,
-        default=512,
-        help="Scale base for positional embeddings. Defaults to 512.",
-    )
-    parser.add_argument(
-        "--rms_norm_eps",
-        type=float,
-        default=1e-5,
-        help="Epsilon for root mean square normalization. Defaults to 1e-5.",
-    )
-    parser.add_argument(
-        "--multiway",
-        type=bool,
-        default=False,
-        help="Whether to use multiway attention. Defaults to False.",
-    )
 
     args = parser.parse_args()
 
@@ -190,30 +139,19 @@ def main() -> None:
     k_u: int = 3
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     use_ar_y: bool = False
-    use_ar_u: bool = True
+    use_ar_u: bool = False
     use_hankel_L: bool = False
     use_flash_fft: bool = False
-    use_approx: bool = True
+    use_approx: bool = False
 
     # Transformer settings
-    sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
-    pct_attn: float = 0.5 # Percentage of layers using attention
+    # pct_attn: float = 0.5 # Percentage of layers using attention
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
 
     # MoE
     moe: bool = True
     num_experts: int = 3
     num_experts_per_timestep: int = 2
-
-    # Dilated Attention settings
-    dilated_attn = args.dilated_attn
-    segment_lengths = args.segment_lengths
-    dilated_ratios = args.dilated_ratios
-    seq_parallel = args.seq_parallel
-    xpos_rel_pos = args.xpos_rel_pos
-    xpos_scale_base = args.xpos_scale_base
-    rms_norm_eps = args.rms_norm_eps
-    multiway = args.multiway
 
     # General training settings
     n_layers: int = 2
@@ -224,6 +162,7 @@ def main() -> None:
     dropout: float = 0.0 # Convert all these into argparses eventually
     flash_attn: bool = True
     use_sq_relu: bool = False # Performs BETTER with Squared ReGLU\
+    use_alibi: bool = True
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -258,6 +197,7 @@ def main() -> None:
         n_heads: int = 16
         sl: int = 300
 
+    window_size: int = sl # Global attention
     configs = SpectralHybridConfigs(
         # STU settings
         d_in=d_in,
@@ -277,25 +217,15 @@ def main() -> None:
         # Transformer settings
         d_model=d_model,
         n_heads=n_heads,
-        sub_rn=sub_rn,
-        # pct_attn=pct_attn,
         flash_attn=flash_attn,
         use_sq_relu=use_sq_relu,
+        window_size=window_size,
+        use_alibi=use_alibi,
         
         # MoE
         moe=moe,
         num_experts=num_experts,
         num_experts_per_timestep=num_experts_per_timestep,
-
-        # Dilated Attention
-        dilated_attn=dilated_attn,
-        segment_lengths=segment_lengths,
-        dilated_ratios=dilated_ratios,
-        seq_parallel=seq_parallel,
-        xpos_rel_pos=xpos_rel_pos,
-        xpos_scale_base=xpos_scale_base,
-        rms_norm_eps=rms_norm_eps,
-        multiway=multiway,
         
         # General training settings
         sl=sl,
@@ -348,8 +278,6 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     eps=1e-5,
-    # noise = 0.5
-    # noise_frequency = 0.2
     noise = 0.0
     noise_frequency = 0.0
     train_loader = get_dataloader(

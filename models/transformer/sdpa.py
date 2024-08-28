@@ -1,6 +1,6 @@
 # =============================================================================#
 # Authors: Windsor Nguyen, Isabel Liu
-# File: attn.py
+# File: sdpa.py
 # =============================================================================#
 
 """Vanilla Self-Attention."""
@@ -12,14 +12,7 @@ import torch.nn as nn
 class CausalSelfAttention(nn.Module):
     """
     Self-attention layer for the Transformer.
-
-    Note: scaled_dot_product_attention enables FlashAttention-2
-    (Tri Dao, 2023, "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning")
-    and Memory-Efficient Attention (Rabe et al., 2022, "Self-attention Does Not Need O(n^2) Memory"),
-    all written in C++, per the PyTorch documentation:
-    https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
     """
-
     def __init__(self, configs):
         super(CausalSelfAttention, self).__init__()
         self.configs = configs
@@ -40,18 +33,11 @@ class CausalSelfAttention(nn.Module):
         self.embd_scale = configs.embd_scale
         self.n_heads = configs.n_heads
 
-        # Flash attention makes the GPUs go brrr, but support is only in PyTorch >= 2.0
         has_flash_attn = hasattr(nn.functional, "scaled_dot_product_attention")
         use_flash_attn = has_flash_attn and configs.flash_attn
         self.flash_attn = use_flash_attn
 
         if not use_flash_attn:
-            # TODO: This prints n_layers times. Move it somewhere better.
-            if not has_flash_attn:
-                print("WARNING: Using slow attention. Flash Attention requires PyTorch >= 2.0")
-            else:
-                print("WARNING: Using slow attention. Flash Attention is disabled.")
-            
             # Manual implementation of the causal mask
             self.register_buffer(
                 "mask",
@@ -59,7 +45,7 @@ class CausalSelfAttention(nn.Module):
                     1, 1, configs.sl, configs.sl
                 ),
             )
-            
+
 
     def forward(self, x):
         """
@@ -97,7 +83,7 @@ class CausalSelfAttention(nn.Module):
                 k,
                 v,
                 attn_mask=None,
-                dropout_p=self.dropout if self.training else 0,
+                dropout_p=self.dropout if self.training else 0.0,
                 is_causal=True,
             )
         else:

@@ -165,7 +165,8 @@ def main() -> None:
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 2
-    n_layers: int = 2
+    n_layers: int = 4
+    d_model: int = 24
     mlp_scale: int = 4
     embd_scale: int = 1
     bias: bool = False
@@ -191,7 +192,6 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
-        d_model: int = 24 if controller != "Ant-v1" else 40
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
@@ -200,7 +200,6 @@ def main() -> None:
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
-        d_model: int = 18 if controller != "Ant-v1" else 32
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
@@ -210,7 +209,6 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        d_model = d_out
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
@@ -228,7 +226,7 @@ def main() -> None:
         conv_init=conv_init,
         expand=expand,
         headdim=headdim,
-        d_ssm=d_ssm * configs.embd_scale,
+        d_ssm=d_ssm,
         ngroups=ngroups,
         A_init_range=A_init_range,
         activation=activation,

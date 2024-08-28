@@ -8,8 +8,7 @@ import torch.nn as nn
 
 from dataclasses import dataclass, field
 from tqdm import tqdm
-from models.transformer.attn import CausalSelfAttention
-from models.transformer.dilated.dilated_attn import DilatedCausalSelfAttention
+from models.transformer.flash_attn import CausalSelfAttention
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
@@ -22,11 +21,10 @@ class TransformerConfigs:
     n_layers: int = 4
     d_model: int = 37
     n_heads: int = 16  # Constraint: n_heads % d_model == 0
-    sl: int = 1_000
-    window_size: int = 0  # Default to 0, which means no windowing
+    sl: int = 512
+    window_size: int = 256
     mlp_scale: int = 6
     embd_scale: int = 1
-    sub_rn: bool = True
     bias: bool = False
     dropout: float = 0.10
     flash_attn: bool = True
@@ -37,21 +35,11 @@ class TransformerConfigs:
         default_factory=lambda: {"task": "mujoco-v3", "controller": "Ant-v1"}
     )
     device: torch.device = None
-    
-    # MoE
-    moe: bool = True
-    num_experts: int = 8
-    num_experts_per_timestep: int = 2
 
-    # Dilated Attention
-    dilated_attn: bool = False
-    segment_lengths: list[int] = field(default_factory=lambda: [128]) # TODO: Check this makes sense (and follows paper)
-    dilated_ratios: list[int] = field(default_factory=lambda: [1]) # TODO: Check this makes sense (and follows paper)
-    seq_parallel: bool = True
-    xpos_rel_pos: bool = True
-    xpos_scale_base: int = 512
-    rms_norm_eps: float = 1e-5
-    multiway: bool = False
+    # MoE
+    moe: bool = False
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
 
 class FFN(nn.Module):
     """
@@ -135,8 +123,8 @@ class TransformerBlock(nn.Module):
     def __init__(self, configs):
         super(TransformerBlock, self).__init__()
         self.configs = configs
-        self.rn_1 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
-        self.rn_2 = RMSNorm(configs.embd_scale * configs.d_model, eps=configs.rms_norm_eps)
+        self.rn_1 = RMSNorm(configs.embd_scale * configs.d_model)
+        self.rn_2 = RMSNorm(configs.embd_scale * configs.d_model)
         self.attn = CausalSelfAttention(configs)
 
         self.ffn_1 = MoE(
@@ -144,12 +132,6 @@ class TransformerBlock(nn.Module):
             experts=[GatedFFN(configs) for _ in range(configs.num_experts)],
             gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
         ) if configs.moe else GatedFFN(configs)
-
-    def _get_attn_type(self, configs):
-        if configs.dilated_attn:
-            return DilatedCausalSelfAttention(configs)
-        else:
-            return CausalSelfAttention(configs)
 
     def forward(self, x):
         x = x + self.attn(self.rn_1(x))
@@ -179,8 +161,7 @@ class Transformer(nn.Module):
 
         self.transformer = nn.ModuleDict(
             dict(
-                # Since our tasks are continuous, we do not use token embeddings.
-                wpe=nn.Embedding(configs.sl, self.d_model * self.embd_scale),
+                wpe=nn.Embedding(configs.sl, configs.embd_scale * configs.d_model),
                 dropout=self.dropout,
                 hidden=nn.ModuleList(
                     [TransformerBlock(configs) for _ in range(configs.n_layers)]
@@ -232,12 +213,11 @@ class Transformer(nn.Module):
         """
         param_dict = {name: p.numel() for name, p in self.named_parameters() if p.requires_grad}
         total_params = sum(param_dict.values())
-        
+
         print("Top 10 parameter groups:")
         for i, (name, count) in enumerate(sorted(param_dict.items(), key=lambda x: x[1], reverse=True)[:10], 1):
             print(f"{i}. {name}: {count:,} parameters")
-        if non_embedding:
-            total_params -= self.transformer.wpe.weight.numel()
+
         return total_params
 
     def forward(self, inputs, targets=None):
@@ -260,16 +240,10 @@ class Transformer(nn.Module):
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
 
         # Position embeddings of shape (sl, d_model)
-        pos_emb = self.transformer.wpe(pos)
+        pos_emb = self.transformer.wpe(pos)  # -> (sl, d_model)
 
         # Add positional embeddings to the input
         x = x + pos_emb
-
-        incremental_state = None # 
-        if self.configs.dilated_attn:
-            incremental_state = {}
-
-        x = self.transformer.dropout(x)
 
         # Pass through each transformer block in hidden layers
         for block in self.transformer.hidden:
@@ -286,56 +260,6 @@ class Transformer(nn.Module):
         else:
             loss = self.loss_fn(preds, targets) if targets is not None else None
             return preds, loss
-
-    # TODO: Not sure when/where this could be used, but we'd like to use it!
-    # TODO: Also need to fix this function to make sure it's correct.
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """Estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS"""
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params()
-        cfg = self.configs
-        L, H, Q, T = (
-            cfg.num_layers,
-            cfg.n_heads,
-            cfg.d_embd // cfg.n_heads,
-            cfg.ctxt_len,
-        )
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
-
-    def flops_per_token(self):
-        """Estimate the number of floating-point operations per token."""
-        flops = 0
-        cfg = self.configs
-        # Embedding layers
-        flops += 2 * cfg.d_model * cfg.max_seq_len  # input and position embeddings
-        # Transformer blocks
-        for _ in range(cfg.num_layers):
-            # Layer normalization
-            flops += 4 * cfg.d_model * cfg.max_seq_len  # ln_1 and ln_2
-            # Multi-head attention
-            flops += (
-                2 * cfg.num_heads * cfg.d_model * cfg.max_seq_len
-            )  # Compute query, key, value
-            flops += (
-                2 * cfg.d_model * cfg.num_heads * cfg.d_model
-            )  # Apply attention weights
-            # FFN layer
-            flops += 2 * cfg.d_model * cfg.d_ff * cfg.d_model  # fc_1
-            flops += cfg.d_ff * cfg.d_model  # Activation function
-            flops += 2 * cfg.d_ff * cfg.d_model * cfg.d_model  # fc_2
-        # Final layer normalization
-        flops += 4 * cfg.d_model * cfg.max_seq_len  # ln_f
-        # Language model head
-        flops += 2 * cfg.d_model * cfg.vocab_size
-        return flops
 
     def predict_states(
         self,

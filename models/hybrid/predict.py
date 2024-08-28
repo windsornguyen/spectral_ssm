@@ -179,7 +179,6 @@ def main():
         # Transformer settings
         n_embd=n_embd,
         n_heads=n_heads,
-        sub_rn=True,
         flash_attn=True,
         # MoE
         moe=True,
