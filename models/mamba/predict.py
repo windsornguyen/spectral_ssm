@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
 
 from models.mamba.model import Mamba2, Mamba2Configs
@@ -21,19 +20,6 @@ from losses.loss_cartpole import CartpoleLoss
 from utils.dataloader import get_dataloader
 from utils.dist import setup
 from utils.dist_utils import get_data_parallel_group
-
-
-def smooth_curve(points, sigma=2):
-    return gaussian_filter1d(points, sigma=sigma)
-
-
-def plot_losses(losses, title, x_values=None, ylabel="Loss", color=None):
-    if x_values is None:
-        x_values = list(range(len(losses)))
-    plt.plot(x_values, smooth_curve(losses), label=title, color=color)
-    plt.xlabel("Time Step")
-    plt.ylabel(ylabel)
-    plt.legend()
 
 
 def main():
@@ -82,6 +68,46 @@ def main():
     # Load the trained model
     model_path = f"mamba_{args.controller}_{args.task}.pt"
 
+    # Shared hyperparameters
+    d_conv: int = 4
+    conv_init = None
+    expand: int = 2
+    d_ssm = None
+    ngroups: int = 1 # TODO: What should this be set to?
+    A_init_range: tuple[int, int] = (1, 16)
+    activation = "silu"
+    D_has_hdim: bool = False
+    rmsnorm: bool = True
+    norm_before_gate: bool = False
+    dt_min: float = 0.001
+    dt_max: float = 0.1
+    dt_init_floor: float = 1e-4
+    dt_limit: tuple[float, float] = (0.0, float("inf"))
+
+    # Fused kernel and sharding options
+    chunk_size: int = 256
+    use_mem_eff_path: bool = True
+    process_group = get_data_parallel_group()
+    sequence_parallel: bool = True
+    dtype: torch.dtype = torch.float32
+
+    # MoE
+    moe: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
+    # TODO: Experiment-specific hyperparameters
+    # Data loader hyperparameters
+    bsz: int = 2
+    n_layers: int = 4
+    d_model: int = 32
+    mlp_scale: int = 10
+    embd_scale: int = 3
+    bias: bool = False
+    dropout: float = 0.0
+    conv_bias: bool = True
+    loss_fn = nn.MSELoss()
+
     if args.task != "mujoco-v3":
         if args.controller == "Ant-v1":
             loss_fn = AntLoss()
@@ -89,73 +115,75 @@ def main():
             loss_fn = HalfCheetahLoss()
         elif args.controller == "Walker2D-v1":
             loss_fn = Walker2DLoss()
-        elif args.controller == "CartPole-v1":
-            loss_fn = CartpoleLoss()
         else:
             loss_fn = nn.MSELoss()
     else:
         loss_fn = nn.MSELoss()
 
+    # Task-specific hyperparameters
     if args.task == "mujoco-v1":
-        d_model: int = 24 if args.controller != "Ant-v1" else 40
+        d_in: int = 24 if args.controller != "Ant-v1" else 37
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
-        d_out: int = 24 if args.controller != "Ant-v1" else 40
-        d_proj: int = 18 if args.controller != "Ant-v1" else 32
-        sl: int = 1000
+        d_out: int = 18 if args.controller != "Ant-v1" else 29
+        sl: int = 512
+
     elif args.task == "mujoco-v2":
-        d_model: int = 18 if args.controller != "Ant-v1" else 32
+        d_in: int = 18 if args.controller != "Ant-v1" else 29
         d_state: int = 130 if args.controller != "Ant-v1" else 128
         headdim: int = 1 if args.controller == "HalfCheetah-v1" else 1
-        d_out = d_model
-        d_proj = d_model
-        sl: int = 1000
+        d_out: int = 18 if args.controller != "Ant-v1" else 29
+        sl: int = 512
+
     elif args.task == "mujoco-v3":
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        d_model = d_out
-        d_proj = d_model
-        expand = 2
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
     configs = Mamba2Configs(
-        bsz=8,
-        n_layers=2,
+        bsz=bsz,
+        n_layers=n_layers,
+        d_in=d_in,
         d_model=d_model,
         d_out=d_out,
-        d_proj=d_proj,
+        mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
+        dropout=dropout,
         d_state=d_state,
-        d_conv=4,
-        conv_init=None,
-        expand=2,
+        d_conv=d_conv,
+        conv_init=conv_init,
+        expand=expand,
         headdim=headdim,
-        d_ssm=None,
-        ngroups=1,
-        A_init_range=(1, 16),
-        activation="silu",
-        D_has_hdim=False,
-        rmsnorm=True,
-        norm_before_gate=False,
-        dt_min=0.001,
-        dt_max=0.1,
-        dt_init_floor=1e-4,
-        dt_limit=(0.0, float("inf")),
-        bias=False,
-        conv_bias=True,
-        chunk_size=256,
-        use_mem_eff_path=True,
-        process_group=get_data_parallel_group(),
-        sequence_parallel=True,
-        moe=True,
-        num_experts=3,
-        num_experts_per_timestep=2,
+        d_ssm=d_ssm,
+        ngroups=ngroups,
+        A_init_range=A_init_range,
+        activation=activation,
+        D_has_hdim=D_has_hdim,
+        rmsnorm=rmsnorm,
+        norm_before_gate=norm_before_gate,
+        dt_min=dt_min,
+        dt_max=dt_max,
+        dt_init_floor=dt_init_floor,
+        dt_limit=dt_limit,
+        bias=bias,
+        conv_bias=conv_bias,
+        chunk_size=chunk_size,
+        use_mem_eff_path=use_mem_eff_path,
+        process_group=process_group,
+        sequence_parallel=sequence_parallel,
+
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
+
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
         device=device,
-        dtype=torch.float32,
+        dtype=dtype,
         world_size=world_size
     )
 
@@ -163,6 +191,7 @@ def main():
     model = Mamba2(configs).to(device)
     # model = torch.compile(model)
     state_dict = load_file(model_path, device="cuda:0")
+    # state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -201,12 +230,14 @@ def main():
     # Run inference
     num_preds = 500
     predicted_states = []
+    ground_truths = []
     losses = []
-    init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
+    init = sl
     
-    # Get the first batch to determine the steps
-    first_batch = next(iter(test_loader))
-    steps = first_batch[0].shape[1] - init
+    # # Get the first batch to determine the steps
+    # first_batch = next(iter(test_loader))
+    # steps = first_batch[0].shape[1] - init
+    steps = 50
 
     with torch.no_grad():
         for i, (inputs, targets) in enumerate(test_loader):
@@ -217,37 +248,36 @@ def main():
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
                     init=init,
-                    steps=steps,  # Predict the next steps
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
             elif args.task == "mujoco-v3":
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,  # Use the first 295 steps as context
-                    steps=steps,  # Predict the next steps
+                    init=init,
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
 
             predicted_states.append(pred_states)
+            ground_truths.append(pred_truths)
             losses.append(trajectory_losses)
 
     predicted_states = torch.cat(predicted_states, dim=0)
+    ground_truths = torch.cat(ground_truths, dim=0)
     losses = torch.cat(losses, dim=0)
-
-    print(f"Shape of predicted states: {predicted_states.shape}")
-    print(f"Shape of losses: {losses.shape}")
 
     # Print out predictions and check if they're all the same
     for i in range(num_preds):
@@ -270,101 +300,23 @@ def main():
     else:
         print("Predictions differ, which is expected for different inputs.")
 
+    print(f"Shape of predicted states: {predicted_states.shape}")
+    print(f"Shape of ground truths: {ground_truths.shape}")
+    print(f"Shape of losses: {losses.shape}")
+
     # Save predictions and ground truths
-    print("Saved prediction shape:", predicted_states.shape)
-    
-    # Get all targets from the dataloader
-    all_targets = torch.cat([targets for _, targets in test_loader], dim=0)
-    all_targets = torch.roll(all_targets, shifts=1, dims=1)  # shift ground truth by 1
-    
-    print(
-        "Saved ground truth shape:",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
-    )
-    print("Saved losses shape:", losses.shape)
     np.save(
-        f"mamba_{args.controller}_{args.task}_predictions_ar.npy",
+        f"mamba_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"mamba_{args.controller}_{args.task}_ground_truths_ar.npy",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
+        f"mamba_{args.controller}_{args.task}_ground_truths.npy",
+        ground_truths.cpu().numpy(),
     )
-    np.save(f"mamba_{args.controller}_{args.task}_losses_ar.npy", losses.cpu().numpy())
+    np.save(f"mamba_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'mamba_{args.controller}_{args.task}_predictions.npy', 'mamba_{args.controller}_{args.task}_ground_truths.npy', and 'mamba_{args.controller}_{args.task}_losses.npy' respectively."
     )
-
-    # # Plotting
-    # plt.style.use("seaborn-v0_8-whitegrid")
-    # sns.set_context("paper", font_scale=1.5)
-    # colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
-
-    # fig = plt.figure(figsize=(20, 8 * num_preds))
-    # gs = GridSpec(
-    #     num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
-    # )
-
-    # for pred_idx in range(num_preds):
-    #     print(f"Plotting prediction {pred_idx + 1}")
-
-    #     # Plot predicted states vs ground truth
-    #     ax1 = fig.add_subplot(gs[pred_idx, 0])
-    #     feature_idx = 0
-
-    #     # Plot ground truth
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
-    #         label="Ground Truth",
-    #         color="black",
-    #         linewidth=2,
-    #         linestyle="--",
-    #     )
-
-    #     # Plot prediction
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
-    #         label="Predicted",
-    #         color=colors[pred_idx],
-    #         linewidth=2,
-    #     )
-
-    #     ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
-    #     ax1.set_xlabel("Time Step")
-    #     ax1.set_ylabel("State Value")
-    #     ax1.legend()
-
-    #     # Plot losses
-    #     ax2 = fig.add_subplot(gs[pred_idx, 1])
-
-    #     ax2.plot(
-    #         range(steps),
-    #         smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
-    #         label="Total Loss",
-    #         color="black",
-    #         linewidth=2,
-    #     )
-
-    #     ax2.set_title(f"Prediction {pred_idx+1}: Losses")
-    #     ax2.set_xlabel("Time Step")
-    #     ax2.set_ylabel("Value")
-    #     ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    #     ax2.set_yscale("log")  # Use log scale for better visibility
-
-    # plt.suptitle(
-    #     f"Mamba Predictions for {args.controller} on {args.task}\n",
-    #     fontsize=16,
-    # )
-    # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    # # TODO: Add existok / make if non-existent (results/) directory
-    # plt.savefig(
-    #     f"results/mamba_{args.controller}_{args.task}_predictions.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # plt.show()
 
 
 if __name__ == "__main__":

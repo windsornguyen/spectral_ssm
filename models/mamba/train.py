@@ -134,7 +134,6 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    # TODO: Make these argparse arguments eventually else default to these.
     d_conv: int = 4
     conv_init = None
     expand: int = 2
@@ -158,17 +157,17 @@ def main() -> None:
     dtype: torch.dtype = torch.float32
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
     # TODO: Experiment-specific hyperparameters
     # Data loader hyperparameters
     bsz: int = 2
-    n_layers: int = 4
-    d_model: int = 24
+    n_layers: int = 2
+    d_model: int = 32
     mlp_scale: int = 4
-    embd_scale: int = 1
+    embd_scale: int = 3
     bias: bool = False
     dropout: float = 0.0
     conv_bias: bool = True
@@ -311,6 +310,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -330,6 +330,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -379,7 +380,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=mamba_model,

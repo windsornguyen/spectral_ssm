@@ -142,10 +142,10 @@ def main() -> None:
     dropout: float = 0.0
     flash_attn: bool = True
     use_sq_relu: bool = False # Observed to perform slightly better with Squared ReGLU
-    use_alibi: bool = True
+    use_alibi: bool = False
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -332,7 +332,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=transformer_model,
@@ -372,6 +372,11 @@ def main() -> None:
             )
         else:
             colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
+
+    # Set manual seed for reproducibility
+    torch.manual_seed(42)  # You can use any integer value here
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -484,6 +489,11 @@ def main() -> None:
         if patient_counter >= patience:
             break
 
+    # Remove manual seed
+    torch.seed()
+    if torch.cuda.is_available():
+        torch.cuda.seed_all()
+
     # Post-training processing
     if main_process:
         if best_checkpoint:
@@ -566,20 +576,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    # if main_process and generate_loss_landscape:
-    #     loss_landscape = LossLandscape(
-    #         transformer_model, device, training_run.optimizer, max_lr, main_process
-    #     )
-    #     x_range = (-1, 1, 10)    # adjust as needed
-    #     y_range = (-1, 1, 10)
-    #     loss_landscape.generate(
-    #         train_loader,
-    #         f"landscapes/loss_landscape-{timestamp}",
-    #         x_range=x_range,
-    #         y_range=y_range,
-    #         plot_loss_landscape=True,
-    #         plot_hessian=True,
-    #     )
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            transformer_model, device, training_run.optimizer, max_lr, main_process, dtype=torch.bfloat16
+        )
+        x_range = (-1, 1, 10)    # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

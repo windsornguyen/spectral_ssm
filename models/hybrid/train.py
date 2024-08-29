@@ -142,14 +142,14 @@ def main() -> None:
     use_ar_u: bool = False
     use_hankel_L: bool = False
     use_flash_fft: bool = False
-    use_approx: bool = False
+    use_approx: bool = True
 
     # Transformer settings
     # pct_attn: float = 0.5 # Percentage of layers using attention
     flash_attn: bool = True # Whether to use FlashAttention-2 or not
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -159,10 +159,10 @@ def main() -> None:
     mlp_scale: int = 4
     embd_scale: int = 1
     bias: bool = False
-    dropout: float = 0.0 # Convert all these into argparses eventually
+    dropout: float = 0.0
     flash_attn: bool = True
     use_sq_relu: bool = False # Performs BETTER with Squared ReGLU\
-    use_alibi: bool = True
+    use_alibi: bool = False
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -280,6 +280,7 @@ def main() -> None:
     eps=1e-5,
     noise = 0.0
     noise_frequency = 0.0
+
     train_loader = get_dataloader(
         model="hybrid",
         data=train_data,
@@ -361,7 +362,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=hybrid_model,
@@ -595,20 +596,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    # if main_process and generate_loss_landscape:
-    #     loss_landscape = LossLandscape(
-    #         hybrid_model, device, training_run.optimizer, max_lr, main_process
-    #     )
-    #     x_range = (-1, 1, 10)   # adjust as needed
-    #     y_range = (-1, 1, 10)
-    #     loss_landscape.generate(
-    #         train_loader,
-    #         f"landscapes/loss_landscape-{timestamp}",
-    #         x_range=x_range,
-    #         y_range=y_range,
-    #         plot_loss_landscape=True,
-    #         plot_hessian=True,
-    #     )
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            hybrid_model, device, training_run.optimizer, max_lr, main_process, dtype=torch.bfloat16
+        )
+        x_range = (-1, 1, 10)   # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

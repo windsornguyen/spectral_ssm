@@ -38,7 +38,7 @@ class LossLandscape:
     Original repository: https://github.com/tomgoldstein/loss-landscape/
     """
 
-    def __init__(self, model, device, optimizer, max_lr, main_process: bool = False):
+    def __init__(self, model, device, optimizer, max_lr, main_process: bool = False, dtype=torch.float32):
         self.model = model
         self.device = device
         # self.device = torch.device(
@@ -47,6 +47,7 @@ class LossLandscape:
         self.optimizer = optimizer
         self.max_lr = max_lr
         self.main_process = main_process
+        self.dtype = dtype
         self.model.to(self.device)
 
     def generate_loss_landscape(
@@ -118,8 +119,10 @@ class LossLandscape:
 
         with torch.no_grad():
             for inputs, targets in dataloader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                _, loss_info = model(inputs, targets)
+                inputs = inputs.to(self.device).to(self.dtype)
+                targets = targets.to(self.device).to(self.dtype)
+                with torch.cuda.amp.autocast(dtype=self.dtype):
+                    _, loss_info = model(inputs, targets)
 
                 if isinstance(loss_info, tuple):
                     loss, *step_metrics = loss_info
@@ -163,7 +166,7 @@ class LossLandscape:
         for i in range(num_batches):
             batch_coords = coords[i * batch_size : (i + 1) * batch_size]
             batch_models = [
-                copy.deepcopy(self.model).to(self.device) for _ in batch_coords
+                copy.deepcopy(self.model).to(self.device).to(self.dtype) for _ in batch_coords
             ]
 
             for model, (X, y) in zip(batch_models, batch_coords, strict=True):
@@ -317,9 +320,7 @@ class LossLandscape:
         """
         for name, updated_param in model.named_parameters():
             perturbed_param = x_step * dx[name] + y_step * dy[name]
-            updated_param.data = param[name].to(self.device) + perturbed_param.to(
-                self.device
-            )
+            updated_param.data = (param[name].to(self.device) + perturbed_param.to(self.device)).to(self.dtype)
 
         return model
 

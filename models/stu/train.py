@@ -139,7 +139,7 @@ def main() -> None:
     # TODO: Make these argparse arguments eventually else default to these.
     n_layers: int = 4
     d_model: int = 32
-    embd_scale: int = 2
+    embd_scale: int = 1
     mlp_scale: int = 4
     bias: bool = False
     dropout: float = 0.0
@@ -269,8 +269,8 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     eps = 1e-5
-    noise = 0.0
-    noise_frequency = 0.0
+    noise = 0.5
+    noise_frequency = 0.1
 
     train_loader = get_dataloader(
         # TODO: Generalize model= to argparse
@@ -358,7 +358,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=stu_model,
@@ -615,20 +615,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    # if main_process and generate_loss_landscape:
-    #     loss_landscape = LossLandscape(
-    #         stu_model, device, training_run.optimizer, max_lr, main_process
-    #     )
-    #     x_range = (-1, 1, 10)   # adjust as needed
-    #     y_range = (-1, 1, 10)
-    #     loss_landscape.generate(
-    #         train_loader,
-    #         f"landscapes/loss_landscape-{timestamp}",
-    #         x_range=x_range,
-    #         y_range=y_range,
-    #         plot_loss_landscape=True,
-    #         plot_hessian=True,
-    #     )
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            stu_model, device, training_run.optimizer, max_lr, main_process
+        )
+        x_range = (-1, 1, 10)   # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()
