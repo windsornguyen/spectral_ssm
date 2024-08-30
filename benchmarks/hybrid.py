@@ -9,14 +9,15 @@ import torch
 import torch.nn as nn
 
 from dataclasses import dataclass, field
-from spectral_ssm.models.stu.stu_utils_old import (
-    get_top_eigh,
+from models.stu.stu_utils_old import (
+    get_top_eigh, 
     preconvolve,
     compute_ar_u,
     compute_spectral,
     compute_ar_y,
 )
-from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
+from models.transformer.attn_old import CausalSelfAttention
+from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
 from utils.swiglu import SwiGLU
