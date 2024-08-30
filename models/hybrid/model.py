@@ -18,7 +18,7 @@ from models.stu.stu_utils import (
     convolve,
     flash_convolve,
 )
-from spectral_ssm.models.transformer.attn_old import CausalSelfAttention
+from models.transformer.flash_attn import CausalSelfAttention
 from utils.nearest_power_of_2 import nearest_power_of_2
 from utils.moe import MoE
 from utils.rms_norm import RMSNorm
@@ -42,32 +42,22 @@ class SpectralHybridConfigs:
     use_hankel_L: bool = False
     use_flash_fft: bool = True
     use_approx: bool = True
-    
+
     # Transformer settings
-    d_model: int = 37 # Constraint: n_heads % d_model == 0
-    n_heads: int = 16 # Constraint: n_heads % d_model == 0
+    d_model: int = 37  # Constraint: n_heads % d_model == 0
+    n_heads: int = 16  # Constraint: n_heads % d_model == 0
     flash_attn: bool = True
     use_sq_relu: bool = False
-    
+    window_size: int = 256
+    use_alibi: bool = True
+
     # MoE
-    moe: bool = True
-    num_experts: int = 8
+    moe: bool = False
+    num_experts: int = 3
     num_experts_per_timestep: int = 2
 
-    # Dilated Attention settings
-    sub_rn: bool = True
-    flash_attn: bool = True
-    dilated_attn: bool = False
-    segment_lengths: list[int] = field(default_factory=lambda: [128])
-    dilated_ratios: list[int] = field(default_factory=lambda: [1])
-    seq_parallel: bool = True
-    xpos_rel_pos: bool = True
-    xpos_scale_base: int = 512
-    rms_norm_eps: float = 1e-5
-    multiway: bool = False
-
     # General training settings
-    sl: int = 1_000 # Sequence length
+    sl: int = 512  # Sequence length
     n_layers: int = 2
     bias: bool = False
     dropout: float = 0.10
@@ -97,7 +87,13 @@ class STU(nn.Module):
         V (torch.Tensor): Precomputed FFT of top K eigenvectors.
     """
 
-    def __init__(self, configs: SpectralHybridConfigs, phi: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
+    def __init__(
+        self,
+        configs: SpectralHybridConfigs,
+        phi: torch.Tensor,
+        n: int,
+        flash_fft: FlashFFTConv = None,
+    ) -> None:
         super(STU, self).__init__()
         self.configs = configs
         self.phi = phi
@@ -109,34 +105,63 @@ class STU(nn.Module):
         self.d_out = configs.d_model
         self.use_hankel_L = configs.use_hankel_L
         self.use_approx = configs.use_approx
-        
+
         if self.use_approx:
-            self.M_inputs = nn.Parameter(torch.empty(self.d_in, self.d_out))
-            self.M_filters = nn.Parameter(torch.empty(self.K, self.d_in))
+            self.M_inputs = nn.Parameter(
+                torch.empty(
+                    configs.embd_scale * self.d_in, configs.embd_scale * self.d_out
+                )
+            )
+            self.M_filters = nn.Parameter(
+                torch.empty(self.K, configs.embd_scale * self.d_in)
+            )
         else:
-            self.M_phi_plus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
-            self.M_phi_minus = nn.Parameter(torch.empty(self.K, self.d_in, self.d_out))
+            self.M_phi_plus = nn.Parameter(
+                torch.empty(
+                    self.K,
+                    configs.embd_scale * self.d_in,
+                    configs.embd_scale * self.d_out,
+                )
+            )
+            self.M_phi_minus = nn.Parameter(
+                torch.empty(
+                    self.K,
+                    configs.embd_scale * self.d_in,
+                    configs.embd_scale * self.d_out,
+                )
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_approx:
             # Contract inputs and filters over the K and d_in dimensions, then convolve
             x_proj = x @ self.M_inputs
             phi_proj = self.phi @ self.M_filters
-            if self.use_flash_fft and self.flash_fft is not None: 
-                spectral_plus, spectral_minus = flash_convolve(x_proj, phi_proj, self.flash_fft, self.use_approx)
+            if self.use_flash_fft and self.flash_fft is not None:
+                spectral_plus, spectral_minus = flash_convolve(
+                    x_proj, phi_proj, self.flash_fft, self.use_approx
+                )
             else:
-                spectral_plus, spectral_minus = convolve(x_proj, phi_proj, self.n, self.use_approx)
+                spectral_plus, spectral_minus = convolve(
+                    x_proj, phi_proj, self.n, self.use_approx
+                )
         else:
             # Convolve inputs and filters,
-            if self.use_flash_fft and self.flash_fft is not None: 
-                U_plus, U_minus = flash_convolve(x, self.phi, self.flash_fft, self.use_approx)
+            if self.use_flash_fft and self.flash_fft is not None:
+                U_plus, U_minus = flash_convolve(
+                    x, self.phi, self.flash_fft, self.use_approx
+                )
             else:
                 U_plus, U_minus = convolve(x, self.phi, self.n, self.use_approx)
             # Then, contract over the K and d_in dimensions
-            spectral_plus = torch.tensordot(U_plus, self.M_phi_plus, dims=([2, 3], [0, 1]))
-            spectral_minus = torch.tensordot(U_minus, self.M_phi_minus, dims=([2, 3], [0, 1]))
+            spectral_plus = torch.tensordot(
+                U_plus, self.M_phi_plus, dims=([2, 3], [0, 1])
+            )
+            spectral_minus = torch.tensordot(
+                U_minus, self.M_phi_minus, dims=([2, 3], [0, 1])
+            )
 
         return spectral_plus + spectral_minus
+
 
 class MLP(nn.Module):
     """
@@ -153,8 +178,10 @@ class MLP(nn.Module):
     def __init__(self, configs) -> None:
         super(MLP, self).__init__()
         self.swiglu = SwiGLU(
-            dim=configs.d_model * configs.embd_scale, h_dim=int(configs.mlp_scale * configs.d_model),
-            bias=configs.bias, use_sq_relu=configs.use_sq_relu
+            dim=configs.d_model * configs.embd_scale,
+            h_dim=int(configs.mlp_scale * configs.d_model),
+            bias=configs.bias,
+            use_sq_relu=configs.use_sq_relu,
         )
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -171,6 +198,7 @@ class MLP(nn.Module):
         x = self.swiglu(x)
         x = self.dropout(x)
         return x
+
 
 class GatedMLP(nn.Module):
     """
@@ -191,8 +219,12 @@ class GatedMLP(nn.Module):
         self.chunks = 2
         self.hidden_features = int(configs.mlp_scale * configs.d_model)
 
-        self.fc_1 = nn.Linear(self.in_features, self.chunks * self.hidden_features, bias=configs.bias)
-        self.fc_2 = nn.Linear(self.hidden_features, self.out_features, bias=configs.bias)
+        self.fc_1 = nn.Linear(
+            self.in_features, self.chunks * self.hidden_features, bias=configs.bias
+        )
+        self.fc_2 = nn.Linear(
+            self.hidden_features, self.out_features, bias=configs.bias
+        )
         self.silu = nn.SiLU()
         self.dropout = nn.Dropout(configs.dropout)
 
@@ -212,6 +244,7 @@ class GatedMLP(nn.Module):
         y = self.fc_2(y)
         return self.dropout(y)
 
+
 class HybridBlock(nn.Module):
     """
     A single block of the hybrid spectral SSM model (spectral filtering + attention).
@@ -223,22 +256,44 @@ class HybridBlock(nn.Module):
         padded_sl (int): Padded sequence length for FFT operations.
     """
 
-    def __init__(self, configs: SpectralHybridConfigs, phi: torch.Tensor, n: int, flash_fft: FlashFFTConv = None) -> None:
+    def __init__(
+        self,
+        configs: SpectralHybridConfigs,
+        phi: torch.Tensor,
+        n: int,
+        flash_fft: FlashFFTConv = None,
+    ) -> None:
         super(HybridBlock, self).__init__()
         self.stu = STU(configs, phi, n, flash_fft)
         self.attn = CausalSelfAttention(configs)
 
-        self.mlp_1 = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp_1 = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(
+                    configs.d_model * configs.embd_scale,
+                    configs.num_experts,
+                    bias=configs.bias,
+                ),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
-        self.mlp_2 = MoE(
-            configs,
-            experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
-            gate=nn.Linear(configs.d_model * configs.embd_scale, configs.num_experts, bias=configs.bias)
-        ) if configs.moe else GatedMLP(configs)
+        self.mlp_2 = (
+            MoE(
+                configs,
+                experts=[GatedMLP(configs) for _ in range(configs.num_experts)],
+                gate=nn.Linear(
+                    configs.d_model * configs.embd_scale,
+                    configs.num_experts,
+                    bias=configs.bias,
+                ),
+            )
+            if configs.moe
+            else GatedMLP(configs)
+        )
 
         self.rn_1 = RMSNorm(configs.d_model * configs.embd_scale)
         self.rn_2 = RMSNorm(configs.d_model * configs.embd_scale)
@@ -265,6 +320,7 @@ class HybridBlock(nn.Module):
         x = x + self.mlp_2(self.rn_4(x)) + z
 
         return x
+
 
 class SpectralHybrid(nn.Module):
     """
@@ -295,29 +351,43 @@ class SpectralHybrid(nn.Module):
         self.bias = configs.bias
         self.dropout = configs.dropout
         self.controls = configs.controls
-        
+
         self.hybrid = nn.ModuleDict(
             dict(
                 wpe=nn.Embedding(self.sl, self.d_model * configs.embd_scale),
                 dropout=nn.Dropout(configs.dropout),
                 hidden=nn.ModuleList(
-                    [HybridBlock(
-                        self.configs, self.phi, self.n, FlashFFTConv(configs.sl) if configs.use_flash_fft else None
-                    ) for _ in range(self.n_layers)]),
+                    [
+                        HybridBlock(
+                            self.configs,
+                            self.phi,
+                            self.n,
+                            FlashFFTConv(configs.sl) if configs.use_flash_fft else None,
+                        )
+                        for _ in range(self.n_layers)
+                    ]
+                ),
             )
         )
-        
-        self.input_proj = nn.Linear(self.d_in, self.d_model * self.embd_scale, bias=self.bias)
-        self.output_proj = nn.Linear(self.d_model * self.embd_scale, self.d_out, bias=configs.bias)
+
+        self.input_proj = nn.Linear(
+            self.d_in, self.d_model * self.embd_scale, bias=self.bias
+        )
+        self.output_proj = nn.Linear(
+            self.d_model * self.embd_scale, self.d_out, bias=configs.bias
+        )
         self.loss_fn = self.configs.loss_fn
-        
+
         # Initialize all weights
         self.m_x = self.d_out**-0.5
-        self.std = (self.d_model * self.embd_scale)**-0.5
+        self.std = (self.d_model * self.embd_scale) ** -0.5
         self.apply(self._init_weights)
 
         # Report the number of parameters
-        print("\nSTU-Attention Hybrid Model Parameter Count: %.2fM" % (self.get_num_params() / 1e6,))
+        print(
+            "\nSTU-Attention Hybrid Model Parameter Count: %.2fM"
+            % (self.get_num_params() / 1e6,)
+        )
 
     def forward(self, inputs, targets):
         """
@@ -335,7 +405,7 @@ class SpectralHybrid(nn.Module):
         _, sl, _ = inputs.size()
 
         x = self.input_proj(inputs)
-        
+
         # Generate positional embeddings for the sequence
         pos = torch.arange(0, sl, dtype=torch.long, device=inputs.device)  # -> (sl)
 
@@ -344,7 +414,7 @@ class SpectralHybrid(nn.Module):
 
         # Add positional embeddings to the input
         x = x + pos_emb
-        
+
         x = self.hybrid.dropout(x)
         for block in self.hybrid.hidden:
             x = block(x)
@@ -422,7 +492,7 @@ class SpectralHybrid(nn.Module):
         for _ in range(L):
             total_flops += self._compute_rmsnorm_flops(D, T) * 2  # 2 RMSNorm per block
             total_flops += self._compute_spectral_flops(T, D, E)
-            
+
             if cfg.use_ar_u:
                 total_flops += 2 * cfg.k_u * D * D * T  # compute_ar_u
             if cfg.use_ar_y:
@@ -459,7 +529,14 @@ class SpectralHybrid(nn.Module):
         normalize_flops = D * T  # Division by sqrt(mean + eps)
         scale_flops = D * T  # Multiplication by weight
 
-        return power_flops + sum_flops + mean_flops + sqrt_flops + normalize_flops + scale_flops
+        return (
+            power_flops
+            + sum_flops
+            + mean_flops
+            + sqrt_flops
+            + normalize_flops
+            + scale_flops
+        )
 
     def _compute_spectral_flops(self, T: int, D: int, E: int) -> int:
         """
@@ -508,11 +585,11 @@ class SpectralHybrid(nn.Module):
             int: Total FLOPS for SwiGLU computation.
         """
         h_dim = int(scale * D)
-        
+
         linear_flops = 2 * D * h_dim * T * 3  # Three linear layers
         silu_flops = 3 * h_dim * T  # SiLU activation (3 ops per element)
         hadamard_flops = h_dim * T  # Hadamard product
-        
+
         return linear_flops + silu_flops + hadamard_flops
 
     def predict_states(
@@ -521,7 +598,8 @@ class SpectralHybrid(nn.Module):
         targets: torch.Tensor,
         init: int = 950,
         steps: int = 50,
-        rollout_steps: int = 20,
+        rollout_steps: int = 1,
+        truth: int = 0
     ) -> tuple[
         torch.Tensor,
         tuple[
@@ -536,50 +614,68 @@ class SpectralHybrid(nn.Module):
             targets (torch.Tensor): Target tensor of shape (num_traj, total_steps, d_out)
             init (int): Index of the initial state to start the prediction
             steps (int): Number of steps to predict
+            rollout_steps (int): Number of predicted steps to calculate the mean loss over
+            truth (int): Interval at which to ground predictions to true targets.
+                If 0, no autoregression. If > sl, no grounding.
 
         Returns:
         tuple: Contains the following elements:
-            - preds (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
+            - predicted_steps (torch.Tensor): Predictions of shape (num_traj, total_steps, d_out)
+            - ground_truths (torch.Tensor): Ground truths of shape (num_traj, total_steps, d_out)
             - tuple:
                 - avg_loss (torch.Tensor): Scalar tensor with the average loss
                 - traj_losses (torch.Tensor): Losses for each trajectory and step, shape (num_traj, steps)
         """
         device = next(self.parameters()).device
         print(f"Predicting on {device}.")
-        num_traj, total_steps, d_out = targets.size()
-        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
-        assert rollout_steps <= steps, f"Cannot roll out for more than total steps"
+        inputs = inputs.to(torch.bfloat16)
+        targets = targets.to(torch.bfloat16)
 
-        # Track model hallucinations
+        num_traj, total_steps, d_out = targets.size()
+        _, _, d_in = inputs.size()
+        assert init + steps <= total_steps, f"Cannot take more steps than {total_steps}"
+        assert rollout_steps <= steps, "Cannot roll out for more than total steps"
+
+        # Track model prediction outputs and ground truths
         predicted_steps = torch.zeros(num_traj, steps, d_out, device=device)
+        ground_truths = torch.zeros(num_traj, steps, d_out, device=device)
 
         # Track loss between rollout vs ground truth
         traj_losses = torch.zeros(num_traj, steps, device=device)
 
-        # Initialize cost function
         mse_loss = nn.MSELoss()
+
+        # Initialize autoregressive inputs with all available context
+        ar_inputs = inputs[:, :init].clone()
 
         for step in tqdm(range(steps), desc="Predicting", unit="step"):
             current_step = init + step
 
             # Predict the next state using a fixed window size of inputs
-            step_preds, (_, _) = self.forward(
-                inputs[:, :current_step], targets[:, :current_step]
-            )
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                step_preds, (_, _) = self.forward(
+                    ar_inputs[:, step:current_step], targets[:, step:current_step]
+                )
 
             # Calculate the mean loss of the last rollout_steps predictions
             rollout_preds = step_preds[:, -rollout_steps:, :]
-            rollout_ground_truths = targets[:, (current_step - rollout_preds.shape[1]) : current_step, :]
+            rollout_ground_truths = targets[:, (current_step - rollout_steps) : current_step, :]
             traj_losses[:, step] = mse_loss(rollout_preds, rollout_ground_truths)
 
-            # Store the last prediction step for plotting
+            # Store the last prediction step and the corresponding ground truth step for plotting
             predicted_steps[:, step] = step_preds[:, -1].squeeze(1)
+            ground_truths[:, step] = targets[:, (current_step - rollout_steps) : current_step].squeeze(1)
 
-            # # Concatenate the autoregressive predictions of states and the ground truth actions (hallucinating)
-            # next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
-            # next_input = torch.cat([next_input, next_action], dim=2)
-            # ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            # Decide whether to use the prediction or ground truth as the next input
+            if truth == 0 or (step + 1) % truth == 0:
+                next_input = inputs[:, current_step:current_step+1, :]
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
+            else:
+                # Concatenate the autoregressive predictions of states and the ground truth actions
+                next_input = step_preds[:, -1:].detach()
+                next_action = inputs[:, current_step:current_step+1, -(d_in - d_out):]
+                next_input = torch.cat([next_input, next_action], dim=2)
+                ar_inputs = torch.cat([ar_inputs, next_input], dim=1)
 
         avg_loss = traj_losses.mean()
-        return predicted_steps, (avg_loss, traj_losses)
-    
+        return predicted_steps, ground_truths, (avg_loss, traj_losses)

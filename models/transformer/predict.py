@@ -20,20 +20,6 @@ from losses.loss_walker import Walker2DLoss
 from utils.dataloader import get_dataloader
 
 
-
-def smooth_curve(points, sigma=2):
-    return gaussian_filter1d(points, sigma=sigma)
-
-
-def plot_losses(losses, title, x_values=None, ylabel="Loss", color=None):
-    if x_values is None:
-        x_values = list(range(len(losses)))
-    plt.plot(x_values, smooth_curve(losses), label=title, color=color)
-    plt.xlabel("Time Step")
-    plt.ylabel(ylabel)
-    plt.legend()
-
-
 def main():
     # Process command line flags
     parser = argparse.ArgumentParser(
@@ -72,61 +58,80 @@ def main():
     # Load the trained model
     model_path = f"transformer_{args.controller}_{args.task}.pt"
 
-    if args.task == "mujoco-v1":
-        sl = 1000
-        if args.controller == "Ant-v1":
-            d_model, d_out = 37, 29
-            n_heads = 1
-            loss_fn = AntLoss()
-        elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            d_model, d_out = 24, 18
-            n_heads = 8
-            loss_fn = (
-                HalfCheetahLoss()
-                if args.controller == "HalfCheetah-v1"
-                else Walker2DLoss()
-            )
-        else:
-            d_model, d_out, loss_fn = None, None, None
-    elif args.task == "mujoco-v2":
-        sl = 1000
-        n_heads = 1
-        if args.controller == "Ant-v1":
-            d_model, d_out = 29, 29
-            loss_fn = AntLoss()
-        elif args.controller in ["HalfCheetah-v1", "Walker2D-v1"]:
-            d_model, d_out = 18, 18
-            loss_fn = (
-                HalfCheetahLoss()
-                if args.controller == "HalfCheetah-v1"
-                else Walker2DLoss()
-            )
-        else:
-            d_model, d_out, loss_fn = None, None, None
-    elif args.task == "mujoco-v3":
-        n_heads = 8
-        sl, d_model, d_out = 300, 512, 512
-        loss_fn = MSELoss()
-    else:
-        raise ValueError("Invalid task")
+    # Shared hyperparameters
+    n_layers: int = 4
+    d_model: int = 32
+    embd_scale: int = 3
+    mlp_scale: int = 12
+    bias: bool = False
+    dropout: float = 0.0
+    flash_attn: bool = True
+    use_sq_relu: bool = False # Observed to perform slightly better with Squared ReGLU
+    use_alibi: bool = False
 
+    # MoE
+    moe: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
+    if args.task != "mujoco-v3":
+        if args.controller == "Ant-v1":
+            loss_fn = AntLoss()
+        elif args.controller == "HalfCheetah-v1":
+            loss_fn = HalfCheetahLoss()
+        elif args.controller == "Walker2D-v1":
+            loss_fn = Walker2DLoss()
+        else:
+            loss_fn = None
+    else:
+        loss_fn = MSELoss()
+
+    # Task-specific hyperparameters
+    if args.task == "mujoco-v1":
+        d_in: int = 24 if args.controller != "Ant-v1" else 37
+        n_heads: int = 8 if args.controller != "Ant-v1" else 1
+        d_out: int = 18 if args.controller != "Ant-v1" else 29
+        sl: int = 512
+
+    elif args.task == "mujoco-v2":
+        d_in: int = 18 if args.controller != "Ant-v1" else 29
+        n_heads: int = 9 if args.controller != "Ant-v1" else 1
+        d_out = d_in
+        sl: int = 512
+
+    elif args.task == "mujoco-v3":
+        RESNET_D_OUT: int = 512  # ResNet-18 output dim
+        RESNET_FEATURE_SIZE: int = 1
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        n_heads: int = 16
+        d_out = d_in
+        sl: int = 300
+
+    window_size: int = sl # Global attention
     configs = TransformerConfigs(
-        n_layers=2,
+        # General Transformer settings
+        n_layers=n_layers,
         d_model=d_model,
+        d_in=d_in,
+        d_out=d_out,
         n_heads=n_heads,
         sl=sl,
-        scale=16,
-        sub_rn=True,
-        bias=False,
-        dropout=0.0,
-        flash_attn=True,
-        use_sq_relu=False,
+        window_size=window_size,
+        mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
+        bias=bias,
+        dropout=dropout,
+        flash_attn=flash_attn,
+        use_sq_relu=use_sq_relu,
+        use_alibi=use_alibi,
         loss_fn=loss_fn,
-        controls={"task": args.task, "controller": args.controller},
+        controls={"task": "mujoco-v1", "controller": args.controller},
         device=device,
-        moe=True,
-        num_experts=3,
-        num_experts_per_timestep=2,
+
+        # MoE
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
     )
 
     # Initialize and load the model
@@ -172,12 +177,14 @@ def main():
     # Run inference
     num_preds = 500
     predicted_states = []
+    ground_truths = []
     losses = []
-    init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
+    init = sl
     
-    # Get the first batch to determine the steps
-    first_batch = next(iter(test_loader))
-    steps = first_batch[0].shape[1] - init
+    # # Get the first batch to determine the steps
+    # first_batch = next(iter(test_loader))
+    # steps = first_batch[0].shape[1] - init
+    steps = 50
 
     with torch.no_grad():
         for i, (inputs, targets) in enumerate(test_loader):
@@ -188,37 +195,36 @@ def main():
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
                     init=init,
-                    steps=steps,  # Predict the next steps
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
             elif args.task == "mujoco-v3":
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,  # Use the first 295 steps as context
-                    steps=steps,  # Predict the next steps
+                    init=init,
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
 
             predicted_states.append(pred_states)
+            ground_truths.append(pred_truths)
             losses.append(trajectory_losses)
 
     predicted_states = torch.cat(predicted_states, dim=0)
+    ground_truths = torch.cat(ground_truths, dim=0)
     losses = torch.cat(losses, dim=0)
-
-    print(f"Shape of predicted states: {predicted_states.shape}")
-    print(f"Shape of losses: {losses.shape}")
 
     # Print out predictions and check if they're all the same
     for i in range(num_preds):
@@ -241,103 +247,22 @@ def main():
     else:
         print("Predictions differ, which is expected for different inputs.")
 
-    # Save predictions and ground truths
-    print("Saved prediction shape:", predicted_states.shape)
-    
-    # Get all targets from the dataloader
-    all_targets = torch.cat([targets for _, targets in test_loader], dim=0)
-    all_targets = torch.roll(all_targets, shifts=1, dims=1)  # shift ground truth by 1
-    
-    print(
-        "Saved ground truth shape:",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
-    )
-    print("Saved losses shape:", losses.shape)
+    print(f"Shape of predicted states: {predicted_states.shape}")
+    print(f"Shape of ground truths: {ground_truths.shape}")
+    print(f"Shape of losses: {losses.shape}")
+
     np.save(
-        f"transformer_{args.controller}_{args.task}_predictions_ar.npy",
+        f"transformer_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"transformer_{args.controller}_{args.task}_ground_truths_ar.npy",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
+        f"transformer_{args.controller}_{args.task}_ground_truths.npy",
+        ground_truths.cpu().numpy(),
     )
-    np.save(f"transformer_{args.controller}_{args.task}_losses_ar.npy", losses.cpu().numpy())
+    np.save(f"transformer_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'transformer_{args.controller}_{args.task}_predictions.npy', 'transformer_{args.controller}_{args.task}_ground_truths.npy', and 'transformer_{args.controller}_{args.task}_losses.npy' respectively."
     )
-
-
-    # # Plotting
-    # plt.style.use("seaborn-v0_8-whitegrid")
-    # sns.set_context("paper", font_scale=1.5)
-    # colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
-
-    # fig = plt.figure(figsize=(20, 8 * num_preds))
-    # gs = GridSpec(
-    #     num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
-    # )
-
-    # for pred_idx in range(num_preds):
-    #     print(f"Plotting prediction {pred_idx + 1}")
-
-    #     # Plot predicted states vs ground truth
-    #     ax1 = fig.add_subplot(gs[pred_idx, 0])
-    #     feature_idx = 0
-
-    #     # Plot ground truth
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
-    #         label="Ground Truth",
-    #         color="black",
-    #         linewidth=2,
-    #         linestyle="--",
-    #     )
-
-    #     # Plot prediction
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
-    #         label="Predicted",
-    #         color=colors[pred_idx],
-    #         linewidth=2,
-    #     )
-
-    #     ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
-    #     ax1.set_xlabel("Time Step")
-    #     ax1.set_ylabel("State Value")
-    #     ax1.legend()
-
-    #     # Plot losses and metrics
-    #     ax2 = fig.add_subplot(gs[pred_idx, 1])
-
-    #     # Plot losses
-    #     ax2.plot(
-    #         range(steps),
-    #         smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
-    #         label="Total Loss",
-    #         color="black",
-    #         linewidth=2,
-    #     )
-
-    #     ax2.set_title(f"Prediction {pred_idx+1}: Loss and Metrics")
-    #     ax2.set_xlabel("Time Step")
-    #     ax2.set_ylabel("Value")
-    #     ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    #     ax2.set_yscale("log")  # Use log scale for better visibility
-
-    # plt.suptitle(
-    #     f"Transformer Predictions for {args.controller} on {args.task}\n",
-    #     fontsize=16,
-    # )
-    # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    # # TODO: Add existok / make if non-existent (results/) directory
-    # plt.savefig(
-    #     f"results/transformer_{args.controller}_{args.task}_predictions.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # plt.show()
 
 
 if __name__ == "__main__":

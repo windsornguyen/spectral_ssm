@@ -89,7 +89,7 @@ class MambaLayer(nn.Module):
         self.ngroups = self.configs.ngroups // self.configs.world_size
 
         # _init_dimensions
-        self.d_inner = (self.configs.expand * self.configs.d_model * self.configs.embd_scale) // self.configs.world_size
+        self.d_inner = (self.configs.expand * self.configs.d_model * self.configs.embd_scale) // self.configs.world_size    # (2 * 32 * 3) = 192
         assert (self.d_inner * self.configs.world_size == self.configs.expand * self.configs.d_model * self.configs.embd_scale)
 
         self.d_ssm = (
@@ -103,6 +103,7 @@ class MambaLayer(nn.Module):
 
         # _init_layers
         d_in_proj = (2 * self.d_inner + 2 * self.ngroups * self.configs.d_state + self.nheads)
+        # (2 * 192 + 2 * 1 * 192 + 192 // 64) = 771
 
         if self.configs.process_group is None:
             self.in_proj = nn.Linear(
@@ -590,3 +591,4 @@ class MambaLayer(nn.Module):
         )
 
         return conv_state, ssm_state
+    

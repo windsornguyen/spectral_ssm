@@ -10,7 +10,6 @@ import torch
 from torch.nn import MSELoss
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import gaussian_filter1d
 from safetensors.torch import load_file
 
 from models.hybrid.model import SpectralHybrid, SpectralHybridConfigs
@@ -20,19 +19,6 @@ from losses.loss_cheetah import HalfCheetahLoss
 from losses.loss_walker import Walker2DLoss
 
 from utils.dataloader import get_dataloader
-
-
-def smooth_curve(points, sigma=2):
-    return gaussian_filter1d(points, sigma=sigma)
-
-
-def plot_losses(losses, title, x_values=None, ylabel="Loss", color=None):
-    if x_values is None:
-        x_values = list(range(len(losses)))
-    plt.plot(x_values, smooth_curve(losses), label=title, color=color)
-    plt.xlabel("Time Step")
-    plt.ylabel(ylabel)
-    plt.legend()
 
 
 def main():
@@ -124,6 +110,38 @@ def main():
     # Load the trained model
     model_path = f"hybrid_{args.controller}_{args.task}.pt"
 
+    # Shared hyperparameters
+    # STU settings
+    num_eigh: int = 16
+    k_y: int = 2
+    k_u: int = 3
+    alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
+    use_ar_y: bool = False
+    use_ar_u: bool = False
+    use_hankel_L: bool = False
+    use_flash_fft: bool = False
+    use_approx: bool = False
+
+    # Transformer settings
+    # pct_attn: float = 0.5 # Percentage of layers using attention
+    flash_attn: bool = True # Whether to use FlashAttention-2 or not
+
+    # MoE
+    moe: bool = True
+    num_experts: int = 3
+    num_experts_per_timestep: int = 2
+
+    # General training settings
+    n_layers: int = 2
+    d_model: int = 32
+    mlp_scale: int = 8
+    embd_scale: int = 3
+    bias: bool = False
+    dropout: float = 0.0 # Convert all these into argparses eventually
+    flash_attn: bool = True
+    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU\
+    use_alibi: bool = False
+
     if args.task != "mujoco-v3":
         if args.controller == "Ant-v1":
             loss_fn = AntLoss()
@@ -138,68 +156,61 @@ def main():
 
     # Task-specific hyperparameters
     if args.task == "mujoco-v1":
-        n_embd: int = 24 if args.controller != "Ant-v1" else 37
+        d_in: int = 24 if args.controller != "Ant-v1" else 37
         n_heads: int = 8 if args.controller != "Ant-v1" else 1
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = d_in  # before projection d_in = d_out
-        d_proj: int = 18 if args.controller != "Ant-v1" else 29
-        sl: int = 1000
+        d_out: int = 18 if args.controller != "Ant-v1" else 29
+        sl: int = 512   # sl supported by flashfftconv
 
     elif args.task == "mujoco-v2":
-        n_embd: int = 18 if args.controller != "Ant-v1" else 29
+        d_in: int = 18 if args.controller != "Ant-v1" else 29
         n_heads: int = 9 if args.controller != "Ant-v1" else 1
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_out = n_embd
-        d_proj = n_embd
-        sl: int = 1000
+        d_out = d_in
+        sl: int = 512
 
     elif args.task == "mujoco-v3":
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        n_embd: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
+        d_in: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
         n_heads: int = 16
-        d_in = n_embd  # TODO: d_in is not exactly the same as n_embd
-        d_proj = n_embd
         sl: int = 300
 
+    window_size: int = sl # Global attention
     configs = SpectralHybridConfigs(
         # STU settings
         d_in=d_in,
         d_out=d_out,
-        d_proj=d_proj,
-        num_eigh=16,
-        k_y=2,
-        k_u=3,
-        learnable_m_y=True,
-        alpha=0.9,
-        use_ar_y=False,
-        use_ar_u=True,
-        use_hankel_L=False,
+        mlp_scale=mlp_scale,
+        embd_scale=embd_scale,
+        num_eigh=num_eigh,
+        k_y=k_y,
+        k_u=k_u,
+        alpha=alpha,
+        use_ar_y=use_ar_y,
+        use_ar_u=use_ar_u,
+        use_hankel_L=use_hankel_L,
+        use_flash_fft=use_flash_fft,
+        use_approx=use_approx,
+
         # Transformer settings
-        n_embd=n_embd,
+        d_model=d_model,
         n_heads=n_heads,
-        sub_rn=True,
-        flash_attn=True,
+        flash_attn=flash_attn,
+        use_sq_relu=use_sq_relu,
+        window_size=window_size,
+        use_alibi=use_alibi,
+        
         # MoE
-        moe=True,
-        num_experts=3,
-        num_experts_per_timestep=2,
-        # Dilated Attention
-        dilated_attn=args.dilated_attn,
-        segment_lengths=args.segment_lengths,
-        dilated_ratios=args.dilated_ratios,
-        seq_parallel=args.seq_parallel,
-        xpos_rel_pos=args.xpos_rel_pos,
-        xpos_scale_base=args.xpos_scale_base,
-        rms_norm_eps=args.rms_norm_eps,
-        multiway=args.multiway,
+        moe=moe,
+        num_experts=num_experts,
+        num_experts_per_timestep=num_experts_per_timestep,
+        
         # General training settings
         sl=sl,
-        n_layers=2,
-        scale=4,
-        bias=False,
-        dropout=0.0,
+        n_layers=n_layers,
+        
+        bias=bias,
+        dropout=dropout,
         loss_fn=loss_fn,
         controls={"task": args.task, "controller": args.controller},
         device=device,
@@ -208,7 +219,8 @@ def main():
     # Initialize and load the model
     model = SpectralHybrid(configs).to(device)
     # model = torch.compile(model)
-    state_dict = load_file(model_path, device="cuda:0")
+    # state_dict = load_file(model_path, device="cuda:0")
+    state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
 
@@ -247,12 +259,14 @@ def main():
     # Run inference
     num_preds = 500
     predicted_states = []
+    ground_truths = []
     losses = []
-    init = 950 if args.task in ["mujoco-v1", "mujoco-v2"] else 295
-
-    # Get the first batch to determine the steps
-    first_batch = next(iter(test_loader))
-    steps = first_batch[0].shape[1] - init
+    init = sl
+    
+    # # Get the first batch to determine the steps
+    # first_batch = next(iter(test_loader))
+    # steps = first_batch[0].shape[1] - init
+    steps = 50
 
     with torch.no_grad():
         for i, (inputs, targets) in enumerate(test_loader):
@@ -263,37 +277,36 @@ def main():
 
             if args.task in ["mujoco-v1", "mujoco-v2"]:
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
                     init=init,
-                    steps=steps,  # Predict the next steps
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
             elif args.task == "mujoco-v3":
                 (
-                    pred_states,
+                    pred_states, pred_truths, 
                     (avg_loss, trajectory_losses),
                 ) = model.predict_states(
                     inputs=inputs,
                     targets=targets,
-                    init=init,  # Use the first 295 steps as context
-                    steps=steps,  # Predict the next steps
+                    init=init,
+                    steps=steps,
                     rollout_steps=1,
                     truth=0,
                 )
 
             predicted_states.append(pred_states)
+            ground_truths.append(pred_truths)
             losses.append(trajectory_losses)
 
     predicted_states = torch.cat(predicted_states, dim=0)
+    ground_truths = torch.cat(ground_truths, dim=0)
     losses = torch.cat(losses, dim=0)
-
-    print(f"Shape of predicted states: {predicted_states.shape}")
-    print(f"Shape of losses: {losses.shape}")
 
     # Print out predictions and check if they're all the same
     for i in range(num_preds):
@@ -316,101 +329,23 @@ def main():
     else:
         print("Predictions differ, which is expected for different inputs.")
 
+    print(f"Shape of predicted states: {predicted_states.shape}")
+    print(f"Shape of ground truths: {ground_truths.shape}")
+    print(f"Shape of losses: {losses.shape}")
+
     # Save predictions and ground truths
-    print("Saved prediction shape:", predicted_states.shape)
-
-    # Get all targets from the dataloader
-    all_targets = torch.cat([targets for _, targets in test_loader], dim=0)
-    all_targets = torch.roll(all_targets, shifts=1, dims=1)  # shift ground truth by 1
-
-    print(
-        "Saved ground truth shape:",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].shape,
-    )
-    print("Saved losses shape:", losses.shape)
     np.save(
-        f"hybrid_{args.controller}_{args.task}_predictions_ar.npy",
+        f"hybrid_{args.controller}_{args.task}_predictions.npy",
         predicted_states.cpu().numpy(),
     )
     np.save(
-        f"hybrid_{args.controller}_{args.task}_ground_truths_ar.npy",
-        all_targets[:num_preds, -predicted_states.shape[1] :, :].cpu().numpy(),
+        f"hybrid_{args.controller}_{args.task}_ground_truths.npy",
+        ground_truths.cpu().numpy(),
     )
-    np.save(f"hybrid_{args.controller}_{args.task}_losses_ar.npy", losses.cpu().numpy())
+    np.save(f"hybrid_{args.controller}_{args.task}_losses.npy", losses.cpu().numpy())
     print(
         f"Predictions, ground truths, and losses saved to 'hybrid_{args.controller}_{args.task}_predictions.npy', 'hybrid_{args.controller}_{args.task}_ground_truths.npy', and 'hybrid_{args.controller}_{args.task}_losses.npy' respectively."
     )
-
-    # # Plotting
-    # plt.style.use("seaborn-v0_8-whitegrid")
-    # sns.set_context("paper", font_scale=1.5)
-    # colors = plt.cm.viridis(np.linspace(0, 1, num_preds))
-
-    # fig = plt.figure(figsize=(20, 8 * num_preds))
-    # gs = GridSpec(
-    #     num_preds, 2, figure=fig, width_ratios=[1, 1.2], wspace=0.3, hspace=0.4
-    # )
-
-    # for pred_idx in range(num_preds):
-    #     print(f"Plotting prediction {pred_idx + 1}")
-
-    #     # Plot predicted states vs ground truth
-    #     ax1 = fig.add_subplot(gs[pred_idx, 0])
-    #     feature_idx = 0
-
-    #     # Plot ground truth
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         test_targets[pred_idx, init : init + steps, feature_idx].cpu().numpy(),
-    #         label="Ground Truth",
-    #         color="black",
-    #         linewidth=2,
-    #         linestyle="--",
-    #     )
-
-    #     # Plot prediction
-    #     ax1.plot(
-    #         range(init, init + steps),
-    #         predicted_states[pred_idx, : steps, feature_idx].cpu().numpy(),
-    #         label="Predicted",
-    #         color=colors[pred_idx],
-    #         linewidth=2,
-    #     )
-
-    #     ax1.set_title(f"Prediction {pred_idx+1}: Predicted vs Ground Truth")
-    #     ax1.set_xlabel("Time Step")
-    #     ax1.set_ylabel("State Value")
-    #     ax1.legend()
-
-    #     # Plot losses
-    #     ax2 = fig.add_subplot(gs[pred_idx, 1])
-
-    #     ax2.plot(
-    #         range(steps),
-    #         smooth_curve(losses[pred_idx, : steps].cpu().numpy()),
-    #         label="Total Loss",
-    #         color="black",
-    #         linewidth=2,
-    #     )
-
-    #     ax2.set_title(f"Prediction {pred_idx+1}: Losses")
-    #     ax2.set_xlabel("Time Step")
-    #     ax2.set_ylabel("Value")
-    #     ax2.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    #     ax2.set_yscale("log")  # Use log scale for better visibility
-
-    # plt.suptitle(
-    #     f"Spectral Hybrid Predictions for {args.controller} on {args.task}\n",
-    #     fontsize=16,
-    # )
-    # plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    # # TODO: Add existok / make if non-existent (results/) directory
-    # plt.savefig(
-    #     f"results/hybrid_{args.controller}_{args.task}_predictions.png",
-    #     dpi=300,
-    #     bbox_inches="tight",
-    # )
-    # plt.show()
 
 
 if __name__ == "__main__":

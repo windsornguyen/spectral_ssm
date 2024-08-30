@@ -134,7 +134,6 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    # TODO: Make these argparse arguments eventually else default to these.
     d_conv: int = 4
     conv_init = None
     expand: int = 2
@@ -158,7 +157,7 @@ def main() -> None:
     dtype: torch.dtype = torch.float32
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -166,8 +165,9 @@ def main() -> None:
     # Data loader hyperparameters
     bsz: int = 2
     n_layers: int = 2
+    d_model: int = 32
     mlp_scale: int = 4
-    embd_scale: int = 1
+    embd_scale: int = 3
     bias: bool = False
     dropout: float = 0.0
     conv_bias: bool = True
@@ -191,7 +191,6 @@ def main() -> None:
     # Task-specific hyperparameters
     if task["mujoco-v1"]:
         d_in: int = 24 if controller != "Ant-v1" else 37
-        d_model: int = 24 if controller != "Ant-v1" else 40
         # headdim: int = (expand * d_model) // world_size
         d_state: int = 128
         headdim: int = 1
@@ -200,7 +199,6 @@ def main() -> None:
 
     elif task["mujoco-v2"]:
         d_in: int = 18 if controller != "Ant-v1" else 29
-        d_model: int = 18 if controller != "Ant-v1" else 32
         d_state: int = 130 if controller != "Ant-v1" else 128
         headdim: int = 1 if controller == "HalfCheetah-v1" else 1
         d_out: int = 18 if controller != "Ant-v1" else 29
@@ -210,7 +208,6 @@ def main() -> None:
         RESNET_D_OUT: int = 512  # ResNet-18 output dim
         RESNET_FEATURE_SIZE: int = 1
         d_out: int = RESNET_D_OUT * RESNET_FEATURE_SIZE**2
-        d_model = d_out
         headdim: int = (expand * d_model) // world_size
         sl: int = 300
 
@@ -228,7 +225,7 @@ def main() -> None:
         conv_init=conv_init,
         expand=expand,
         headdim=headdim,
-        d_ssm=d_ssm * configs.embd_scale,
+        d_ssm=d_ssm,
         ngroups=ngroups,
         A_init_range=A_init_range,
         activation=activation,
@@ -313,6 +310,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -332,6 +330,7 @@ def main() -> None:
         distributed=world_size > 1,
         local_rank=local_rank,
         world_size=world_size,
+        sl=sl,
         noise=noise,
         noise_frequency=noise_frequency,
         eps=eps,
@@ -381,7 +380,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=mamba_model,

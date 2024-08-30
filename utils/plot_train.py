@@ -1,5 +1,5 @@
 # =============================================================================#
-# Authors: Windsor Nguyen, Isabel Liu
+# Authors: Windsor Nguyen
 # File: plot.py
 # =============================================================================#
 
@@ -46,15 +46,10 @@ def plot_data(
     else:
         fig = ax.figure
 
-    line_styles = ['-', '--', '-.', ':']
-    markers = ['o', 's', 'D', '^', 'v', '<', '>', 'p', '*']
-    colors = plt.cm.viridis(np.linspace(0, 1, len(data_list)))
-
-    for i, (data, time_steps, label) in enumerate(zip(data_list, time_steps_list, labels, strict=True)):
+    for data, time_steps, label in zip(data_list, time_steps_list, labels, strict=True):
         if smoothing:
             data = apply_gaussian_smoothing(data)
-        ax.plot(time_steps, data, linewidth=2, label=label, linestyle=line_styles[i % len(line_styles)], 
-                marker=markers[i % len(markers)], color=colors[i], alpha=0.8)
+        ax.plot(time_steps, data, linewidth=2, label=label)
 
     ax.set_title(title, fontsize=18, fontweight="bold")
     ax.set_xlabel(xlabel, fontsize=14)
@@ -71,6 +66,7 @@ def plot_data(
 
     fig.tight_layout()
     return fig, ax
+
 
 def get_user_input(prompt, data_type=str):
     while True:
@@ -247,7 +243,6 @@ def main():
             plot_titles,
             plot_xlabels,
             plot_ylabels,
-            strict=True,
         ):
             plot_data(
                 data_list, time_steps_list, labels, title, xlabel, ylabel, ax, smoothing
@@ -275,7 +270,6 @@ def main():
                 plot_titles,
                 plot_xlabels,
                 plot_ylabels,
-                strict=True,
             )
         ):
             fig, ax = plot_data(

@@ -14,7 +14,7 @@ import torch
 
 from benchmarks.stu import SpectralSSM, SpectralSSMConfigs
 
-#from benchmarks.stu2 import SpectralSSM, SpectralSSMConfigs
+# from benchmarks.stu2 import SpectralSSM, SpectralSSMConfigs
 from benchmarks.transformer import Transformer, TransformerConfigs
 from benchmarks.hybrid import SpectralHybrid, SpectralHybridConfigs
 from benchmarks.mamba import Mamba2, Mamba2Configs
@@ -154,9 +154,7 @@ class Benchmark:
                     )
 
             epoch_loss = total_loss / num_batches
-            print(
-                f"Epoch {current_epoch+1}/{n_epochs}, Average Loss: {epoch_loss:.4f}"
-            )
+            print(f"Epoch {current_epoch+1}/{n_epochs}, Average Loss: {epoch_loss:.4f}")
 
     def evaluate(
         self, dataset_name: str, dataloader: DataLoader
@@ -185,9 +183,9 @@ class Benchmark:
             ):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 preds, loss = self.model(inputs, targets)
-                print('preds', preds)
+                print("preds", preds)
                 print()
-                print('targets', targets)
+                print("targets", targets)
                 total_loss += loss.item()
 
                 if self.task == "copy":
@@ -277,7 +275,7 @@ class Benchmark:
 
         colored_print(f"Dataset: {self.task}", Colors.HEADER)
         colored_print(f"  Validation Loss: {loss:.4f}", Colors.OKBLUE)
-        
+
         if self.task in ["copy", "induction", "associative"]:
             colored_print(f"  Accuracy: {metric:.2f}%", Colors.OKGREEN)
         elif self.task == "adding":
@@ -348,7 +346,7 @@ def get_model(args, device, world_size):
         SpectralSSM: Configured Spectral SSM model.
     """
     if args.model == "transformer":
-        # python -m benchmarks.benchmark --model transformer --learnable_m_y --task {task} --flash_attn --sub_rn
+        # python -m benchmarks.benchmark --model transformer --learnable_m_y --task {task} --flash_attn
         configs = TransformerConfigs(
             # General Transformer settings
             n_layers=args.n_layers,
@@ -359,7 +357,6 @@ def get_model(args, device, world_size):
             sl=args.sl,
             mlp_scale=args.mlp_scale,
             embd_scale=args.embd_scale,
-            sub_rn=args.sub_rn,
             bias=args.bias,
             dropout=args.dropout,
             flash_attn=args.flash_attn,
@@ -476,12 +473,10 @@ def get_model(args, device, world_size):
             conv_bias=args.conv_bias,
             chunk_size=args.chunk_size,
             seq_parallel=args.seq_parallel,
-
             # MoE
             moe=args.moe,
             num_experts=args.num_experts,
             num_experts_per_timestep=args.num_experts_per_timestep,
-
             task=args.task,
             vocab_size=args.vocab_size,
             loss_fn=MSELoss() if args.task == "adding" else CrossEntropyLoss(),
@@ -632,9 +627,7 @@ def main():
     parser.add_argument(
         "--n_epochs", type=int, default=1, help="Number of epochs to train"
     )
-    parser.add_argument(
-        "--bsz", type=int, default=2, help="Batch size for evaluation"
-    )
+    parser.add_argument("--bsz", type=int, default=2, help="Batch size for evaluation")
 
     # Model hyperparameters
     parser.add_argument(
@@ -651,7 +644,6 @@ def main():
     parser.add_argument(
         "--embd_scale", type=int, default=4, help="Embedding scale factor"
     )
-    parser.add_argument("--sub_rn", action="store_true", help="Use sub-layer RMS Norm")
     parser.add_argument("--bias", action="store_true", help="Use bias in the model")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate")
     parser.add_argument(
@@ -676,24 +668,80 @@ def main():
     parser.add_argument("--use_hankel_L", action="store_true", help="Use Hankel-L")
 
     # Mamba-specific arguments
-    parser.add_argument("--d_state", type=int, default=128, help="State dimension for Mamba")
-    parser.add_argument("--d_conv", type=int, default=4, help="Convolution dimension for Mamba")
-    parser.add_argument("--conv_init", type=float, default=None, help="Convolution initialization for Mamba")
-    parser.add_argument("--expand", type=int, default=2, help="Expansion factor for Mamba")
-    parser.add_argument("--headdim", type=int, default=1, help="Head dimension for Mamba")
-    parser.add_argument("--d_ssm", type=int, default=None, help="SSM dimension for Mamba")
-    parser.add_argument("--ngroups", type=int, default=1, help="Number of groups for Mamba")
-    parser.add_argument("--A_init_range", type=float, nargs=2, default=[1, 16], help="A initialization range for Mamba")
-    parser.add_argument("--activation", type=str, default="silu", choices=["silu", "relu", "gelu"], help="Activation function for Mamba")
-    parser.add_argument("--D_has_hdim", action="store_true", help="Whether D has hidden dimension in Mamba")
+    parser.add_argument(
+        "--d_state", type=int, default=128, help="State dimension for Mamba"
+    )
+    parser.add_argument(
+        "--d_conv", type=int, default=4, help="Convolution dimension for Mamba"
+    )
+    parser.add_argument(
+        "--conv_init",
+        type=float,
+        default=None,
+        help="Convolution initialization for Mamba",
+    )
+    parser.add_argument(
+        "--expand", type=int, default=2, help="Expansion factor for Mamba"
+    )
+    parser.add_argument(
+        "--headdim", type=int, default=1, help="Head dimension for Mamba"
+    )
+    parser.add_argument(
+        "--d_ssm", type=int, default=None, help="SSM dimension for Mamba"
+    )
+    parser.add_argument(
+        "--ngroups", type=int, default=1, help="Number of groups for Mamba"
+    )
+    parser.add_argument(
+        "--A_init_range",
+        type=float,
+        nargs=2,
+        default=[1, 16],
+        help="A initialization range for Mamba",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="silu",
+        choices=["silu", "relu", "gelu"],
+        help="Activation function for Mamba",
+    )
+    parser.add_argument(
+        "--D_has_hdim",
+        action="store_true",
+        help="Whether D has hidden dimension in Mamba",
+    )
     parser.add_argument("--rmsnorm", action="store_true", help="Use RMSNorm in Mamba")
-    parser.add_argument("--norm_before_gate", action="store_true", help="Apply normalization before gate in Mamba")
-    parser.add_argument("--dt_min", type=float, default=0.001, help="Minimum delta t for Mamba")
-    parser.add_argument("--dt_max", type=float, default=0.1, help="Maximum delta t for Mamba")
-    parser.add_argument("--dt_init_floor", type=float, default=1e-4, help="Delta t initialization floor for Mamba")
-    parser.add_argument("--dt_limit", type=float, nargs=2, default=[0.0, float("inf")], help="Delta t limit for Mamba")
-    parser.add_argument("--conv_bias", action="store_true", help="Use bias in convolutions for Mamba")
-    parser.add_argument("--chunk_size", type=int, default=256, help="Chunk size for Mamba")
+    parser.add_argument(
+        "--norm_before_gate",
+        action="store_true",
+        help="Apply normalization before gate in Mamba",
+    )
+    parser.add_argument(
+        "--dt_min", type=float, default=0.001, help="Minimum delta t for Mamba"
+    )
+    parser.add_argument(
+        "--dt_max", type=float, default=0.1, help="Maximum delta t for Mamba"
+    )
+    parser.add_argument(
+        "--dt_init_floor",
+        type=float,
+        default=1e-4,
+        help="Delta t initialization floor for Mamba",
+    )
+    parser.add_argument(
+        "--dt_limit",
+        type=float,
+        nargs=2,
+        default=[0.0, float("inf")],
+        help="Delta t limit for Mamba",
+    )
+    parser.add_argument(
+        "--conv_bias", action="store_true", help="Use bias in convolutions for Mamba"
+    )
+    parser.add_argument(
+        "--chunk_size", type=int, default=256, help="Chunk size for Mamba"
+    )
 
     parser.add_argument("--moe", action="store_true", help="Use Mixture of Experts")
     parser.add_argument(
@@ -831,26 +879,7 @@ def main():
             args.noise_level,
             args.seed,
         )
-    elif args.task == "needle_in_haystack":
-        dataset = generate_needle_in_haystack(
-            args.num_examples,
-            args.sequence_len,
-            args.needle_len,
-            args.vocab_size,
-            args.seed,
-        )
-    elif args.task == "telephone_book":
-        dataset = generate_telephone_book(
-            args.num_examples,
-            args.num_entries,
-            args.name_len,
-            args.number_len,
-            args.vocab_size,
-            args.seed,
-        )
-    assert args.bsz <= len(
-        dataset
-    ), "Batch size must be less than the dataset size."
+    assert args.bsz <= len(dataset), "Batch size must be less than the dataset size."
 
     indices = torch.randperm(len(dataset))
     train_size = int(0.8 * len(dataset))

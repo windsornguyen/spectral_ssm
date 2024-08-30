@@ -52,38 +52,33 @@ def load_data(filename):
 
 # Load data
 try:
-    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions_ar.npy")
+    sssm = load_data(f"sssm_{args.controller}_{args.task}_predictions.npy")
     transformer = load_data(
-        f"transformer_{args.controller}_{args.task}_predictions_ar.npy"
+        f"transformer_{args.controller}_{args.task}_predictions.npy"
     )
-    mamba = load_data(f"mamba_{args.controller}_{args.task}_predictions_ar.npy")
-    hybrid = load_data(f"hybrid_{args.controller}_{args.task}_predictions_ar.npy")
+    mamba = load_data(f"mamba_{args.controller}_{args.task}_predictions.npy")
+    hybrid = load_data(f"hybrid_{args.controller}_{args.task}_predictions.npy")
 
-    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths_ar.npy")
+    ground_truth = load_data(f"sssm_{args.controller}_{args.task}_ground_truths.npy")
     transformer_ground_truth = load_data(
-        f"transformer_{args.controller}_{args.task}_ground_truths_ar.npy"
+        f"transformer_{args.controller}_{args.task}_ground_truths.npy"
     )
     mamba_ground_truth = load_data(
-        f"mamba_{args.controller}_{args.task}_ground_truths_ar.npy"
+        f"mamba_{args.controller}_{args.task}_ground_truths.npy"
     )
     hybrid_ground_truth = load_data(
-        f"hybrid_{args.controller}_{args.task}_ground_truths_ar.npy"
+        f"hybrid_{args.controller}_{args.task}_ground_truths.npy"
     )
 
-    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses_ar.npy")
+    sssm_losses = load_data(f"sssm_{args.controller}_{args.task}_losses.npy")
     transformer_losses = load_data(
-        f"transformer_{args.controller}_{args.task}_losses_ar.npy"
+        f"transformer_{args.controller}_{args.task}_losses.npy"
     )
-    mamba_losses = load_data(f"mamba_{args.controller}_{args.task}_losses_ar.npy")
-    hybrid_losses = load_data(f"hybrid_{args.controller}_{args.task}_losses_ar.npy")
+    mamba_losses = load_data(f"mamba_{args.controller}_{args.task}_losses.npy")
+    hybrid_losses = load_data(f"hybrid_{args.controller}_{args.task}_losses.npy")
 except FileNotFoundError as e:
     print(f"Error loading data: {e}")
     exit(1)
-
-if args.controller == "Ant-v1":
-    # Remove zero-padding for Mamba-2
-    mamba = mamba[:, :, :-3]
-    mamba_ground_truth = mamba_ground_truth[:, :, :-3]
 
 # Check if they are the same to ensure we are comparing the right data
 if (
@@ -157,7 +152,7 @@ fig, ax = plt.subplots(figsize=(7, 5))
 ax.plot(
     range(time_steps),
     mean_sssm_losses[:time_steps],
-    label="Averaged Spectral SSM Mean Loss",
+    label="Averaged STU Mean Loss",
     color=colors[0],
     linewidth=2,
 )
@@ -178,7 +173,7 @@ ax.plot(
 ax.plot(
     range(time_steps),
     mean_hybrid_losses[:time_steps],
-    label="Averaged Hybrid Mean Loss",
+    label="Averaged STU-Attention Hybrid Mean Loss",
     color=colors[4],
     linewidth=2,
 )
@@ -189,7 +184,7 @@ ax.set_ylabel("Mean Absolute Error")
 ax.set_title("Mean Loss for Averaged Predictions")
 # Save the mean loss figures
 plt.savefig(
-    f"plots/predict_losses/mean_losses_averaged_{args.controller}_{args.task}_ar.png"
+    f"plots/predict_losses/mean_losses_averaged_{args.controller}_{args.task}.png"
 )
 plt.close(fig)
 
@@ -215,7 +210,7 @@ for feature_idx in range(feature_start, feature_end):
     axs[i].plot(
         range(time_steps),
         mean_sssm[:time_steps, feature_idx],
-        label="Mean Spectral SSM Prediction",
+        label="Mean STU Prediction",
         color=colors[0],
         linewidth=2,
     )
@@ -236,7 +231,7 @@ for feature_idx in range(feature_start, feature_end):
     axs[i].plot(
         range(time_steps),
         mean_hybrid[:time_steps, feature_idx],
-        label="Mean Hybrid Prediction",
+        label="Mean STU-Attention Hybrid Prediction",
         color=colors[4],
         linewidth=2,
     )
@@ -256,7 +251,7 @@ plt.tight_layout()
 
 # Save the figure with all subplots
 plt.savefig(
-    f"plots/preds/mean_preds_{args.controller}_{args.task}_{args.feature}_ar.png"
+    f"plots/preds/mean_preds_{args.controller}_{args.task}_{args.feature}.png"
 )
 plt.show()
 plt.close(fig)

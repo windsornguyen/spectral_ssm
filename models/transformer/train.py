@@ -72,7 +72,7 @@ def save_results(
     return fpath
 
 
-# Example: `torchrun -m --nproc_per_node=1 models.transformer.train_transformer --controller Ant-v1 --task mujoco-v3`
+# Example: `torchrun -m --nproc_per_node=1 models.transformer.train_transformer --controller Ant-v1 --task mujoco-v1`
 def main() -> None:
     torch.set_float32_matmul_precision("high")  # Enable CUDA TensorFloat-32
 
@@ -105,56 +105,6 @@ def main() -> None:
         help="Training on the Princeton Della cluster. Defaults to True.",
         # NOTE: You MUST run with `torchrun` for this to work in the general setting.
     )
-    parser.add_argument(
-        "--dilated_attn",
-        type=bool,
-        default=False,
-        help="Whether to use dilated attention. Defaults to False.",
-    )
-    parser.add_argument(
-        "--segment_lengths",
-        type=int,
-        nargs="+",
-        default=[128, 256, 512],
-        help="Segment lengths for dilated attention. Defaults to [128, 256, 512].",
-    )
-    parser.add_argument(
-        "--dilated_ratios",
-        type=int,
-        nargs="+",
-        default=[1, 2, 4],
-        help="Dilation ratios for dilated attention. Defaults to [1, 2, 4].",
-    )
-    parser.add_argument(
-        "--seq_parallel",
-        type=bool,
-        default=True,
-        help="Whether to use sequence parallelism. Defaults to True.",
-    )
-    parser.add_argument(
-        "--xpos_rel_pos",
-        type=bool,
-        default=False,
-        help="Whether to use relative positional embeddings. Defaults to False.",
-    )
-    parser.add_argument(
-        "--xpos_scale_base",
-        type=int,
-        default=512,
-        help="Scale base for positional embeddings. Defaults to 512.",
-    )
-    parser.add_argument(
-        "--rms_norm_eps",
-        type=float,
-        default=1e-5,
-        help="Epsilon for root mean square normalization. Defaults to 1e-5.",
-    )
-    parser.add_argument(
-        "--multiway",
-        type=bool,
-        default=False,
-        help="Whether to use multiway attention. Defaults to False.",
-    )
 
     args = parser.parse_args()
 
@@ -184,31 +134,20 @@ def main() -> None:
             os.makedirs("results/")
 
     # Shared hyperparameters
-    n_layers: int = 2
+    n_layers: int = 4
     d_model: int = 32
     embd_scale: int = 1
-    mlp_scale: int = 6
-    sub_rn: bool = True # Whether to use a sub-layer RMS Norm or not
+    mlp_scale: int = 4
     bias: bool = False
-    dropout: float = 0.0 # Convert all these into argparses eventually
+    dropout: float = 0.0
     flash_attn: bool = True
-    use_sq_relu: bool = False # Performs BETTER with Squared ReGLU
-    use_alibi: bool = True
+    use_sq_relu: bool = False # Observed to perform slightly better with Squared ReGLU
+    use_alibi: bool = False
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
-
-    # Dilated Attention
-    dilated_attn = args.dilated_attn
-    segment_lengths = args.segment_lengths
-    dilated_ratios = args.dilated_ratios
-    seq_parallel = args.seq_parallel
-    xpos_rel_pos = args.xpos_rel_pos
-    xpos_scale_base = args.xpos_scale_base
-    rms_norm_eps = args.rms_norm_eps
-    multiway = args.multiway
 
     if not task["mujoco-v3"]:
         if controller == "Ant-v1":
@@ -243,6 +182,7 @@ def main() -> None:
         d_out = d_in
         sl: int = 300
 
+    window_size: int = sl # Global attention
     configs = TransformerConfigs(
         # General Transformer settings
         n_layers=n_layers,
@@ -251,9 +191,9 @@ def main() -> None:
         d_out=d_out,
         n_heads=n_heads,
         sl=sl,
+        window_size=window_size,
         mlp_scale=mlp_scale,
         embd_scale=embd_scale,
-        sub_rn=sub_rn,
         bias=bias,
         dropout=dropout,
         flash_attn=flash_attn,
@@ -267,16 +207,6 @@ def main() -> None:
         moe=moe,
         num_experts=num_experts,
         num_experts_per_timestep=num_experts_per_timestep,
-
-        # Dilated Attention
-        dilated_attn=dilated_attn,
-        segment_lengths=segment_lengths,
-        dilated_ratios=dilated_ratios,
-        seq_parallel=seq_parallel,
-        xpos_rel_pos=xpos_rel_pos,
-        xpos_scale_base=xpos_scale_base,
-        rms_norm_eps=rms_norm_eps,
-        multiway=multiway,
     )
 
     model = Transformer(configs).to(device)
@@ -286,13 +216,9 @@ def main() -> None:
     transformer_model = model.module if world_size > 1 else model
 
     # Data loader hyperparameters
-    # TODO: Add accumulated gradients to this
-    # TODO: Make data loader better
-    # TODO: Add print statement reporting our batch size and accumulated batch size
     bsz: int = 2 // world_size
     preprocess: bool = True
 
-    # TODO: Put in v2 data (no controls)
     mujoco_v1_base = f"data/mujoco-v1/{args.controller}/"
     mujoco_v2_base = f"data/mujoco-v2/{args.controller}/"
     mujoco_v3_base = f"data/mujoco-v3/{args.controller}/"
@@ -320,11 +246,8 @@ def main() -> None:
     else:
         raise ValueError("Invalid task")
 
-    # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
-    eps=1e-5,
-    # noise = 0.5
-    # noise_frequency = 0.2
+    eps = 1e-5,
     noise = 0.0
     noise_frequency = 0.0
 
@@ -409,7 +332,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=transformer_model,
@@ -449,6 +372,11 @@ def main() -> None:
             )
         else:
             colored_print(f"{msg} with {device} today.", Colors.OKCYAN)
+
+    # Set manual seed for reproducibility
+    torch.manual_seed(42)  # You can use any integer value here
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
 
     # Training loop
     timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -561,6 +489,11 @@ def main() -> None:
         if patient_counter >= patience:
             break
 
+    # Remove manual seed
+    torch.seed()
+    if torch.cuda.is_available():
+        torch.cuda.seed_all()
+
     # Post-training processing
     if main_process:
         if best_checkpoint:
@@ -643,20 +576,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    # if main_process and generate_loss_landscape:
-    #     loss_landscape = LossLandscape(
-    #         transformer_model, device, training_run.optimizer, max_lr, main_process
-    #     )
-    #     x_range = (-1, 1, 10)    # adjust as needed
-    #     y_range = (-1, 1, 10)
-    #     loss_landscape.generate(
-    #         train_loader,
-    #         f"landscapes/loss_landscape-{timestamp}",
-    #         x_range=x_range,
-    #         y_range=y_range,
-    #         plot_loss_landscape=True,
-    #         plot_hessian=True,
-    #     )
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            transformer_model, device, training_run.optimizer, max_lr, main_process, dtype=torch.bfloat16
+        )
+        x_range = (-1, 1, 10)    # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

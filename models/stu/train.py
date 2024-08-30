@@ -137,7 +137,7 @@ def main() -> None:
 
     # Shared hyperparameters
     # TODO: Make these argparse arguments eventually else default to these.
-    n_layers: int = 2
+    n_layers: int = 4
     d_model: int = 32
     embd_scale: int = 1
     mlp_scale: int = 4
@@ -146,16 +146,16 @@ def main() -> None:
     num_eigh: int = 16
     k_y: int = 2
     k_u: int = 3
-    learnable_m_y: bool = True
+    learnable_m_y: bool = False
     alpha: float = 0.9  # 0.9 deemed "uniformly optimal" in the paper
     use_ar_y: bool = False
-    use_ar_u: bool = True
+    use_ar_u: bool = False
     use_hankel_L: bool = False
-    use_flash_fft: bool = True
+    use_flash_fft: bool = False
     use_approx: bool = True
 
     # MoE
-    moe: bool = True
+    moe: bool = False
     num_experts: int = 3
     num_experts_per_timestep: int = 2
 
@@ -233,9 +233,9 @@ def main() -> None:
         model = DDP(model, device_ids=[local_rank], gradient_as_bucket_view=True)
     stu_model = model.module if world_size > 1 else model
     flops, mfu = None, None
-        
+
     # Data loader hyperparameters
-    bsz: int = 2
+    bsz: int = 2 // world_size
     preprocess: bool = True
 
     # TODO: Put in v2 data (no controls)
@@ -269,8 +269,8 @@ def main() -> None:
     # TODO: May need to condition the dataloader shift on mujoco-v3 task only?
     shift = 1
     eps = 1e-5
-    noise = 0.0
-    noise_frequency = 0.2
+    noise = 0.5
+    noise_frequency = 0.1
 
     train_loader = get_dataloader(
         # TODO: Generalize model= to argparse
@@ -358,7 +358,7 @@ def main() -> None:
         weight_decay,
         use_amsgrad,
     )
-    generate_loss_landscape = True
+    generate_loss_landscape = False
 
     training_run = exp.Experiment(
         model=stu_model,
@@ -615,20 +615,20 @@ def main() -> None:
                 Colors.OKGREEN,
             )
 
-    # if main_process and generate_loss_landscape:
-    #     loss_landscape = LossLandscape(
-    #         stu_model, device, training_run.optimizer, max_lr, main_process
-    #     )
-    #     x_range = (-1, 1, 10)   # adjust as needed
-    #     y_range = (-1, 1, 10)
-    #     loss_landscape.generate(
-    #         train_loader,
-    #         f"landscapes/loss_landscape-{timestamp}",
-    #         x_range=x_range,
-    #         y_range=y_range,
-    #         plot_loss_landscape=True,
-    #         plot_hessian=True,
-    #     )
+    if main_process and generate_loss_landscape:
+        loss_landscape = LossLandscape(
+            stu_model, device, training_run.optimizer, max_lr, main_process
+        )
+        x_range = (-1, 1, 10)   # adjust as needed
+        y_range = (-1, 1, 10)
+        loss_landscape.generate(
+            train_loader,
+            f"landscapes/loss_landscape-{timestamp}",
+            x_range=x_range,
+            y_range=y_range,
+            plot_loss_landscape=True,
+            plot_hessian=True,
+        )
 
 if __name__ == "__main__":
     main()

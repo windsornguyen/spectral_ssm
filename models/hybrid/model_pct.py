@@ -44,7 +44,6 @@ class SpectralHybridConfigs:
     # Transformer settings
     n_embd: int = 37 # Constraint: n_heads % n_embd == 0
     n_heads: int = 16 # Constraint: n_heads % n_embd == 0
-    sub_rn: bool = True
     pct_attn: float = 0.08 # Percentage of layers using attention
     flash_attn: bool = True
     use_sq_relu: bool = False
